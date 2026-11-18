@@ -906,9 +906,16 @@ const NO_PASSWORD_MANAGER: &str =
 /// The end of the signup flow: the tenant exists and the daemon is running.
 ///
 /// ONE BUTTON, THE DOWNLOAD. Somebody arriving from an invite email has no app
-/// yet, and the app's own onboarding signs in with Gmail and pairs itself
-/// through [`app_signed_in`], so this page carries no deep link and no pairing
-/// code: a second connect path here was a step the app already does.
+/// yet, and the app pairs itself through [`app_signed_in`], so this page
+/// carries no deep link and no pairing code: a second connect path here was a
+/// step the app already does.
+///
+/// "IT CONNECTS RIGHT AWAY" IS TRUE because of what this response leaves
+/// behind: the handler sets a one-shot handoff cookie beside it, and the app's
+/// first sign-in from this browser spends it instead of going back to Google
+/// (see [`crate::cookie::HandoffClaim`]). The copy names the button the app
+/// shows rather than claiming no button at all. From another browser or after a
+/// day it is one ordinary Google sign-in, which is what everybody got before.
 ///
 /// THE IPHONE IS THE SECOND THING, NOT A SECOND BUTTON. Under the download sits
 /// a quiet block with a QR code for the TestFlight alpha: this page is almost
@@ -924,7 +931,7 @@ pub fn success(tenant_url: &str) -> Response {
         "Your mailbox is ready",
         &format!(
             r#"<h1>Your mailbox is ready</h1>
-<p class="lead">{host} is live. Get the app, then sign in to finish.</p>
+<p class="lead">{host} is live. Get the app and press Sign in. It connects right away.</p>
 <a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>
 <section class="phone" aria-labelledby="phone-label">
 {qr}<div>
@@ -1666,12 +1673,15 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"));
     }
 
-    /// The signup's last page is the download and nothing else: the app's own
-    /// onboarding signs in and pairs, so no code and no deep link ride here.
+    /// The signup's last page is the download and nothing else: the app pairs
+    /// on the handoff this signup leaves, so no code and no deep link ride
+    /// here, and the page no longer tells anybody a sign-in is still owed.
     #[tokio::test]
     async fn the_success_page_is_the_download_and_nothing_else() {
         let html = document_of(success("https://ada.passband.email")).await;
         assert!(html.contains("ada.passband.email"), "{html}");
+        assert!(html.contains("It connects right away."), "{html}");
+        assert!(!html.contains("sign in to finish"), "{html}");
         assert!(
             html.contains(&format!(r#"href="{DOWNLOAD_URL}""#)),
             "{html}"

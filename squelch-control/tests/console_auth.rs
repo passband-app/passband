@@ -1247,3 +1247,158 @@ async fn the_two_login_hops_share_one_budget() {
     }
     assert_eq!(refused, 5, "the shared bucket holds one stated capacity");
 }
+
+// ---- the signup-to-app handoff --------------------------------------------
+
+/// A handoff cookie pair, signed with the harness key the way a finished signup
+/// signs one, for `label`, issued `age_secs` ago.
+fn handoff_cookie(label: &str, nonce: &str, age_secs: i64) -> String {
+    let claim = cookie::HandoffClaim::new(
+        label,
+        nonce.to_string(),
+        chrono::Utc::now().timestamp() - age_secs,
+    );
+    format!(
+        "{}={}",
+        cookie::HANDOFF_COOKIE_NAME,
+        cookie::sign_handoff(&COOKIE_KEY, &claim)
+    )
+}
+
+/// Every `Set-Cookie` on a response.
+fn set_cookies(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect()
+}
+
+/// Whether a response clears the handoff cookie.
+fn clears_handoff(headers: &HeaderMap) -> bool {
+    set_cookies(headers).iter().any(|c| {
+        c.starts_with(&format!("{}=;", cookie::HANDOFF_COOKIE_NAME)) && c.contains("Max-Age=0")
+    })
+}
+
+/// THE POINT OF THE HANDOFF: the browser that just finished a signup opens the
+/// app login and gets the pairing page straight back. No redirect, no token
+/// exchange, a code minted for the label the cookie names, and the cookie
+/// cleared on the way out.
+#[tokio::test]
+async fn a_fresh_handoff_signs_the_app_in_without_google() {
+    let h = Harness::new().await;
+    let cookie = handoff_cookie(LABEL, "nonce-fresh", 60);
+
+    let (status, headers, body) = h.get("/app/auth", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(headers.get(header::LOCATION).is_none(), "{headers:?}");
+
+    let link =
+        format!("passband://pair?url=https%3A%2F%2F{LABEL}.passband.test&amp;code={PAIR_CODE}");
+    assert!(body.contains(&link), "{body}");
+    // The page names the mailbox the tenant was set up with.
+    assert!(body.contains("ada@example.com"), "{body}");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store, no-cache");
+    assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+    assert!(clears_handoff(&headers), "{:?}", set_cookies(&headers));
+    // No flow session was opened, because nothing went to Google.
+    assert!(
+        !set_cookies(&headers)
+            .iter()
+            .any(|c| c.starts_with(&format!("{}=", cookie::COOKIE_NAME))),
+        "{:?}",
+        set_cookies(&headers)
+    );
+
+    let rec = h.rec.lock().unwrap();
+    assert!(rec.token_form.is_empty(), "nothing was exchanged at Google");
+    assert_eq!(rec.pair_calls, vec![LABEL.to_string()]);
+}
+
+/// ONE-SHOT, held by the store rather than by the browser forgetting: the same
+/// cookie presented again goes to Google like any other app login, and mints
+/// nothing on the way.
+#[tokio::test]
+async fn a_spent_handoff_falls_through_to_google() {
+    let h = Harness::new().await;
+    let cookie = handoff_cookie(LABEL, "nonce-once", 60);
+
+    let (status, _, body) = h.get("/app/auth", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, headers, body) = h.get("/app/auth", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::FOUND, "{body}");
+    let location = headers[header::LOCATION].to_str().unwrap();
+    assert!(location.contains("/authorize"), "{location}");
+    assert!(clears_handoff(&headers), "{:?}", set_cookies(&headers));
+    assert_eq!(h.rec.lock().unwrap().pair_calls, vec![LABEL.to_string()]);
+}
+
+/// A handoff that is forged, expired, or for a tenant that is not active here
+/// is never a refusal: it is an ordinary trip to Google, and the cookie is
+/// cleared so it stops riding along.
+#[tokio::test]
+async fn an_unusable_handoff_is_only_ever_a_trip_to_google() {
+    let h = Harness::new().await;
+
+    let fresh = handoff_cookie(LABEL, "nonce-tamper", 60);
+    let (name_value, mac) = fresh.rsplit_once('.').unwrap();
+    let tampered = format!("{name_value}.{}", mac.chars().rev().collect::<String>());
+    let expired = handoff_cookie(LABEL, "nonce-old", cookie::HANDOFF_COOKIE_TTL_SECS + 5);
+    let nobody = handoff_cookie("nobody", "nonce-nobody", 60);
+    // A perfectly good SESSION claim under the handoff's name is not a handoff.
+    let session = format!(
+        "{}={}",
+        cookie::HANDOFF_COOKIE_NAME,
+        cookie::sign(
+            &COOKIE_KEY,
+            &SessionClaim {
+                sid: "s".repeat(43),
+                label: LABEL.into(),
+                invite: None,
+                app: true,
+                reconnect: false,
+                agent: false,
+                iat: chrono::Utc::now().timestamp(),
+            }
+        )
+    );
+
+    for (what, cookie) in [
+        ("tampered", tampered),
+        ("expired", expired),
+        ("unknown tenant", nobody),
+        ("session claim", session),
+    ] {
+        let (status, headers, body) = h.get("/app/auth", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::FOUND, "{what}: {body}");
+        let location = headers[header::LOCATION].to_str().unwrap();
+        assert!(location.contains("/authorize"), "{what}: {location}");
+        assert!(clears_handoff(&headers), "{what}");
+    }
+    assert!(h.rec.lock().unwrap().pair_calls.is_empty());
+
+    // And no cookie at all is the old behaviour exactly: nothing to clear.
+    let (status, headers, _) = h.get("/app/auth", None).await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert!(!clears_handoff(&headers));
+}
+
+/// The handoff names the tenant just created, whichever company it is at, so
+/// it wins over `?provider=`. This deployment has no Microsoft app, so without
+/// the handoff the same URL is "unavailable"; with it, the person is signed in.
+/// `?theme=` rides along untouched.
+#[tokio::test]
+async fn a_handoff_wins_over_the_provider_parameter() {
+    let h = Harness::new().await;
+    let (status, _, _) = h.get("/app/auth?provider=microsoft", None).await;
+    assert_ne!(status, StatusCode::FOUND, "no Microsoft app here");
+
+    let cookie = handoff_cookie(LABEL, "nonce-ms", 60);
+    let (status, _, body) = h
+        .get("/app/auth?provider=microsoft&theme=dark", Some(&cookie))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(PAIR_CODE), "{body}");
+}

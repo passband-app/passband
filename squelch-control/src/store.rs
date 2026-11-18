@@ -140,7 +140,8 @@ const RETENTION_FACTS_LIMIT: i64 = 10_000;
 /// read as expired. `COLLATE "C"` is memcmp, which is the promise the format
 /// was designed against.
 ///
-/// THE EXCEPTION IS THE TWO `reconnect_*` TABLES, whose stamps are `TIMESTAMPTZ`.
+/// THE EXCEPTION IS THE TWO `reconnect_*` TABLES AND `handoff_spends`, whose
+/// stamps are `TIMESTAMPTZ`.
 /// Nothing in this crate ever binds a [`stamp`] against them: every comparison
 /// they take part in is written in SQL against `now()`, and their intervals
 /// (a lease, a backoff, a day) are SQL arithmetic too, so the string-ordering
@@ -170,6 +171,16 @@ CREATE TABLE IF NOT EXISTS reconnect_views (
     token_hash TEXT PRIMARY KEY,
     job_id TEXT NOT NULL REFERENCES reconnect_jobs(id) ON DELETE CASCADE,
     expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '1 day'
+);
+-- Every signup-to-app handoff that has been used, by nonce. A row existing IS
+-- the spend: the INSERT that creates it is the one-shot check, so two control
+-- tasks presented the same cookie at the same moment cannot both win. Rows
+-- outlive the cookie's own day by a margin and are pruned on the way in; a
+-- nonce whose row is gone belongs to a cookie that no longer verifies.
+CREATE TABLE IF NOT EXISTS handoff_spends (
+    nonce    TEXT PRIMARY KEY,
+    label    TEXT NOT NULL,
+    spent_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS tenants (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -2013,6 +2024,36 @@ impl ControlStore {
             )
             .await?;
         row.map(|r| Ok(r.try_get(0)?)).transpose()
+    }
+
+    /// Spend a signup-to-app handoff: `true` exactly once per nonce, `false`
+    /// for every later presentation of it.
+    ///
+    /// ONE STATEMENT IS THE CHECK. `ON CONFLICT DO NOTHING` on the primary key
+    /// means two requests racing with the same cookie, on one task or two, see
+    /// one inserted row between them, and only that one goes on to mint a
+    /// pairing code. The label rides along for an operator reading the table,
+    /// and decides nothing.
+    ///
+    /// Rows older than two days are pruned first. The cookie verifies for one,
+    /// so a pruned nonce is one whose cookie is already refused before it
+    /// reaches here.
+    pub async fn spend_handoff(&self, nonce: &str, label: &str) -> Result<bool> {
+        let client = self.client().await?;
+        client
+            .execute(
+                "DELETE FROM handoff_spends WHERE spent_at < now() - interval '2 days'",
+                &[],
+            )
+            .await?;
+        let inserted = client
+            .execute(
+                "INSERT INTO handoff_spends (nonce, label) VALUES ($1, $2)
+                 ON CONFLICT (nonce) DO NOTHING",
+                &[&nonce, &label],
+            )
+            .await?;
+        Ok(inserted == 1)
     }
 
     /// The labels the retention poller should ask about next: signed up, an
@@ -4181,6 +4222,39 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
             })
             && parts[2].starts_with('4')
             && matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b')
+    }
+
+    /// A handoff is spent once, and the second presentation of the same nonce
+    /// is told so whichever store handle (one per control task) asks. A spend
+    /// from long enough ago to have been pruned is gone, which is safe because
+    /// its cookie stopped verifying a day before.
+    #[tokio::test]
+    async fn a_handoff_is_spent_exactly_once_across_handles() {
+        let url = fresh_schema().await;
+        let one = ControlStore::connect(&url).await.unwrap();
+        let two = ControlStore::connect(&url).await.unwrap();
+
+        assert!(one.spend_handoff("nonce-a", "ada").await.unwrap());
+        assert!(!one.spend_handoff("nonce-a", "ada").await.unwrap());
+        assert!(!two.spend_handoff("nonce-a", "ada").await.unwrap());
+        // A different nonce for the same label is a different signup.
+        assert!(two.spend_handoff("nonce-b", "ada").await.unwrap());
+
+        let raw = raw_client(&url).await;
+        raw.execute(
+            "UPDATE handoff_spends SET spent_at = now() - interval '3 days' WHERE nonce = 'nonce-a'",
+            &[],
+        )
+        .await
+        .unwrap();
+        // The next spend prunes it on the way in.
+        assert!(one.spend_handoff("nonce-c", "ada").await.unwrap());
+        let left: i64 = raw
+            .query_one("SELECT count(*) FROM handoff_spends", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(left, 2);
     }
 
     /// One id per person, shaped the way the app will insist on, and NEVER

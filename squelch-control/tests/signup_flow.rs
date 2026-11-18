@@ -1475,6 +1475,54 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     assert_eq!(rec.status_lookups, vec!["ada".to_string()]);
 }
 
+/// ONE GOOGLE TRIP, NOT TWO. A finished signup leaves a handoff cookie scoped
+/// to the app login, and the app's first `/app/auth` from the same browser
+/// comes straight back with a pairing code for the tenant just made. The same
+/// cookie a second time is an ordinary trip to Google.
+#[tokio::test]
+async fn a_finished_signup_signs_the_app_in_without_a_second_google_trip() {
+    let h = Harness::new().await;
+    let (consent, cookie) = h.start_signup("ada").await;
+    let (status, headers, body) = h
+        .get(
+            &format!(
+                "/oauth/callback?code=the-auth-code&state={}",
+                state_param(&consent)
+            ),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("It connects right away."), "{body}");
+
+    let handoff = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .find(|c| c.starts_with("pb_handoff="))
+        .expect("the signup leaves a handoff");
+    assert!(handoff.contains("Path=/app;"), "{handoff}");
+    assert!(handoff.contains("HttpOnly"), "{handoff}");
+    assert!(handoff.contains("SameSite=Lax"), "{handoff}");
+    assert!(handoff.contains("Max-Age=86400"), "{handoff}");
+    let pair = handoff.split(';').next().unwrap().to_string();
+
+    let (status, headers, body) = h.get("/app/auth", Some(&pair)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(headers.get(header::LOCATION).is_none());
+    assert!(body.contains("ABCD-EFGH"), "{body}");
+    assert!(body.contains("passband://pair"), "{body}");
+
+    let (status, headers, _) = h.get("/app/auth", Some(&pair)).await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert!(
+        headers[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("/authorize")
+    );
+}
+
 /// THE OTHER DOOR, and the case that made `account_email` a column: an invite
 /// MAILED to one address, redeemed by a Google account that is a different
 /// address. A bearer code cannot promise otherwise, and before this the board

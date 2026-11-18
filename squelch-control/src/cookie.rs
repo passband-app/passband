@@ -30,6 +30,17 @@
 //! requests another SITE's page causes, which is half the CSRF defense on the
 //! admin POSTs; the sibling subdomains it does not cover are handled by the
 //! origin check in [`crate::admin`].
+//!
+//! THE HANDOFF COOKIE is the third claim, and it is separated the same two
+//! ways. A signup that just finished at Google leaves one behind, and the app
+//! login that follows in the same browser spends it instead of sending the
+//! person to Google a second time (see [`crate::handlers::app_auth`]). Its own
+//! name, `Path=/app` so it rides on nothing but that route, and a required
+//! `aud` of [`HANDOFF_AUD`]: an admin claim carries a different `aud` and no
+//! label or nonce, a session claim carries no `aud` at all, and a handoff
+//! claim carries no `sid` or `tfp`, so none of the three verifies as another.
+//! The cookie is a shortcut and never a credential the server keeps
+//! believing: [`HandoffClaim::nonce`] is spent server side exactly once.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -88,6 +99,21 @@ pub const RECONNECT_COOKIE_NAME: &str = "pb_reconnect";
 /// the server-side view lives, for the reason the signup pair match: one
 /// outliving the other is a page that cannot answer but can still be asked.
 pub const RECONNECT_COOKIE_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// The signup-to-app handoff cookie. Its own name, because it outlives the
+/// ten-minute hop the signup cookie marks and is cleared on a different
+/// answer.
+pub const HANDOFF_COOKIE_NAME: &str = "pb_handoff";
+
+/// How long a finished signup can stand in for the app's first sign-in. A DAY,
+/// because the success page says "get the app" and some people install it the
+/// next morning. The nonce is one-shot server side, so the window bounds how
+/// long an unspent cookie is worth anything, not how many times it can be used.
+pub const HANDOFF_COOKIE_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// The `aud` every handoff claim carries. Distinct from [`ADMIN_AUD`], so the
+/// two `aud`-bearing claims are told apart by value as well as by shape.
+pub const HANDOFF_AUD: &str = "handoff";
 
 /// The `aud` every admin claim carries and no other claim in this crate does.
 /// The marker is what makes the two claim types different DOCUMENTS under one
@@ -215,6 +241,46 @@ impl AdminClaim {
     }
 }
 
+/// What the handoff cookie asserts: that THIS browser just finished a signup
+/// for `label`, and when.
+///
+/// WHY IT IS SAFE TO SKIP GOOGLE ON IT. The cookie is only ever set on the
+/// response that completes a signup, so it lands in the browser that just
+/// approved Google's consent for that very mailbox; an app login from that
+/// browser inside the window would be waved through by Google anyway. It is
+/// `HttpOnly`, bound to this host, scoped to `/app`, good for a day, and its
+/// nonce is spent server side the first time it is used, so a copy presented
+/// again is worth nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffClaim {
+    /// Always [`HANDOFF_AUD`]. No default and no `Option`, for the reason
+    /// [`AdminClaim::aud`] has none.
+    pub aud: String,
+    /// The tenant the signup created. Looked up again on use, so a tenant torn
+    /// down since is not signed in to on the strength of this.
+    pub label: String,
+    /// A random one-shot id. Recorded when the handoff is spent, which is what
+    /// makes a second presentation fall through to Google rather than mint a
+    /// second pairing code. Never logged.
+    pub nonce: String,
+    /// Issued-at, unix seconds. The TTL is enforced on the server, so this is
+    /// signed rather than trusted.
+    pub iat: i64,
+}
+
+impl HandoffClaim {
+    /// The claim a finished signup signs. The only constructor callers need,
+    /// so `aud` cannot be spelled wrong at a call site.
+    pub fn new(label: &str, nonce: String, now_unix: i64) -> Self {
+        Self {
+            aud: HANDOFF_AUD.to_string(),
+            label: label.to_string(),
+            nonce,
+            iat: now_unix,
+        }
+    }
+}
+
 /// A short, one-way name for an admin token.
 ///
 /// Truncated to 16 hex characters (64 bits) because this is an equality check
@@ -243,6 +309,11 @@ pub fn sign(key: &[u8], claim: &SessionClaim) -> String {
 /// public function, so a caller cannot sign the wrong claim type into the
 /// wrong cookie by inference.
 pub fn sign_admin(key: &[u8], claim: &AdminClaim) -> String {
+    sign_claim(key, claim)
+}
+
+/// The same, for a handoff claim.
+pub fn sign_handoff(key: &[u8], claim: &HandoffClaim) -> String {
     sign_claim(key, claim)
 }
 
@@ -283,6 +354,22 @@ pub fn verify_admin(key: &[u8], token: &str, value: &str, now_unix: i64) -> Opti
         return None;
     }
     fresh(claim.iat, now_unix, ADMIN_COOKIE_TTL_SECS).then_some(claim)
+}
+
+/// Verify and decode a HANDOFF cookie value.
+///
+/// The MAC is ours, the payload is a handoff claim (`aud` present and
+/// [`HANDOFF_AUD`]), and it is inside [`HANDOFF_COOKIE_TTL_SECS`]; every
+/// failure is the same `None`, which the caller answers by going to Google as
+/// if no cookie had been sent. Whether the nonce is still unspent is the
+/// store's question, not this function's.
+pub fn verify_handoff(key: &[u8], value: &str, now_unix: i64) -> Option<HandoffClaim> {
+    let payload = authentic_payload(key, value)?;
+    let claim: HandoffClaim = serde_json::from_slice(&payload).ok()?;
+    if claim.aud != HANDOFF_AUD {
+        return None;
+    }
+    fresh(claim.iat, now_unix, HANDOFF_COOKIE_TTL_SECS).then_some(claim)
 }
 
 /// The bytes of a cookie whose MAC is ours, or `None`. Everything before the
@@ -375,6 +462,25 @@ pub fn set_reconnect_cookie(value: &str, secure: bool) -> String {
     )
 }
 
+/// The `Set-Cookie` value that leaves a finished signup's handoff behind.
+/// `HttpOnly`, `SameSite=Lax`, no `Domain`, and `Secure` whenever the origin is
+/// https, for the signup cookie's reasons. `Lax` because the app opens
+/// `/app/auth` as a top-level navigation, which `Lax` admits. `Path=/app`, so
+/// it rides on the app login and nothing else.
+pub fn set_handoff_cookie(value: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{HANDOFF_COOKIE_NAME}={value}; Path=/app; Max-Age={HANDOFF_COOKIE_TTL_SECS}; HttpOnly; SameSite=Lax{secure}"
+    )
+}
+
+/// The `Set-Cookie` value that clears the handoff: on the answer that spends
+/// it, and on any app login that presented one it could not use.
+pub fn clear_handoff_cookie(secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!("{HANDOFF_COOKIE_NAME}=; Path=/app; Max-Age=0; HttpOnly; SameSite=Lax{secure}")
+}
+
 /// Pull our cookie out of a `Cookie` header. Hand-parsed rather than pulled in
 /// as a dependency: the header is a `;`-separated list of `name=value`, and the
 /// value we care about is base64url and a dot, so there is nothing to unquote.
@@ -391,6 +497,11 @@ pub fn admin_from_header(header: &str) -> Option<&str> {
 /// The same, for the reconnect progress cookie.
 pub fn reconnect_from_header(header: &str) -> Option<&str> {
     named_cookie(header, RECONNECT_COOKIE_NAME)
+}
+
+/// The same, for the handoff cookie.
+pub fn handoff_from_header(header: &str) -> Option<&str> {
+    named_cookie(header, HANDOFF_COOKIE_NAME)
 }
 
 fn named_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
@@ -687,6 +798,152 @@ mod tests {
         let cleared = clear_admin_cookie(true);
         assert!(cleared.contains("Max-Age=0"), "{cleared}");
         assert!(cleared.contains("SameSite=Strict"), "{cleared}");
+    }
+
+    fn handoff() -> HandoffClaim {
+        HandoffClaim::new("ada", "n".repeat(43), 1_000_000)
+    }
+
+    #[test]
+    fn round_trips_a_handoff_claim() {
+        let c = handoff();
+        assert_eq!(c.aud, HANDOFF_AUD);
+        let v = sign_handoff(KEY, &c);
+        assert_eq!(verify_handoff(KEY, &v, c.iat).unwrap(), c);
+        assert_eq!(
+            verify_handoff(KEY, &v, c.iat + HANDOFF_COOKIE_TTL_SECS).unwrap(),
+            c
+        );
+    }
+
+    /// The label is what the app login acts on and the nonce is what makes it
+    /// one-shot, so flipping either under the original MAC must fail, and so
+    /// must stretching `iat`.
+    #[test]
+    fn refuses_a_tampered_handoff() {
+        let c = handoff();
+        let v = sign_handoff(KEY, &c);
+        let (payload_b64, mac_b64) = v.split_once('.').unwrap();
+        let forge = |claim: &HandoffClaim| {
+            format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(claim).unwrap()),
+                mac_b64
+            )
+        };
+        let relabeled = HandoffClaim {
+            label: "www".into(),
+            ..c.clone()
+        };
+        assert_eq!(verify_handoff(KEY, &forge(&relabeled), c.iat), None);
+        let renonced = HandoffClaim {
+            nonce: "m".repeat(43),
+            ..c.clone()
+        };
+        assert_eq!(verify_handoff(KEY, &forge(&renonced), c.iat), None);
+        let stretched = HandoffClaim {
+            iat: c.iat + HANDOFF_COOKIE_TTL_SECS,
+            ..c.clone()
+        };
+        assert_eq!(verify_handoff(KEY, &forge(&stretched), c.iat + 1), None);
+
+        assert_eq!(
+            verify_handoff(b"another key that is long enough", &v, c.iat),
+            None
+        );
+        assert_eq!(verify_handoff(KEY, payload_b64, c.iat), None);
+        assert_eq!(
+            verify_handoff(KEY, &format!("{payload_b64}.AAAA"), c.iat),
+            None
+        );
+    }
+
+    #[test]
+    fn refuses_an_expired_future_or_oversized_handoff() {
+        let c = handoff();
+        let v = sign_handoff(KEY, &c);
+        assert_eq!(
+            verify_handoff(KEY, &v, c.iat + HANDOFF_COOKIE_TTL_SECS + 1),
+            None
+        );
+        assert_eq!(verify_handoff(KEY, &v, c.iat - 1), None);
+        assert_eq!(verify_handoff(KEY, "", 0), None);
+        assert_eq!(verify_handoff(KEY, "not-a-cookie", 0), None);
+        assert_eq!(
+            verify_handoff(KEY, &"a".repeat(MAX_COOKIE_LEN + 1), 0),
+            None
+        );
+    }
+
+    /// THE DOMAIN SEPARATION, every direction that matters. All three claims
+    /// are signed with one key, so nothing below fails on the MAC: each is
+    /// refused because it is not the document the verifier reads.
+    #[test]
+    fn a_handoff_is_neither_a_session_nor_an_admin_claim() {
+        let h = sign_handoff(KEY, &handoff());
+        assert!(
+            verify_handoff(KEY, &h, 1_000_000).is_some(),
+            "still a handoff"
+        );
+        // No `sid`, so not a flow session; no `tfp` and the wrong `aud`, so not
+        // an admin session.
+        assert_eq!(verify(KEY, &h, 1_000_000), None);
+        assert_eq!(verify_admin(KEY, TOKEN, &h, 1_000_000), None);
+
+        // And the other way round: a session claim has no `aud`, an admin
+        // claim has the wrong one and no label or nonce.
+        let session = sign(KEY, &claim());
+        assert_eq!(verify_handoff(KEY, &session, 1_000_000), None);
+        let admin = sign_admin(KEY, &AdminClaim::new(TOKEN, 1_000_000));
+        assert_eq!(verify_handoff(KEY, &admin, 1_000_000), None);
+
+        // An `aud` that is not ours is refused even with every field present
+        // and a MAC that is good over it.
+        let forged = sign_handoff(
+            KEY,
+            &HandoffClaim {
+                aud: ADMIN_AUD.into(),
+                ..handoff()
+            },
+        );
+        assert_eq!(verify_handoff(KEY, &forged, 1_000_000), None);
+    }
+
+    #[test]
+    fn finds_the_handoff_by_its_own_name() {
+        let h = sign_handoff(KEY, &handoff());
+        let signup = sign(KEY, &claim());
+        let header = format!("{COOKIE_NAME}={signup}; {HANDOFF_COOKIE_NAME}={h}");
+        assert_eq!(handoff_from_header(&header), Some(h.as_str()));
+        assert_eq!(from_header(&header), Some(signup.as_str()));
+        assert_eq!(
+            handoff_from_header(&format!("{COOKIE_NAME}={signup}")),
+            None
+        );
+        assert_eq!(
+            handoff_from_header(&format!("x{HANDOFF_COOKIE_NAME}={h}")),
+            None
+        );
+    }
+
+    /// Scoped to the app login, host-bound, unreadable from script, a day.
+    #[test]
+    fn the_handoff_cookie_carries_the_attributes_that_matter() {
+        let v = set_handoff_cookie("abc", true);
+        assert!(v.starts_with(&format!("{HANDOFF_COOKIE_NAME}=abc;")), "{v}");
+        assert!(v.contains("HttpOnly"), "{v}");
+        assert!(v.contains("SameSite=Lax"), "{v}");
+        assert!(v.contains("Secure"), "{v}");
+        assert!(v.contains("Path=/app;"), "{v}");
+        assert!(!v.contains("Domain"), "{v}");
+        assert!(
+            v.contains(&format!("Max-Age={HANDOFF_COOKIE_TTL_SECS}")),
+            "{v}"
+        );
+        assert!(!set_handoff_cookie("abc", false).contains("Secure"));
+        let cleared = clear_handoff_cookie(true);
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+        assert!(cleared.contains("Path=/app;"), "{cleared}");
     }
 
     #[test]

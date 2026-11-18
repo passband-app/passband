@@ -618,16 +618,14 @@ struct SitrepView: View {
                     TriageFixTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line))
             },
-            // `t` = teach Passband, from this row's email, the verb the reader
-            // has on the same key. Bound HERE because the sitrep is its own key
-            // context: the list's `t` is never consulted from this page.
-            KeyBinding("t", "teach Passband") {
-                guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
-                // Inert on an auth row: it opens only in the reveal and leaves
-                // only by an answer or Done (remind would park it).
-                guard store.authMeta(for: u) == nil else { return }
-                Actions.teach(sender: u.sender, messageId: u.id)
-            },
+            // `t` = teach Passband about ALL mail. Not about the highlighted
+            // row: the Sitrep is the overview, so a sentence taught here
+            // ("never show me feedback requests") is a rule for every sender
+            // unless the daemon reads it as naming one. Sender-tied teaching
+            // stays on `t` in the reader and the Emails list. Like `c`, it
+            // needs nothing selected. Bound HERE because the sitrep is its
+            // own key context: the list's `t` is never consulted from this page.
+            KeyBinding("t", "teach Passband") { Actions.teach() },
             KeyBinding("h", "remind me later") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
                 // Inert on an auth row: it opens only in the reveal and leaves

@@ -300,19 +300,15 @@ enum PhoneReleaseNotes {
     }
 
     /// THE PHONE'S GATE. A NEWCOMER is somebody this install met at the
-    /// Connect gate with no mailbox on it. They are shown the LATEST release
-    /// when they first reach the Sitrep (owner's call, 2026-10-30: new users
-    /// see what is new too), and nothing older: they are stamped with the
-    /// release just below it, so the first sync after connecting raises one
-    /// release. On a build below the whole table there is nothing to show, so
-    /// they are stamped with the build and meet the first note when they
-    /// update to it. Everybody else is read by their stamp, exactly as on the
+    /// Connect gate with no mailbox on it. They are shown nothing: they are
+    /// stamped as having read everything they installed
+    /// (`ReleaseLedger.newcomerStamp`), so the walk first appears on their
+    /// first update. Everybody else is read by their stamp, exactly as on the
     /// Mac: no stamp on an install that already had a mailbox is one that
     /// predates this feature, owed the release it just took and nothing older.
     static func arrival(lastSeen: String?, running: String, newcomer: Bool) -> Arrival {
         guard ReleaseVersion(running) != nil else { return .nothing }
         if newcomer, lastSeen.flatMap(ReleaseVersion.init) == nil {
-            guard newest(atOrBelow: running) != nil else { return .stamp(running) }
             return ReleaseLedger.newcomerStamp(all, running: running).map(Arrival.stamp) ?? .nothing
         }
         let owed = unseen(lastSeen: lastSeen, running: running)

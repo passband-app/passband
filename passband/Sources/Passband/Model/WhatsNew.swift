@@ -4,16 +4,16 @@
 // launch after taking that version, and never again. Everything below is the
 // ways that sentence can be got wrong.
 //
-// A NEW USER MEETS IT AFTER THEIR FIRST LOOK, never over it. `firstLoadSeen`
-// is the gate: a fresh install gets the first-load veil (or straight to the
-// board) first, and the two overlays can never stack, because one runs only
-// where the other has finished. That first look ending for the first time
-// (`meetNewcomer`) stamps the release just below the latest,
-// so their first time on the Sitrep shows the latest release and nothing older
-// (owner's call, 2026-10-30; it used to stamp current and show nothing). It also settles the transition INTO this
-// feature, which has no other honest signal: an install that predates the stamp
-// but has had its first look is an established install, owed the release it just
-// took and nothing older (see ReleaseNotes.unseen).
+// A NEW USER NEVER MEETS IT. A fresh install has nothing "new" in it, and a
+// changelog card is one more thing to click through before the app is usable
+// (owner's call, 2026-11-17, reversing 2026-10-30's "show newcomers the latest
+// release"). The first look ending for the first time (`meetNewcomer`) stamps
+// everything this build carries as read, so the card first appears on their
+// first update. `firstLoadSeen` still gates the trigger, and that stamp also
+// settles the transition INTO this feature, which has no other honest signal:
+// an install that predates the stamp but has had its first look is an
+// established install, owed the release it just took and nothing older (see
+// ReleaseNotes.unseen).
 //
 // THE IPHONE IS THE SAME SENTENCE OVER A DIFFERENT TABLE. It ships on its own
 // version line and reads its own notes (Lib/PhoneReleaseNotes.swift), keeps its
@@ -109,18 +109,14 @@ final class WhatsNew {
     }
 
     /// The first look at a mailbox has just ended, for the first time on this
-    /// Mac (`FirstLoad`). New users are
-    /// shown the LATEST release when they reach the Sitrep (owner's call,
-    /// 2026-10-30), and nothing older: stamp the release just below it, then
-    /// ask. If they are not on the Sitrep yet, arriving there asks again
-    /// (RootView's ShellWatchers); if they quit first, the next launch's
-    /// first sync does. The phone does the same at its Connect gate. An
-    /// install that already carries a stamp keeps it.
+    /// Mac (`FirstLoad`). New users are shown no changelog: stamp everything
+    /// this build carries as read (`ReleaseLedger.newcomerStamp`). The phone
+    /// does the same at its Connect gate. An install that already carries a
+    /// stamp keeps it.
     func meetNewcomer() {
         guard !Self.forced, Prefs.shared.lastSeenReleaseNotes == nil else { return }
         guard let running = runningVersion else { return }
         stamp(ReleaseLedger.newcomerStamp(ReleaseNotes.all, running: running))
-        maybeShow()
     }
 
     /// Settings' "what's new in this version": on demand, ignoring the stamp.

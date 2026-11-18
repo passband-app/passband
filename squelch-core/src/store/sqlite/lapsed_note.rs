@@ -63,12 +63,14 @@ pub struct NoteCandidate {
     pub from_addr: String,
     pub from_name: Option<String>,
     pub subject: String,
+    /// The stored `messages.snippet` (never the body).
+    pub snippet: String,
     pub received_at: DateTime<Utc>,
     pub kind: NoteKind,
 }
 
 const CANDIDATES_SQL: &str = concat!(
-    "SELECT m.from_addr, m.from_name, m.subject, m.received_at, d.decision_json
+    "SELECT m.from_addr, m.from_name, m.subject, m.received_at, d.decision_json, m.snippet
      FROM messages m
      LEFT JOIN triage t ON t.message_id = m.id
      JOIN agent_message_decisions d ON d.account_id = m.account_id AND d.message_id = m.id
@@ -167,21 +169,25 @@ impl SqliteStore {
                         r.get::<_, String>(2)?,
                         dt(r, 3)?,
                         r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
                     ))
                 },
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
-            .filter_map(|(from_addr, from_name, subject, received_at, decision)| {
-                Some(NoteCandidate {
-                    kind: kind_of(&decision)?,
-                    from_addr,
-                    from_name,
-                    subject,
-                    received_at,
-                })
-            })
+            .filter_map(
+                |(from_addr, from_name, subject, received_at, decision, snippet)| {
+                    Some(NoteCandidate {
+                        kind: kind_of(&decision)?,
+                        from_addr,
+                        from_name,
+                        subject,
+                        snippet,
+                        received_at,
+                    })
+                },
+            )
             .collect())
     }
 }

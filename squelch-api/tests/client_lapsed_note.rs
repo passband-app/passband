@@ -1,7 +1,7 @@
 //! The lapsed-user note end to end: the pass over a real store and a mock
 //! Gmail (who gets it, once ever, never under three items, the insert's
-//! shape), and the note coming back through ingest as the owner's own mail,
-//! which nothing triages. Every sender is invented, at `.example`.
+//! shape), and the note coming back through ingest, where it is recognised
+//! and never triaged. Every sender is invented, at `.example`.
 mod common;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -187,12 +187,15 @@ async fn a_lapsed_owner_gets_one_note_filed_into_their_inbox_once() {
     );
     let from = parsed.from().unwrap().first().unwrap();
     assert_eq!(from.name(), Some("Passband"));
-    assert_eq!(from.address(), Some("me@example.com"));
+    assert_eq!(from.address(), Some("no-reply@passband.app"));
+    let to = parsed.to().unwrap().first().unwrap();
+    assert_eq!(to.address(), Some("me@example.com"));
     let text = parsed.body_text(0).unwrap();
     let first = text.find("Your receipt 0").unwrap();
     let last = text.find("Your receipt 3").unwrap();
     assert!(first < last, "newest first: {text}");
-    assert!(text.contains("Receipt from Shop 0"));
+    assert!(text.contains("Shop 0 \u{b7} Receipt, "), "{text}");
+    assert!(text.contains("Open Passband: https://passband.app/download"));
 
     // Never again, whatever happens next.
     assert_eq!(
@@ -278,11 +281,14 @@ async fn a_refused_insert_stays_stamped() {
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
 
-/// The note, synced back from Gmail, is the owner's own mail: no triage job
-/// (only an access check), so no placement in For your eyes, no push, and
-/// never a line in another note.
+/// The note, synced back from Gmail as a fresh arrival, is recognised: stored
+/// like an archive row with no triage or notification job, so no placement in
+/// For your eyes or Reading, no push, and never a line in another note.
+/// THE CONTROL: the same bytes after crossing a mail server (a `Received`
+/// line and Gmail's `Authentication-Results` prepended, as any stranger's
+/// mail carrying the header would have) are triaged like any other mail.
 #[tokio::test]
-async fn the_filed_note_comes_back_as_own_mail_and_is_never_triaged() {
+async fn the_filed_note_is_never_triaged_but_a_delivered_copy_is() {
     let (base, seen, _h) = mock_gmail(200).await;
     let (state, store, acct) = setup(3, &base);
     assert_eq!(
@@ -308,43 +314,55 @@ async fn the_filed_note_comes_back_as_own_mail_and_is_never_triaged() {
             is_spam: false,
             account_addr: "me@example.com".into(),
         };
-        let triaged = squelch_core::sync::ingest::ingest(
+        let mut triaged = squelch_core::sync::ingest::ingest(
             &fetched,
             &squelch_core::config::Stage1Config::default(),
             later(),
             |_| false,
         );
-        assert_eq!(triaged.message.auth_pass, None, "no inbound edge crossed");
-        store.ingest_message(&triaged).unwrap()
+        // As the poll lane stamps a fresh arrival.
+        triaged.foreground_triage = true;
+        triaged.notify_eligible_at = Some(Utc::now());
+        let noted = triaged.passband_note;
+        (store.ingest_message(&triaged).unwrap(), noted)
     };
-    let note = ingest("filed-1", raw.clone());
     let due = Utc::now() + Duration::days(1);
 
+    let (note, noted) = ingest("filed-1", raw.clone());
+    assert!(noted, "the filed bytes are recognised");
+    for kind in ["triage", "notification", "access"] {
+        assert!(
+            store
+                .claim_agent_job(acct, kind, due, 60)
+                .unwrap()
+                .is_none(),
+            "no {kind} job for the note"
+        );
+    }
+    // A later sighting (a catch-up re-read) is the same row, still no job.
+    assert_eq!(ingest("filed-1", raw.clone()).0, note);
     assert!(
         store
             .claim_agent_job(acct, "triage", due, 60)
             .unwrap()
-            .is_none(),
-        "own mail is never triaged"
+            .is_none()
     );
-    let access = store
-        .claim_agent_job(acct, "access", due, 60)
-        .unwrap()
-        .expect("its job is an access check");
-    assert_eq!(access.message_id, note);
 
-    // THE CONTROL: the same bytes From anybody else would be triaged.
-    let forged = String::from_utf8(raw)
-        .unwrap()
-        .replace(
-            "From: Passband <me@example.com>",
-            "From: Passband <hello@other.example>",
-        )
-        .into_bytes();
-    let other = ingest("filed-2", forged);
+    // THE CONTROL.
+    let delivered = [
+        "Received: by 2002:a05:6400:1:b0:1:1 with SMTP id x;\r\n        Tue, 17 Nov 2026 10:00:00 -0800\r\n",
+        "Authentication-Results: mx.google.com;\r\n       spf=pass smtp.mailfrom=passband.app\r\n",
+    ]
+    .concat()
+    .into_bytes()
+    .into_iter()
+    .chain(raw)
+    .collect::<Vec<u8>>();
+    let (other, noted) = ingest("delivered-1", delivered);
+    assert!(!noted, "mail that crossed a server is never the filed note");
     let job = store
         .claim_agent_job(acct, "triage", due, 60)
         .unwrap()
-        .expect("mail from someone else is triaged");
+        .expect("a delivered copy is triaged like any mail");
     assert_eq!(job.message_id, other);
 }

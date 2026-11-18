@@ -21,6 +21,8 @@ fn mail(store: &SqliteStore, acct: AccountId, key: &str, from: &str, days_ago: i
         .from(from)
         .from_name(Some("Shop"))
         .subject(key)
+        .body("the whole body, never listed")
+        .snippet(&format!("snippet of {key}"))
         .received_at(Utc::now() - Duration::days(days_ago))
         .seed(store)
 }
@@ -88,6 +90,10 @@ fn handled_receipts_and_deliveries_are_listed_newest_first() {
     assert_eq!(got[0].kind, NoteKind::Shipped);
     assert_eq!(got[1].kind, NoteKind::Receipt);
     assert_eq!(got[1].from_addr, SHOP);
+    assert_eq!(
+        got[1].snippet, "snippet of newer",
+        "the stored snippet, never the body"
+    );
 }
 
 #[test]
@@ -227,9 +233,7 @@ fn another_accounts_mail_is_out() {
 }
 
 /// Mail the owner wrote themselves (a note to self, a copy from another
-/// client) is theirs, whatever the decision on it says. The lapsed note
-/// itself lands this way, From the owner's own address, and must never list
-/// itself.
+/// client) is theirs, whatever the decision on it says.
 #[test]
 fn the_owners_own_mail_is_out() {
     let (store, acct) = store();

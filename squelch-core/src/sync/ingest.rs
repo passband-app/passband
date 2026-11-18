@@ -42,6 +42,37 @@ pub struct RawFetched {
     pub account_addr: String,
 }
 
+/// The header that marks a note Passband filed into the owner's own mailbox
+/// (the api crate's `lapsed_note`), and its one value.
+pub const PASSBAND_NOTE_HEADER: &str = "X-Passband-Note";
+pub const PASSBAND_NOTE_VALUE: &str = "lapsed-digest";
+
+/// Is this a note Passband FILED into the mailbox (Gmail `messages.insert`),
+/// and so never mail that arrived? True only when the message carries
+/// [`PASSBAND_NOTE_HEADER`]: [`PASSBAND_NOTE_VALUE`] AND shows no sign of
+/// ever crossing a mail server: no `Received` header and no
+/// `Authentication-Results` (or `ARC-Authentication-Results`) of any kind.
+///
+/// THE HEADER ALONE PROVES NOTHING: anybody can write it into a mail they
+/// send. What they cannot do is deliver that mail without the receiving
+/// server prepending a `Received` line (Gmail's MX always does, as does every
+/// other hop), so a stranger adding the header to hide real mail from triage
+/// is refused here and their mail is triaged like any other. Stricter than
+/// the own-mail authorship test (`auth_pass IS NULL`) on purpose: that one
+/// can be met by mail whose verdict was merely unreadable.
+pub fn is_filed_passband_note(msg: &mail_parser::Message) -> bool {
+    let marked = msg
+        .header_raw(PASSBAND_NOTE_HEADER)
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case(PASSBAND_NOTE_VALUE));
+    marked
+        && !msg.headers().iter().any(|h| {
+            let name = h.name.as_str();
+            name.eq_ignore_ascii_case("Received")
+                || name.eq_ignore_ascii_case(AUTH_RESULTS_HEADER)
+                || name.eq_ignore_ascii_case("ARC-Authentication-Results")
+        })
+}
+
 /// Crudely flatten HTML to text: drop tags, decode common entities, collapse
 /// whitespace. The HTML-only fallback, so raw markup never reaches triage.
 pub fn html_to_text(html: &str) -> String {
@@ -1283,8 +1314,13 @@ pub fn ingest(
 
     // Ingest records evidence. Only the triage agent assigns meaning, placement,
     // or external access. Legacy fields stay neutral until the new decision commits.
+    // A note Passband filed itself: never sent mail, never spam.
+    let passband_note =
+        !fetched.is_sent && !fetched.is_spam && parsed.as_ref().is_some_and(is_filed_passband_note);
+
     TriagedMessage {
         foreground_triage: false,
+        passband_note,
         first_load: false,
         message,
         recipients,
@@ -1356,6 +1392,55 @@ pub fn ingest_sent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn note_bytes(prefix: &str, marker: &str) -> Vec<u8> {
+        format!(
+            "{prefix}From: Passband <no-reply@passband.app>\r\nTo: <me@example.com>\r\n\
+             Subject: s\r\n{marker}\r\n\r\nbody\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn is_note(raw: &[u8]) -> bool {
+        is_filed_passband_note(&MessageParser::default().parse(raw).unwrap())
+    }
+
+    /// The header counts only on a message that crossed no mail server: a
+    /// stranger can write the header, never the absence of a `Received`.
+    #[test]
+    fn a_filed_note_is_known_only_without_any_hop() {
+        let marker = "X-Passband-Note: lapsed-digest";
+        assert!(is_note(&note_bytes("", marker)));
+        assert!(is_note(&note_bytes("", "X-Passband-Note:  Lapsed-Digest ")));
+        assert!(!is_note(&note_bytes("", "X-Passband-Note: other")));
+        assert!(!is_note(&note_bytes("", "X-Other: lapsed-digest")));
+        for hop in [
+            "Received: from mail.attacker.example by mx.google.com; Tue, 17 Nov 2026 10:00:00 +0000\r\n",
+            "Authentication-Results: mx.google.com; dkim=pass\r\n",
+            "ARC-Authentication-Results: i=1; mx.google.com; spf=pass\r\n",
+        ] {
+            assert!(!is_note(&note_bytes(hop, marker)), "{hop}");
+        }
+    }
+
+    /// The flag rides the ingest result, and never on sent or spam mail.
+    #[test]
+    fn ingest_carries_the_note_flag() {
+        let fetched = |is_sent: bool, is_spam: bool| RawFetched {
+            account_id: 1,
+            gmail_msg_id: "n".into(),
+            gmail_thread_id: None,
+            raw: note_bytes("", "X-Passband-Note: lapsed-digest"),
+            internal_date: None,
+            is_sent,
+            is_spam,
+            account_addr: "me@example.com".into(),
+        };
+        let run = |f: &RawFetched| ingest(f, &Stage1Config::default(), Utc::now(), |_| false);
+        assert!(run(&fetched(false, false)).passband_note);
+        assert!(!run(&fetched(true, false)).passband_note);
+        assert!(!run(&fetched(false, true)).passband_note);
+    }
 
     /// #639 end to end through `ingest`: a received mail carries its signals,
     /// the same mail as the account's own send carries none.

@@ -1216,6 +1216,15 @@ impl SqliteStore {
         lite: bool,
     ) -> Result<Option<i64>> {
         let lite = lite && archive;
+        // A NOTE PASSBAND FILED ITSELF (`sync::ingest::is_filed_passband_note`)
+        // is stored as an archive row: findable by search and the reader, and
+        // absent from every band, count and queue. No triage job, so no
+        // decision, no placement in For your eyes or Reading, no push, and no
+        // line in a later note. Every sighting is the same: the first inserts
+        // it, a later one hands back the row it finds. Never on a heal, which
+        // refuses archive rows anyway.
+        let note = triaged.passband_note && heal.is_none() && !archive;
+        let archive = archive || note;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
 
@@ -1238,6 +1247,7 @@ impl SqliteStore {
             )
             .optional()?;
         match stored {
+            Some((id, _)) if note => return Ok(Some(id)),
             Some(_) if archive => return Ok(None),
             Some((_, true)) if heal.is_some() => return Ok(None),
             Some((id, true)) => return Ok(Some(id)),

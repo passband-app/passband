@@ -233,8 +233,30 @@ struct RecipientField<F: Hashable>: View {
                 // is the idiomatic shape anyway. Re-entrant sets terminate: an
                 // unchanged value never re-fires onChange.
                 .onChange(of: fragment) { _, raw in fragmentTyped(raw) }
+                #if os(iOS)
+                // The keymaps are a macOS NSEvent bridge, so on iOS the
+                // keyboard's return key reaches only this. It does what Enter
+                // does on the Mac: take the top suggestion (or whichever the
+                // cursor is on), else pill a typed address.
+                .onSubmit { submitted() }
+                #endif
         }
     }
+
+    #if os(iOS)
+    private func submitted() {
+        if suggestionCount > 0 {
+            acceptSelected()
+        } else if fragment.trimmed.contains("@") || GroupToken.isToken(fragment.trimmed) {
+            commit(fragment)
+            fragment = ""
+            sync()
+        }
+        // Return resigns the field by default; addressing one person is usually
+        // the middle of addressing, so the caret stays.
+        focus.wrappedValue = field
+    }
+    #endif
 
     /// This field as a drop target: lit while a drag hovers, and fed whatever
     /// lands. What takes the drop is platform-specific (see `RecipientDropWell`)

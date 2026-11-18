@@ -236,6 +236,24 @@
                     try? await Task.sleep(for: .milliseconds(900))
                     store.askDiscardCompose()
                 }
+            // THE TOAST STACK UNDER A LONG LABEL, which ran off both edges:
+            // a long-sender done chip, a short one (still hugs), and a long
+            // toast. Appended straight, with no expiry, so a screenshot never
+            // races the five-second clock.
+            case "toast-long":
+                store.toasts.append(
+                    Toast(
+                        text: "Couldn't reach the server, so this message is still waiting "
+                            + "and will go out on its own when the connection comes back.",
+                        tone: .error))
+                store.undos.append(
+                    PendingUndo(kind: .done, messageId: 0, label: "done Ada", revert: {}))
+                store.undos.append(
+                    PendingUndo(
+                        kind: .done, messageId: 0,
+                        label: "done Quarterly Statement Notifications <no-reply-statements"
+                            + "@notifications.longbank.example>",
+                        revert: {}))
             case "clear":
                 SitrepPoller.shared.stop()
                 store.sitrep.standing = []

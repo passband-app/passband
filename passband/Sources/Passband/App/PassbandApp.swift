@@ -42,7 +42,11 @@ struct PassbandApp: App {
                 .onOpenURL { url in
                     // passband://draft/<id>: a link an agent gave for a draft
                     // it left. Anything else is a pair link or nothing.
-                    if let link = AgentDraftLink(url) {
+                    if url.scheme?.lowercased() == "mailto" {
+                        // Passband as the default mail app: a link from
+                        // another app, into a composer.
+                        store.receiveMailtoURL(url)
+                    } else if let link = AgentDraftLink(url) {
                         store.openAgentDraft(link)
                     } else {
                         store.receivePairLink(url)

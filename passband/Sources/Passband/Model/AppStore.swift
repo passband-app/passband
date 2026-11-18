@@ -558,6 +558,9 @@ final class AppStore {
             // A launch that lands on a gate paints no board: its interval
             // ends here, not whenever a pull finally lands.
             if connStatus == .disconnected || connStatus == .error { LaunchSignpost.end(.skipped) }
+            // A mailto: link from another app that arrived before there was a
+            // mailbox to write from (`receiveMailtoURL`).
+            if pendingMailto != nil { routePendingMailto() }
         }
     }
     /// Set to the epoch of a launch painted from disk (`restorePersistedBoard`)
@@ -5295,6 +5298,43 @@ final class AppStore {
         openMailto(ask.link)
     }
 
+    // MARK: - mailto: links from other apps
+
+    /// A mailto: link from outside (Passband as the default mail app) that
+    /// came before a mailbox was ready: a cold launch from a link lands while
+    /// the keychain is still being read. Held until the connection settles.
+    @ObservationIgnored private var pendingMailto: String?
+
+    /// A mailto: link another app handed the system, which handed it here.
+    /// The same composer an in-message link opens (`openComposeMailto`),
+    /// with the same caution about a composer somebody is writing in, on the
+    /// account on screen; the composer's From switcher is there for another.
+    /// Held while the connection is still being found, and dropped if it
+    /// lands on the Connect screen: with no mailbox there is nothing to send
+    /// from, and the link would otherwise fire minutes later, after a connect
+    /// the person made for its own sake.
+    func receiveMailtoURL(_ url: URL) {
+        let href = url.absoluteString
+        guard Mailto.isMailto(href) else { return }
+        pendingMailto = href
+        routePendingMailto()
+    }
+
+    private func routePendingMailto() {
+        guard let href = pendingMailto else { return }
+        switch Mailto.route(connected: connStatus == .connected, gate: connStatus == .disconnected) {
+        case .hold:
+            return
+        case .drop:
+            pendingMailto = nil
+        case .open:
+            pendingMailto = nil
+            // One hop later, so a connection that just came up has finished
+            // laying out its account before a composer opens on it.
+            Task { @MainActor in self.openComposeMailto(href) }
+        }
+    }
+
     private func openMailto(_ link: Mailto) {
         var state = ComposeState()
         state.to = link.to.joined(separator: ", ")
@@ -6789,6 +6829,12 @@ final class AppStore {
                 noteDraftGone(sentDraft)
             }
             pushToast("sent", .success)
+            // The moment to ask once whether email links should open here
+            // (`DefaultMailApp`). The Mac's alone: the phone cannot be asked.
+            #if os(macOS)
+                DefaultMailApp.shared.noteSent(othersShowing: AgentNudge.othersShowing(self)
+                    || AgentNudge.shared.showingNudge)
+            #endif
             // Only an INLINE reply names its thread: the pane's mail (a new
             // message, a forward) starts a thread of its own, and refetching
             // whatever happens to be open would move somebody's reading.

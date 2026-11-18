@@ -1240,9 +1240,50 @@ struct MailSection: View {
                     options: ThreadStyleDefault.allCases.map { ($0, $0.label) },
                     selection: $prefs.threadStyle)
             }
+            // The Mac's alone: an iPhone's default mail app needs an
+            // entitlement from Apple. The one-time ask after a send is
+            // DefaultMailApp's; this is where anyone goes afterwards.
+            #if os(macOS)
+                RowDivider()
+                DefaultMailAppRow()
+            #endif
         }
     }
 }
+
+#if os(macOS)
+    /// Whether email links open in Passband, and the button that asks the
+    /// system to make it so. The system's word is re-read on appear: it can
+    /// change in another app's preferences while this pane is closed.
+    struct DefaultMailAppRow: View {
+        private var model: DefaultMailApp { DefaultMailApp.shared }
+
+        var body: some View {
+            SettingsRow(
+                title: "Default mail app",
+                detail: model.isDefault
+                    ? "Email links on web pages and in other apps open a new message in Passband."
+                    : model.lastRequestFailed
+                        ? "The change did not go through. Try again, or pick Passband in Mail's settings, under Default email reader."
+                        : "Email links on web pages and in other apps open somewhere else."
+            ) {
+                if model.isDefault {
+                    Text("Passband")
+                        .font(Typo.ui(11, weight: .medium))
+                        .foregroundStyle(Palette.inkFaint)
+                } else {
+                    Button("Make default") { model.makeDefault() }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                }
+            }
+            .onAppear { model.refresh() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                model.refresh()
+            }
+        }
+    }
+#endif
 
 /// THE SEARCH ORDER — how a search ranks what it found, not what it finds.
 ///

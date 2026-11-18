@@ -1,7 +1,8 @@
-// A mailto: link clicked inside a message, read into what a new composer
+// A mailto: link clicked inside a message, or handed over by another app
+// while Passband is the default mail app, read into what a new composer
 // opens with (RFC 6068).
 //
-// The link comes from the MAIL, so it is untrusted: it only ever fills in a
+// The link comes from the MAIL (or a web page), so it is untrusted: it only ever fills in a
 // composer the person reads and sends themselves. Only the five fields a
 // composer shows are taken (to, cc, bcc, subject, body); any other header a
 // link names (in-reply-to, from, attach, ...) is dropped rather than carried
@@ -148,5 +149,27 @@ struct Mailto: Equatable, Sendable {
     private static func oneLine(_ s: String) -> String {
         s.components(separatedBy: .newlines).joined(separator: " ")
             .trimmingCharacters(in: .whitespaces)
+    }
+}
+
+// MARK: - a link from another app
+
+extension Mailto {
+    /// What happens to a mailto: link another app sent while Passband is the
+    /// default mail app, given where the connection stands.
+    enum Route: Equatable, Sendable {
+        /// A mailbox is on screen: the composer opens now.
+        case open
+        /// Still finding out (a cold launch reading the keychain, a daemon
+        /// being waited on, a connect in flight): kept until it settles.
+        case hold
+        /// The Connect screen: there is no mailbox to write from, so the link
+        /// goes rather than firing after a connect made for its own sake.
+        case drop
+    }
+
+    static func route(connected: Bool, gate: Bool) -> Route {
+        if connected { return .open }
+        return gate ? .drop : .hold
     }
 }

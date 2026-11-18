@@ -72,7 +72,9 @@ struct RootView: View {
         // and not before; `askIfEarned` is what decides whether a fortnight has
         // actually been used, and it can only ever say yes once.
         .onChange(of: store.shareAvailable) { _, canShare in
-            guard !TestFlightNudge.shared.showingNudge, !AgentNudge.shared.showingNudge else { return }
+            guard !TestFlightNudge.shared.showingNudge, !AgentNudge.shared.showingNudge,
+                !DefaultMailApp.shared.showingNudge
+            else { return }
             ShareNudge.shared.askIfEarned(canShare: canShare)
         }
         // THE IPHONE ASK, two days in, for a mailbox no phone has ever
@@ -82,20 +84,25 @@ struct RootView: View {
         .onChange(of: store.iosConnected) { _, connected in
             TestFlightNudge.shared.askIfEarned(
                 iosConnected: connected,
-                othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
+                othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge
+                    || DefaultMailApp.shared.showingNudge)
         }
         // THE AGENT-DOOR AD, a week in, for a mailbox whose door an agent can
         // actually use. Asked at the first sync (ShellWatchers, after the
         // first-load veil and What's New have had their turn) and on every return to the app,
         // below.
         .overlay { AgentNudgeModal() }
+        // THE DEFAULT MAIL APP ASK, once, right after a send (DefaultMailApp
+        // decides; the store tells it when a send went out).
+        .overlay { DefaultMailNudgeCard() }
         // And on every return to the app, because the answer above changes
         // once per launch at most: a Mac left open across the two-day mark
         // would otherwise never hear the rule again until it was quit.
         .onReceive(NotificationCenter.default.publisher(for: Platform.didBecomeActiveNotification)) { _ in
             TestFlightNudge.shared.askIfEarned(
                 iosConnected: store.iosConnected,
-                othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
+                othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge
+                    || DefaultMailApp.shared.showingNudge)
             AgentNudge.shared.askIfEarned(store: store)
         }
         .task {

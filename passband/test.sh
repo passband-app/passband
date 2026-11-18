@@ -987,12 +987,19 @@ run_suite agent-draft-link \
   Sources/Passband/Lib/AgentDraftLink.swift \
   Tests/AgentDraftLinkTests.swift
 
-# A mailto: link clicked in a message, read into a new composer's fields. The
-# link is untrusted mail: only to/cc/bcc/subject/body, addresses checked, and
+# A mailto: link clicked in a message (or handed over by another app), read
+# into a new composer's fields, and when one from another app opens. The link
+# is untrusted mail: only to/cc/bcc/subject/body, addresses checked, and
 # every other header it names dropped.
 run_suite mailto \
   Sources/Passband/Lib/Mailto.swift \
   Tests/MailtoTests.swift
+
+# When Passband asks once to be the default mail app: only after a send, never
+# when it already is, never twice, and never on top of another card.
+run_suite default-mail-app \
+  Sources/Passband/Lib/DefaultMailApp.swift \
+  Tests/DefaultMailAppTests.swift
 
 # Which hidden features this mailbox has been let into. Off for every doubt:
 # no stats, an old daemon, an empty list.

@@ -287,6 +287,7 @@ PR: `search_settled { turns, hits, opened, lane }` and
 | `invite_nudge_accepted` / `invite_nudge_dismissed` (M) | | The two-week ask. |
 | `ios_nudge_closed` (M) | `copied` | The TestFlight ask closing, and whether the link was copied. A QR scan leaves no trace, so this is a floor on uptake. |
 | `agent_nudge_closed` (M) | `opened` | The Agent MCP ad closing, and whether its button went to Settings > Agents. |
+| `default_mail_nudge_closed` (M) | `made_default` | The one-time ask to make Passband the default mail app closing, and whether "Make default" was pressed. The system confirms after, so this is a ceiling on uptake. |
 
 ## Dashboards to build
 

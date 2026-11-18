@@ -15,6 +15,8 @@ struct MailtoTests {
         otherHeadersAreIgnored()
         longFieldsAreCut()
         reviewFindings()
+        aLinkFromAnotherApp()
+        whenALinkFromAnotherAppOpens()
         print("mailto: ok")
     }
 
@@ -102,5 +104,33 @@ struct MailtoTests {
         let many = (0..<500).map { "u\($0)@x.com" }.joined(separator: ",")
         let big = Mailto("mailto:\(many)?cc=\(many)")
         precondition(big?.to.count == Mailto.recipientLimit && big?.cc == [])
+    }
+
+    /// Passband as the default mail app: the system hands over a URL, and
+    /// what reaches `Mailto` is its absoluteString. It reads like a link in a
+    /// message would, and is no more trusted.
+    static func aLinkFromAnotherApp() {
+        let url = URL(string: "mailto:ada@example.com?cc=bo@example.org&subject=Lunch%20on%20Friday&body=Are%20you%20free%3F")!
+        let m = Mailto(url.absoluteString)
+        precondition(m?.to == ["ada@example.com"])
+        precondition(m?.cc == ["bo@example.org"])
+        precondition(m?.subject == "Lunch on Friday")
+        precondition(m?.body == "Are you free?")
+        // Browsers send the scheme in any case.
+        precondition(Mailto(URL(string: "MAILTO:ada@example.com")!.absoluteString)?.to == ["ada@example.com"])
+        // A web page can name the same headers a message can, and is dropped
+        // the same way.
+        let sneaky = URL(string: "mailto:ada@example.com?from=boss@example.com&attach=%2Fetc%2Fhosts")!
+        precondition(Mailto(sneaky.absoluteString) == Mailto("mailto:ada@example.com"))
+        // An empty link from a web page asks for nothing.
+        precondition(Mailto(URL(string: "mailto:")!.absoluteString) == nil)
+    }
+
+    /// A cold launch from a link: held while the connection is found, opened
+    /// once a mailbox is up, dropped at the Connect screen.
+    static func whenALinkFromAnotherAppOpens() {
+        precondition(Mailto.route(connected: true, gate: false) == .open, "a mailbox on screen opens now")
+        precondition(Mailto.route(connected: false, gate: false) == .hold, "still loading holds it")
+        precondition(Mailto.route(connected: false, gate: true) == .drop, "the Connect screen drops it")
     }
 }

@@ -769,6 +769,34 @@ impl SqliteStore {
         })
     }
 
+    /// The newest `last_used_at` among this mailbox's tokens whose app NEVER
+    /// named itself (no `client_platform`): a client [`Self::client_activity`]
+    /// cannot see, such as the terminal client or an app older than the
+    /// client header. Console sessions are excluded by name, as everywhere.
+    ///
+    /// A token that HAS named itself is left out on purpose: its
+    /// `last_used_at` also moves when the iPhone's notification extension
+    /// fetches a push with no app open, so for those `client_seen_at` is the
+    /// presence fact. Revoked rows count, for the reason they count in
+    /// `client_activity`. Folded in Rust over parsed timestamps.
+    pub fn unnamed_client_last_used_at(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT last_used_at FROM device_tokens
+             WHERE account_id = ?1 AND name <> ?2 AND client_platform IS NULL
+               AND last_used_at IS NOT NULL",
+        )?;
+        let newest = stmt
+            .query_map(params![account_id, CONSOLE_DEVICE_NAME], |r| dt(r, 0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .max();
+        Ok(newest)
+    }
+
     // ---- pairing ---------------------------------------------------------
 
     /// Mint a pairing code for `account_id`, SUPERSEDING every code the account

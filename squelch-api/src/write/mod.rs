@@ -175,6 +175,21 @@ pub trait MailWriter: Send + Sync {
         false
     }
 
+    /// FILE `raw` straight into this mailbox's inbox, unread, as if it had
+    /// arrived: Gmail's `messages.insert`. NOTHING IS SENT. No SMTP, no
+    /// recipient, no mail leaves the account: the message is written into the
+    /// owner's own mailbox and nowhere else. Its one caller is the
+    /// lapsed-user note (`crate::lapsed_note`).
+    ///
+    /// Refused by default: only Gmail files a non-draft message this way
+    /// cleanly. Graph can only make one through an undocumented extended
+    /// property, and IMAP's `APPEND` is a different contract again.
+    async fn insert_into_inbox(&self, _raw: &[u8]) -> Result<SentRef, WriteError> {
+        Err(WriteError::Invalid(
+            "this mailbox cannot have mail filed into it".into(),
+        ))
+    }
+
     /// SAVE THE SENDER'S COPY of a send that went with none saved: `raw` is
     /// the message rebuilt from its scheduled request, `date` the attempt's
     /// time, for a `Date` the composer left out. NEVER SUBMITTED. A copy

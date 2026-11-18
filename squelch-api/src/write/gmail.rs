@@ -55,6 +55,18 @@ pub fn send_request_body(raw: &[u8], thread_id: Option<&str>) -> (String, Value)
     (url, send_body(raw, thread_id))
 }
 
+/// The labels a filed message carries: in the inbox, and unread, so it reads
+/// as mail that just arrived.
+pub const INSERT_LABELS: [&str; 2] = [LABEL_INBOX, "UNREAD"];
+
+/// The `messages.insert` JSON body: `raw` base64url-encoded without padding,
+/// as for a send, and [`INSERT_LABELS`]. No `threadId`: a filed note starts
+/// its own conversation.
+pub fn insert_body(raw: &[u8]) -> Value {
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+    json!({ "raw": encoded, "labelIds": INSERT_LABELS })
+}
+
 /// The longest a write-door request waits for the mailbox's Gmail budget.
 /// Comfortably inside the app's 15 s idle timeout.
 const WRITE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -354,6 +366,22 @@ impl MailWriter for GmailWriteClient {
         let v = self
             .post_json_within(&url, &body, Some(send_budget(raw.len())))
             .await?;
+        Ok(SentRef {
+            id: v["id"].as_str().map(str::to_string),
+            thread_id: v["threadId"].as_str().map(str::to_string),
+            warning: None,
+            raw: None,
+        })
+    }
+
+    /// `messages.insert`: file a message into the mailbox itself, never sent.
+    /// `gmail.modify` covers it (insert is allowed to the `mail.google.com`,
+    /// `gmail.modify` and `gmail.insert` scopes), so it needs no grant the
+    /// account does not already hold. `internalDateSource` is left at its
+    /// default, the time Gmail files it.
+    async fn insert_into_inbox(&self, raw: &[u8]) -> Result<SentRef, WriteError> {
+        let url = format!("{}/messages", self.base);
+        let v = self.post_json(&url, &insert_body(raw)).await?;
         Ok(SentRef {
             id: v["id"].as_str().map(str::to_string),
             thread_id: v["threadId"].as_str().map(str::to_string),
@@ -698,6 +726,41 @@ mod tests {
         assert!(req.contains("\"threadId\":\"thread-9\""));
         let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
         assert!(req.contains(&expected), "raw base64url payload present");
+    }
+
+    /// The lapsed note's one request: a POST to `messages` (insert, not
+    /// send), carrying the raw message and exactly INBOX + UNREAD, on the
+    /// write token.
+    #[tokio::test]
+    async fn insert_files_into_the_inbox_unread_and_never_sends() {
+        let (base, handle) = mock_once(200, "{\"id\":\"ins-1\",\"threadId\":\"t-1\"}").await;
+        let c = client(base);
+        let raw = b"From: Passband <me@example.com>\r\nSubject: s\r\n\r\nbody";
+        let filed = c.insert_into_inbox(raw).await.unwrap();
+        assert_eq!(filed.id.as_deref(), Some("ins-1"));
+        let req = handle.await.unwrap();
+        let line = req.lines().next().unwrap();
+        assert!(line.starts_with("POST "), "{line}");
+        assert!(line.contains("/messages "), "insert endpoint: {line}");
+        assert!(!req.contains("/messages/send"), "never the send endpoint");
+        assert!(
+            req.contains("authorization: Bearer WRITE-TOKEN")
+                || req.contains("Authorization: Bearer WRITE-TOKEN")
+        );
+        assert!(req.contains("\"labelIds\":[\"INBOX\",\"UNREAD\"]"), "{req}");
+        assert!(!req.contains("threadId"));
+        let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        assert!(req.contains(&expected), "raw base64url payload present");
+    }
+
+    /// Google refusing the insert is an error, never a quiet success.
+    #[tokio::test]
+    async fn a_refused_insert_is_an_error() {
+        let (base, handle) = mock_once(403, "{\"error\":{\"code\":403}}").await;
+        let c = client(base);
+        let err = c.insert_into_inbox(b"x").await.unwrap_err();
+        handle.await.unwrap();
+        assert!(matches!(err, WriteError::Api { status: 403, .. }), "{err}");
     }
 
     #[tokio::test]

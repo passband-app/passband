@@ -208,7 +208,7 @@ fn boundary_with_prefix(prefix: &str, parts: &[&str]) -> String {
 }
 
 /// The multipart/alternative boundary for a message whose parts are `parts`.
-fn multipart_boundary(parts: &[&str]) -> String {
+pub(crate) fn multipart_boundary(parts: &[&str]) -> String {
     boundary_with_prefix(BOUNDARY_ALT, parts)
 }
 
@@ -1504,7 +1504,7 @@ const QP_MAX_LINE: usize = 76;
 /// trailing whitespace, and QP's own decoder would then lose it); CRLF passes
 /// through as a hard break; lines soft-break with `=\r\n` before they can reach
 /// [`QP_MAX_LINE`], and a `=XX` token is never split across one.
-fn qp_encode(text: &str) -> String {
+pub(crate) fn qp_encode(text: &str) -> String {
     qp_encode_bytes(text.as_bytes())
 }
 
@@ -1564,7 +1564,7 @@ pub(crate) fn qp_encode_bytes(bytes: &[u8]) -> String {
 /// The REPLY builder does NOT share this function: its parts are short,
 /// server-rendered content, and its wire shape is frozen by tests that pin the
 /// bytes.
-fn alternative_section(boundary: &str, text: &str, html: &str) -> String {
+pub(crate) fn alternative_section(boundary: &str, text: &str, html: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "--{boundary}\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\

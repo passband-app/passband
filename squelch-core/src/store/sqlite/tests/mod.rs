@@ -12,6 +12,7 @@ mod events;
 mod feedback;
 mod groups;
 mod imap_locations;
+mod lapsed_note;
 mod memory;
 mod messages;
 mod migrate;

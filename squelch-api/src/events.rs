@@ -421,13 +421,33 @@ pub async fn get_event(
 /// never showed this event are all "nothing to clear", not errors. 404 for an
 /// id this mailbox does not hold, so a client cannot push clears for events
 /// that never existed.
+///
+/// On an auth event it is also the owner's click on Copy, so it leaves a
+/// `copy_code` audit row on the message: the Auth page's pairing and the
+/// push hold read it as "the owner used this code", like an interactive
+/// reveal (`docs/AUTH-MAIL-HANDLING.md`). Only the message id is recorded.
 pub async fn event_handled(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     let store = state.store.clone();
     let account_id = state.account_id;
-    let event = blocking(&state, move || store.event_by_id(account_id, id)).await?;
+    let event = blocking(&state, move || {
+        let event = store.event_by_id(account_id, id)?;
+        if let Some(event) = event.as_ref().filter(|event| event.is_auth) {
+            store.append_audit(
+                account_id,
+                &squelch_core::store::NewAuditEntry {
+                    actor: "human".to_string(),
+                    action: "copy_code".to_string(),
+                    target: Some(event.message_id.to_string()),
+                    detail: None,
+                },
+            )?;
+        }
+        Ok(event)
+    })
+    .await?;
     if event.is_none() {
         return Err(ApiError::not_found());
     }

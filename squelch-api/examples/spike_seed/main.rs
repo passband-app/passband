@@ -12,6 +12,8 @@ use squelch_core::config::Stage1Config;
 use squelch_core::store::{SqliteStore, Store};
 use squelch_core::sync::ingest::{RawFetched, ingest};
 
+mod rich;
+
 /// A 1x1 transparent PNG.
 const PNG_B64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -70,7 +72,7 @@ fn messages() -> Vec<(&'static str, Vec<u8>)> {
 fn main() -> anyhow::Result<()> {
     let path = std::env::args()
         .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("usage: spike_seed <db path> [--pair-code]"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: spike_seed <db path> [--pair-code | --rich]"))?;
     let store = SqliteStore::open(&path)?;
     let acct = store.ensure_account("me@example.com")?;
     // `--pair-code`: mint one pairing code, print only it, seed nothing.
@@ -81,6 +83,10 @@ fn main() -> anyhow::Result<()> {
         )?;
         println!("{}", minted.code);
         return Ok(());
+    }
+    // `--rich`: a realistic invented inbox (see rich.rs) instead.
+    if std::env::args().nth(2).as_deref() == Some("--rich") {
+        return rich::seed_rich(&store, acct);
     }
     for (i, (thread, bytes)) in messages().into_iter().enumerate() {
         let fetched = RawFetched {

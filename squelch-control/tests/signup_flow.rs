@@ -47,7 +47,7 @@ use squelch_control::config::{
     WaitlistConfig,
 };
 use squelch_control::warden::HttpWarden;
-use squelch_control::{ControlState, activation, invites, retention, router, seal};
+use squelch_control::{ControlState, activation, budget_topup, invites, retention, router, seal};
 use tower::ServiceExt as _;
 
 /// The throwaway Postgres schema every harness in this file is built on.
@@ -139,6 +139,12 @@ struct Recorder {
     bifrost_overrides: Vec<(String, String, Value)>,
     /// When true, the override route answers 500.
     bifrost_fail_override: bool,
+    /// What each key has spent this window, by vk id; zero when absent.
+    bifrost_usage: BTreeMap<String, f64>,
+    /// The window every budget is in (`last_reset`), or [`BIFROST_WINDOW`].
+    bifrost_window: Option<String>,
+    /// The window each key's override was granted in, by vk id.
+    bifrost_anchor: BTreeMap<String, String>,
     /// Bearer values the warden saw, on every route.
     warden_bearers: Vec<String>,
     /// Labels asked about via `GET /v1/tenants/{label}`.
@@ -641,6 +647,10 @@ fn vk_value_for(name: &str) -> String {
 /// sent by the client as HTTP Basic on every governance call.
 const BIFROST_ADMIN: &str = "bifrost-admin:the-basic-password";
 
+/// The window the mock gateway's budgets are in unless a test moves it, in
+/// the gateway's own spelling (Go RFC3339 with nanoseconds).
+const BIFROST_WINDOW: &str = "2026-11-02T09:15:00.123456789Z";
+
 /// The provider key id the mock gateway lists, mirroring the one the live
 /// gateway auto-detects.
 const PROVIDER_KEY_ID: &str = "ANTHROPIC_API_KEY_auto_detected";
@@ -703,20 +713,28 @@ async fn spawn_bifrost(rec: Shared) -> String {
                 |AxumState(rec): AxumState<Shared>, headers: HeaderMap| async move {
                     let mut r = rec.lock().unwrap();
                     r.bifrost_auths.push(bearer_of(&headers));
+                    let window = r.bifrost_window.clone().unwrap_or(BIFROST_WINDOW.into());
                     let keys: Vec<Value> = r
                         .bifrost_minted
                         .iter()
                         .map(|(id, top_up)| {
-                            json!({
-                                "id": id,
-                                "name": id,
-                                "budgets": [{
-                                    "id": format!("b-{id}"),
-                                    "max_limit": DEFAULT_LLM_BUDGET_USD,
-                                    "current_usage": 0,
-                                    "override_amount": top_up,
-                                }],
-                            })
+                            // The live gateway's shape: the override's mode
+                            // and anchor appear only while there is one.
+                            let mut budget = json!({
+                                "id": format!("b-{id}"),
+                                "max_limit": DEFAULT_LLM_BUDGET_USD,
+                                "current_usage": r.bifrost_usage.get(id).copied().unwrap_or(0.0),
+                                "reset_duration": "1M",
+                                "last_reset": window,
+                            });
+                            if *top_up > 0.0 {
+                                budget["override_amount"] = json!(top_up);
+                                budget["override_mode"] = json!("cycles");
+                                budget["override_cycles_remaining"] = json!(1);
+                                budget["override_anchor_reset"] =
+                                    json!(r.bifrost_anchor.get(id).unwrap_or(&window));
+                            }
+                            json!({ "id": id, "name": id, "budgets": [budget] })
                         })
                         .collect();
                     Json(json!({ "virtual_keys": keys })).into_response()
@@ -738,6 +756,8 @@ async fn spawn_bifrost(rec: Shared) -> String {
                         return StatusCode::INTERNAL_SERVER_ERROR;
                     }
                     let amount = body["amount"].as_f64().unwrap_or(0.0);
+                    let window = r.bifrost_window.clone().unwrap_or(BIFROST_WINDOW.into());
+                    r.bifrost_anchor.insert(id.clone(), window);
                     for key in r.bifrost_minted.iter_mut().filter(|(k, _)| *k == id) {
                         key.1 = amount;
                     }
@@ -2381,6 +2401,113 @@ async fn a_refused_signup_allowance_still_installs_both_keys() {
     assert_eq!(
         h.state.store().tenant_vk("ada").await.unwrap(),
         Some(vk_id_for("tenant-ada"))
+    );
+}
+
+/// THE AUTO TOP-UP, end to end against the mock gateway. A new tenant's first
+/// window carries the signup allowance; when it nears the end of base plus
+/// allowance, the budget poller adds one more month ON TOP of the allowance,
+/// tells the operator, and does it once: later passes in the same window send
+/// nothing. The next window is eligible again, and gets one month on top of
+/// no override.
+#[tokio::test]
+async fn a_tenant_about_to_run_out_is_topped_up_once_per_window() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    alerts_after(&h.rec, 1).await;
+    let triage = vk_id_for("tenant-ada");
+    let b = DEFAULT_LLM_BUDGET_USD;
+    let set_usage = |usd: f64| {
+        h.rec
+            .lock()
+            .unwrap()
+            .bifrost_usage
+            .insert(triage.clone(), usd);
+    };
+    let overrides = || h.rec.lock().unwrap().bifrost_overrides.clone();
+    assert_eq!(overrides().len(), 1, "the signup allowance");
+
+    // Under 95% of base + allowance: nothing.
+    set_usage(1.9 * b - 0.01);
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    assert_eq!(overrides().len(), 1);
+
+    // At it: one top-up, stacked on the allowance, on the triage key only.
+    set_usage(1.95 * b);
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 1);
+    let o = overrides();
+    assert_eq!(o.len(), 2, "{o:?}");
+    assert_eq!(
+        o[1],
+        (
+            triage.clone(),
+            format!("b-{triage}"),
+            json!({ "amount": 2.0 * b, "mode": "cycles", "cycles": 1 }),
+        )
+    );
+    let alerts = alerts_after(&h.rec, 2).await;
+    assert!(
+        alerts[1].contains("auto top-up applied: `ada`"),
+        "{}",
+        alerts[1]
+    );
+    assert!(!alerts[1].contains('$'), "{}", alerts[1]);
+
+    // Spent that too: still once per window.
+    set_usage(3.0 * b);
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    assert_eq!(overrides().len(), 2);
+
+    // The next window: the gateway reset the spend and the one-cycle override
+    // expired. Eligible again, for one month on top of nothing.
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_window = Some("2026-12-02T09:15:00.123456789Z".into());
+        for key in r.bifrost_minted.iter_mut() {
+            key.1 = 0.0;
+        }
+    }
+    set_usage(0.95 * b);
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 1);
+    let o = overrides();
+    assert_eq!(o.len(), 3, "{o:?}");
+    assert_eq!(o[2].2["amount"], json!(b));
+    alerts_after(&h.rec, 3).await;
+}
+
+/// A top-up the gateway refuses pages the operator, loudly, and stays owed: it
+/// is not recorded as done, and the retry (once the claim's interval lapses)
+/// sends the amount the first attempt decided.
+#[tokio::test]
+async fn a_failed_auto_top_up_alerts_and_is_not_recorded() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    alerts_after(&h.rec, 1).await;
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_usage
+            .insert(vk_id_for("tenant-ada"), 2.0 * DEFAULT_LLM_BUDGET_USD);
+        r.bifrost_fail_override = true;
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    let alerts = alerts_after(&h.rec, 2).await;
+    assert!(
+        alerts[1].contains("auto top-up FAILED:* `ada` (attempt 1)"),
+        "{}",
+        alerts[1]
+    );
+    assert!(alerts[1].contains("llm topup ada"), "{}", alerts[1]);
+    // Inside the retry interval, the next pass leaves the claim alone.
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    assert_eq!(h.rec.lock().unwrap().bifrost_overrides.len(), 2);
+    let c = h.state.store().auto_topup_candidates(10).await.unwrap();
+    assert_eq!(
+        c[0].last_applied_cycle, None,
+        "a failed top-up is still owed"
     );
 }
 

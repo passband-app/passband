@@ -185,6 +185,27 @@ pub fn signup_provisioned(label: &str) -> String {
     format!(":tada: New tenant provisioned: `{label}`")
 }
 
+/// The budget poller topped up a tenant's triage key for this window
+/// ([`crate::budget_topup`]). No amounts: the label is enough to look the key up.
+pub fn llm_auto_topup_applied(label: &str) -> String {
+    format!(
+        ":battery: LLM budget auto top-up applied: `{label}`\n\
+         Triage had nearly spent this month's budget; it has one more month's worth until \
+         the next reset. Once per cycle."
+    )
+}
+
+/// The budget poller tried to top up a tenant's triage key and could not
+/// confirm it. Sent on every failed attempt.
+pub fn llm_auto_topup_failed(label: &str, error: &str, attempt: i32) -> String {
+    format!(
+        ":rotating_light: *LLM budget auto top-up FAILED:* `{label}` (attempt {attempt})\n\
+         {error}\n\
+         Triage for this tenant stops when its budget runs out. It is retried automatically; \
+         by hand: `squelch-control llm topup {label}`"
+    )
+}
+
 /// A new address landed on the waitlist. Carries the name they typed, when
 /// there is one, and NEVER the address: the admin page is where that lives.
 /// Sent only for a NEW row, so resubmitting the form cannot page anybody.
@@ -317,6 +338,8 @@ mod tests {
             signup_already_provisioned("ethan", Some("vk-1"), None),
             signup_not_recorded("ethan", None, Some("vk-2")),
             signup_provisioned("ethan"),
+            llm_auto_topup_applied("ethan"),
+            llm_auto_topup_failed("ethan", "the LLM gateway refused the request", 2),
         ];
         for m in &msgs {
             assert!(m.contains("`ethan`"), "{m}");
@@ -326,6 +349,12 @@ mod tests {
         assert!(msgs[0].contains("get events") && msgs[0].contains("`vk-1`"));
         assert!(msgs[0].contains("`vk-2`"));
         assert!(!msgs[2].contains("`vk-1`") && msgs[2].contains("`vk-2`"));
+        // A top-up alert names the tenant and carries no dollar amount.
+        for m in &msgs[4..] {
+            assert!(!m.contains('$'), "{m}");
+        }
+        assert!(msgs[5].contains("FAILED") && msgs[5].contains("attempt 2"));
+        assert!(msgs[5].contains("llm topup ethan"), "{}", msgs[5]);
         // No keys minted, no orphan line.
         assert!(!signup_incomplete("ethan", &err, None, None).contains("Orphaned"));
 

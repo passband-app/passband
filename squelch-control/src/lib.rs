@@ -37,6 +37,7 @@ pub mod admin_views;
 pub mod alert;
 mod appearance;
 pub mod bifrost;
+pub mod budget_topup;
 pub mod config;
 pub mod cookie;
 pub mod handlers;

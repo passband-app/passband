@@ -56,6 +56,7 @@
 use std::time::Duration;
 
 use base64::Engine as _;
+use chrono::{DateTime, Datelike as _, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Ceiling on a governance response body. A mint answer is a few hundred
@@ -215,6 +216,17 @@ pub struct BudgetState {
     /// Extra allowance ADDED to `max_limit` while a top-up is active; zero
     /// when there is none. The gateway omits the field then.
     pub override_amount: f64,
+    /// When the budget's CURRENT window opened (`last_reset`). It moves
+    /// exactly when the gateway resets the spend, so it names the cycle a
+    /// reading belongs to. `None` when the gateway omitted it or sent Go's
+    /// zero time, which is no cycle at all.
+    pub last_reset: Option<DateTime<Utc>>,
+    /// `"cycles"`, `"forever"`, or empty when there is no override.
+    pub override_mode: String,
+    /// The window boundary the current override was granted at
+    /// (`override_anchor_reset`). An override anchored before `last_reset`
+    /// belongs to a window that has already closed.
+    pub override_anchor_reset: Option<DateTime<Utc>>,
 }
 
 impl BudgetState {
@@ -402,6 +414,22 @@ struct WireBudget {
     current_usage: f64,
     #[serde(default)]
     override_amount: f64,
+    #[serde(default)]
+    last_reset: Option<String>,
+    #[serde(default)]
+    override_mode: Option<String>,
+    #[serde(default)]
+    override_anchor_reset: Option<String>,
+}
+
+/// A gateway timestamp (Go's RFC3339), or `None` for anything unreadable and
+/// for Go's zero time (`0001-01-01T00:00:00Z`), which a budget that was never
+/// reset can carry and which names no window.
+fn gateway_time(raw: Option<&str>) -> Option<DateTime<Utc>> {
+    let t = DateTime::parse_from_rfc3339(raw?.trim())
+        .ok()?
+        .with_timezone(&Utc);
+    (t.year() >= 2000).then_some(t)
 }
 
 /// `PUT /api/governance/virtual-keys/{vk}/budgets/{budget}/override` body.
@@ -623,6 +651,11 @@ impl BifrostClient {
                                 max_limit: b.max_limit,
                                 current_usage: b.current_usage,
                                 override_amount: b.override_amount,
+                                last_reset: gateway_time(b.last_reset.as_deref()),
+                                override_mode: b.override_mode.unwrap_or_default(),
+                                override_anchor_reset: gateway_time(
+                                    b.override_anchor_reset.as_deref(),
+                                ),
                             })
                             .collect(),
                     })
@@ -1575,6 +1608,67 @@ mod tests {
         assert_eq!(keys[0].budgets[0].id, "b-1");
         assert!((keys[0].budgets[0].headroom() - 19.96).abs() < 1e-9);
         assert!(keys[1].budgets.is_empty());
+    }
+
+    /// The listing also says which window a budget is in and which window its
+    /// override was granted in, read as the live gateway (v1.6.9) spells them.
+    /// Go's zero time, an unreadable stamp and an absent one all read as no
+    /// window rather than as year one.
+    #[tokio::test]
+    async fn listing_reads_the_budget_window_and_the_override_grant() {
+        let rec: Shared = Arc::new(Mutex::new(Recorder {
+            listing: Some(json!({
+                "virtual_keys": [
+                    {
+                        "id": "vk-1",
+                        "name": "tenant-ada",
+                        "budgets": [{
+                            "id": "b-1",
+                            "max_limit": 75,
+                            "current_usage": 80,
+                            "override_amount": 75,
+                            "override_mode": "cycles",
+                            "override_cycles_remaining": 1,
+                            "last_reset": "2026-11-02T09:15:00.123456789Z",
+                            "override_anchor_reset": "2026-11-02T09:15:00.123456789Z",
+                            "reset_duration": "1M",
+                        }],
+                    },
+                    {
+                        "id": "vk-2",
+                        "name": "tenant-bob",
+                        "budgets": [{
+                            "id": "b-2",
+                            "max_limit": 75,
+                            "last_reset": "0001-01-01T00:00:00Z",
+                            "override_anchor_reset": "not a time",
+                        }],
+                    },
+                    {
+                        "id": "vk-3",
+                        "name": "tenant-cy",
+                        "budgets": [{ "id": "b-3", "max_limit": 75 }],
+                    },
+                ],
+            })),
+            ..Default::default()
+        }));
+        let c = client_for(&rec).await;
+
+        let keys = c.list_virtual_keys().await.unwrap();
+        let b = &keys[0].budgets[0];
+        let opened = DateTime::parse_from_rfc3339("2026-11-02T09:15:00.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(b.last_reset, Some(opened));
+        assert_eq!(b.override_anchor_reset, Some(opened));
+        assert_eq!(b.override_mode, "cycles");
+        for k in &keys[1..] {
+            let b = &k.budgets[0];
+            assert_eq!(b.last_reset, None, "{}", k.name);
+            assert_eq!(b.override_anchor_reset, None, "{}", k.name);
+            assert_eq!(b.override_mode, "", "{}", k.name);
+        }
     }
 
     /// A top-up is one cycle of extra allowance on the budget's own route: it

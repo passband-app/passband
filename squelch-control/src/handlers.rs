@@ -1659,7 +1659,9 @@ pub async fn oauth_callback(
                 // resets. That bill is onboarding, not the person's usage. It
                 // rides the gateway's one-cycle override, so it ends by itself
                 // at the first reset. Signup only: `llm mint` is a reset and
-                // `llm topup` is the operator's own call.
+                // `llm topup` is the operator's own call. The budget poller
+                // (`crate::budget_topup`) keeps this allowance and adds its
+                // one top-up on top of it if the first window still runs out.
                 //
                 // Fail-soft like the mint: a key without the allowance is a
                 // tenant on the ordinary limit, which `llm topup --usd` fixes

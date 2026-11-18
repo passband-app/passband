@@ -723,6 +723,9 @@ crate::types::str_enum! {
     pub enum ClientPlatform {
         Macos => "macos",
         Ios => "ios",
+        /// The hosted web client. A token once seen as this one is held to
+        /// [`WEB_TOKEN_IDLE_DAYS`](sqlite::device_tokens::WEB_TOKEN_IDLE_DAYS).
+        Web => "web",
     }
 }
 

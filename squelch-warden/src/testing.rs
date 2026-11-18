@@ -58,6 +58,7 @@ pub fn test_config() -> Config {
         // Unset, like a self-host and like a hosted deploy whose operator has
         // not filled it in: the tests that care set it themselves.
         console_sso_url: None,
+        web_app_origin: None,
         storage_class: DEFAULT_STORAGE_CLASS.to_string(),
         storage_size: DEFAULT_STORAGE_SIZE.to_string(),
         daemon_resources: Resources {

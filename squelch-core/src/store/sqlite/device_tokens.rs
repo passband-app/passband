@@ -93,6 +93,13 @@ const LAST_USED_THROTTLE_SECS: i64 = 60;
 /// refreshing its own stamp, and the other is never recorded while it does.
 const CLIENT_CHANGE_THROTTLE_SECS: i64 = 60 * 60;
 
+/// How long a token last used by the WEB client may sit idle before it stops
+/// authenticating. A browser is the device most likely to be shared, left
+/// signed in, or handed on, and pairing again from it is one sign-in, so a
+/// web token that nobody has used for a month is refused rather than kept.
+/// Native clients are not held to this.
+pub const WEB_TOKEN_IDLE_DAYS: i64 = 30;
+
 /// Most (platform, version) pairs [`SqliteStore::client_versions_seen`] hands
 /// back, newest first. Each one is a metric series, and a row keeps the last
 /// version its device ran forever, so without a bound an account that has
@@ -109,6 +116,8 @@ const MAX_DEVICE_NAME_CHARS: usize = 100;
 const ACTOR_CLI: &str = "cli";
 /// Audit actor for what the pairing flow does on the user's behalf.
 const ACTOR_PAIRING: &str = "pairing";
+/// Audit actor for a device signing ITSELF out (`DELETE /client/session`).
+const ACTOR_DEVICE: &str = "device";
 
 /// Lowercase hex SHA-256 — the one spelling every hash column in this module
 /// stores, and the only form of a token or code that touches disk.
@@ -386,7 +395,27 @@ impl SqliteStore {
         let older_than = |at: Option<DateTime<Utc>>, secs: i64| {
             at.is_none_or(|last| now.signed_duration_since(last) > Duration::seconds(secs))
         };
+
+        // A WEB token idle past its limit is as absent as a revoked one: the
+        // same `None`, so nothing outside can tell the two apart. Idle is
+        // measured from its last use, or from its mint if it was never used.
+        let web = stored_platform.as_deref() == Some(ClientPlatform::Web.as_str());
+        if web
+            && older_than(
+                Some(token.last_used_at.unwrap_or(token.created_at)),
+                WEB_TOKEN_IDLE_DAYS * 24 * 60 * 60,
+            )
+        {
+            return Ok(None);
+        }
+
         let named = client.filter(|c| {
+            // ONCE WEB, ALWAYS WEB. A request naming another platform must not
+            // relabel a web token and so lift its idle limit; its use is still
+            // recorded below, as any unnamed request's is.
+            if web && c.platform != ClientPlatform::Web {
+                return false;
+            }
             let same = stored_platform.as_deref() == Some(c.platform.as_str())
                 && stored_version.as_deref() == Some(c.version());
             let quiet_for = if same {
@@ -437,6 +466,18 @@ impl SqliteStore {
     /// Effective on the NEXT request: [`SqliteStore::verify_device_token`] reads
     /// the row every time, and nothing caches it.
     pub fn revoke_device_token(&self, account_id: AccountId, id: i64) -> Result<bool> {
+        self.revoke_device_token_as(account_id, id, ACTOR_CLI)
+    }
+
+    /// [`SqliteStore::revoke_device_token`] for a device revoking ITS OWN token,
+    /// audited under its own actor so `token list` history says who did it.
+    /// The caller is responsible for `id` being the token that authenticated
+    /// the request; this method only tombstones and audits.
+    pub fn revoke_own_device_token(&self, account_id: AccountId, id: i64) -> Result<bool> {
+        self.revoke_device_token_as(account_id, id, ACTOR_DEVICE)
+    }
+
+    fn revoke_device_token_as(&self, account_id: AccountId, id: i64, actor: &str) -> Result<bool> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let now = Utc::now();
@@ -456,7 +497,7 @@ impl SqliteStore {
             params![
                 account_id,
                 now.to_rfc3339(),
-                ACTOR_CLI,
+                actor,
                 "token.revoke",
                 token_target(id),
             ],
@@ -845,6 +886,22 @@ impl SqliteStore {
         presented_code: &str,
         device_name: &str,
     ) -> Result<IssuedDeviceToken> {
+        self.claim_pairing_code_as(presented_code, device_name, None)
+    }
+
+    /// [`Self::claim_pairing_code`], with the claiming client's platform
+    /// recorded on the token IN THE SAME TRANSACTION as the mint.
+    ///
+    /// For the web client this is what puts a token under
+    /// [`WEB_TOKEN_IDLE_DAYS`] from its first moment: a platform stamped only
+    /// by the first authenticated request would leave a minted token, used
+    /// first under another platform, outside the rule for good.
+    pub fn claim_pairing_code_as(
+        &self,
+        presented_code: &str,
+        device_name: &str,
+        platform: Option<ClientPlatform>,
+    ) -> Result<IssuedDeviceToken> {
         // Checked BEFORE the code so a nameless claim cannot burn a good code.
         // It is not an oracle: the caller supplied this field and learns nothing
         // about the code from being told their own name was empty.
@@ -898,6 +955,13 @@ impl SqliteStore {
             params![code_id, account_id, now.to_rfc3339()],
         )?;
         let issued = insert_token(&tx, account_id, &name, ACTOR_PAIRING, "pairing.claim")?;
+        if let Some(platform) = platform {
+            tx.execute(
+                "UPDATE device_tokens SET client_platform = ?3
+                 WHERE id = ?1 AND account_id = ?2",
+                params![issued.id, account_id, platform.as_str()],
+            )?;
+        }
         tx.commit()?;
         Ok(issued)
     }

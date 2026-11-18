@@ -1356,3 +1356,113 @@ fn a_request_without_a_zone_keeps_the_stored_one_and_a_new_zone_replaces_it() {
         .unwrap();
     assert_eq!(owner_zone_name(&store, acct).0, "Asia/Tokyo");
 }
+
+// ---- web tokens: idle limit -------------------------------------------------
+
+/// `web/` is a platform a client may name, like the two native apps.
+#[test]
+fn client_tag_parses_the_web_client() {
+    assert_eq!(tag("web/0.1.0").platform, ClientPlatform::Web);
+}
+
+/// A token last used by the web client stops working after a month idle, and
+/// looks exactly like a revoked one when it does. The same idle on a native
+/// token changes nothing.
+#[test]
+fn a_web_token_idle_past_its_limit_stops_authenticating() {
+    use super::super::device_tokens::WEB_TOKEN_IDLE_DAYS;
+    let (store, acct) = store();
+    let web = store.issue_device_token(acct, "Web browser").unwrap();
+    let mac = store.issue_device_token(acct, "Mac").unwrap();
+    store
+        .verify_device_token_from(&web.token, Some(&tag("web/0.1.0")))
+        .unwrap()
+        .unwrap();
+    store
+        .verify_device_token_from(&mac.token, Some(&tag("macos/0.0.20")))
+        .unwrap()
+        .unwrap();
+
+    // Just inside the limit: still good.
+    backdate_last_used(&store, web.id, Duration::days(WEB_TOKEN_IDLE_DAYS - 1));
+    assert!(store.verify_device_token(&web.token).unwrap().is_some());
+
+    // Past it: refused, with or without a client header, and the native token
+    // idle just as long is untouched.
+    backdate_last_used(&store, web.id, Duration::days(WEB_TOKEN_IDLE_DAYS + 1));
+    backdate_last_used(&store, mac.id, Duration::days(WEB_TOKEN_IDLE_DAYS + 1));
+    assert!(store.verify_device_token(&web.token).unwrap().is_none());
+    assert!(
+        store
+            .verify_device_token_from(&web.token, Some(&tag("web/0.1.0")))
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.verify_device_token(&mac.token).unwrap().is_some());
+}
+
+/// A web token cannot shed its idle limit by naming another platform: the
+/// stored platform stays `web`, so the limit still applies afterwards.
+#[test]
+fn a_web_token_cannot_be_relabelled_as_a_native_one() {
+    let (store, acct) = store();
+    let web = store.issue_device_token(acct, "Web browser").unwrap();
+    store
+        .verify_device_token_from(&web.token, Some(&tag("web/0.1.0")))
+        .unwrap()
+        .unwrap();
+    // Past both throttles, so a genuine platform change would be written.
+    set_client_seen(&store, web.id, Utc::now() - Duration::days(2));
+    store
+        .verify_device_token_from(&web.token, Some(&tag("macos/0.0.20")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw_client(&store, web.id).0.as_deref(), Some("web"));
+
+    backdate_last_used(&store, web.id, Duration::days(40));
+    assert!(
+        store
+            .verify_device_token_from(&web.token, Some(&tag("macos/0.0.20")))
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A web client names its platform in the claim, so the token is under the web
+/// idle rule from the moment it is minted: a first request naming another
+/// platform cannot keep it out, and a token that is never used at all still
+/// expires, counted from its mint.
+#[test]
+fn a_token_claimed_as_web_is_held_to_the_web_rule_from_its_mint() {
+    use super::super::device_tokens::WEB_TOKEN_IDLE_DAYS;
+    let (store, acct) = store();
+    let minted = store.mint_pairing_code(acct, ttl()).unwrap();
+    let web = store
+        .claim_pairing_code_as(
+            &minted.code,
+            "Chrome on macOS (web)",
+            Some(ClientPlatform::Web),
+        )
+        .unwrap();
+    assert_eq!(raw_client(&store, web.id).0.as_deref(), Some("web"));
+
+    // First use names another platform: the label stays web.
+    store
+        .verify_device_token_from(&web.token, Some(&tag("macos/0.0.20")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw_client(&store, web.id).0.as_deref(), Some("web"));
+
+    backdate_last_used(&store, web.id, Duration::days(WEB_TOKEN_IDLE_DAYS + 1));
+    assert!(
+        store
+            .verify_device_token_from(&web.token, Some(&tag("macos/0.0.20")))
+            .unwrap()
+            .is_none()
+    );
+
+    // A claim with no platform is unchanged from before.
+    let minted = store.mint_pairing_code(acct, ttl()).unwrap();
+    let plain = store.claim_pairing_code(&minted.code, "iPhone").unwrap();
+    assert_eq!(raw_client(&store, plain.id).0, None);
+}

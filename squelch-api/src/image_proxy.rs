@@ -17,16 +17,21 @@
 //!   - the type comes from the BYTES, never the header: raster formats only,
 //!     and SVG is never served (it has no magic number, only markup);
 //!   - served through [`crate::handlers::attachment_response`], so the same
-//!     `nosniff` and content-type discipline as attachments.
+//!     `nosniff` and content-type discipline as attachments;
+//!   - a token bucket on upstream fetches ([`Bucket`]), answered 429 with
+//!     `Retry-After` when empty, and a small byte-bounded LRU of images already
+//!     fetched ([`Cache`]), so reopening a thread does not go back upstream.
+//!     Both are per process, which on hosted is per tenant.
 //!
 //! Errors never echo the URL: it can carry a sender's per-recipient token.
 
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::extract::Query;
-use axum::http::StatusCode;
-use axum::response::Response;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use url::Url;
@@ -46,6 +51,14 @@ const CONCURRENCY: usize = 8;
 /// Generic on purpose: the point of fetching here is that the sender learns as
 /// little about the reader as a fetch can tell it.
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; image fetcher)";
+
+/// Upstream fetches allowed in a burst, and the steady rate after it: thirty at
+/// once (a newsletter's worth), then one a second.
+const BUCKET_CAPACITY: f64 = 30.0;
+const BUCKET_REFILL_PER_SEC: f64 = 1.0;
+/// Bytes of images kept for reopening, and how long one is kept.
+const CACHE_BYTES: usize = 32 * 1024 * 1024;
+const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Bytes [`sniff`] reads. Fewer than this and the answer can still change.
 const SNIFF_LEN: usize = 12;
@@ -264,26 +277,186 @@ fn shared() -> Result<&'static ImageFetcher, ApiError> {
         })
 }
 
+/// A token bucket over upstream fetches. Time is passed in, so the arithmetic
+/// is tested without sleeping.
+#[derive(Debug)]
+pub(crate) struct Bucket {
+    tokens: f64,
+    at: Instant,
+}
+
+impl Bucket {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            tokens: BUCKET_CAPACITY,
+            at: now,
+        }
+    }
+
+    /// Spend one token, or say how long until one is there.
+    pub(crate) fn take(&mut self, now: Instant) -> Result<(), Duration> {
+        let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * BUCKET_REFILL_PER_SEC).min(BUCKET_CAPACITY);
+        self.at = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            Ok(())
+        } else {
+            Err(Duration::from_secs_f64(
+                (1.0 - self.tokens) / BUCKET_REFILL_PER_SEC,
+            ))
+        }
+    }
+}
+
+struct Cached {
+    mime: &'static str,
+    bytes: Arc<Vec<u8>>,
+    stored: Instant,
+    used: u64,
+}
+
+/// Images already fetched, keyed by normalized URL, bounded by total bytes and
+/// by age. Least recently used goes first when a new image does not fit.
+#[derive(Default)]
+pub(crate) struct Cache {
+    entries: HashMap<String, Cached>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl Cache {
+    pub(crate) fn get(&mut self, key: &str, now: Instant) -> Option<(&'static str, Arc<Vec<u8>>)> {
+        self.clock += 1;
+        let entry = self.entries.get_mut(key)?;
+        if now.saturating_duration_since(entry.stored) < CACHE_TTL {
+            entry.used = self.clock;
+            return Some((entry.mime, entry.bytes.clone()));
+        }
+        // Expired: gone, and its bytes back in the budget.
+        if let Some(old) = self.entries.remove(key) {
+            self.bytes -= old.bytes.len();
+        }
+        None
+    }
+
+    pub(crate) fn put(
+        &mut self,
+        key: String,
+        mime: &'static str,
+        bytes: Arc<Vec<u8>>,
+        now: Instant,
+    ) {
+        if bytes.len() > CACHE_BYTES {
+            return;
+        }
+        if let Some(old) = self.entries.remove(&key) {
+            self.bytes -= old.bytes.len();
+        }
+        while self.bytes + bytes.len() > CACHE_BYTES {
+            let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.used)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&victim) {
+                self.bytes -= old.bytes.len();
+            }
+        }
+        self.clock += 1;
+        self.bytes += bytes.len();
+        self.entries.insert(
+            key,
+            Cached {
+                mime,
+                bytes,
+                stored: now,
+                used: self.clock,
+            },
+        );
+    }
+}
+
+/// The cache key: the URL as `url` serializes it (scheme and host lowercased,
+/// default port dropped), without its fragment, which never reaches a server.
+fn cache_key(raw: &str) -> Option<String> {
+    let mut url = Url::parse(raw.trim()).ok()?;
+    url.set_fragment(None);
+    Some(url.into())
+}
+
+fn bucket() -> &'static Mutex<Bucket> {
+    static BUCKET: OnceLock<Mutex<Bucket>> = OnceLock::new();
+    BUCKET.get_or_init(|| Mutex::new(Bucket::new(Instant::now())))
+}
+
+fn cache() -> &'static Mutex<Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Cache::default()))
+}
+
 fn permits() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
     SEM.get_or_init(|| Semaphore::new(CONCURRENCY))
 }
 
+/// A sender's image can change under the same URL, but not usefully within a
+/// reading session; a day keeps a reopened mail instant.
+const CACHE_CONTROL: &str = "private, max-age=86400";
+
 pub async fn get_image(Query(q): Query<ImageQuery>) -> Result<Response, ApiError> {
+    let key = cache_key(&q.u);
+    // A hit costs nothing upstream, so it spends no token.
+    if let Some(key) = &key {
+        let hit = cache()
+            .lock()
+            .ok()
+            .and_then(|mut c| c.get(key, Instant::now()));
+        if let Some((mime, bytes)) = hit {
+            return Ok(crate::handlers::attachment_response(
+                "image",
+                mime,
+                bytes.as_ref().clone(),
+                CACHE_CONTROL,
+            ));
+        }
+    }
+    let taken = bucket()
+        .lock()
+        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "busy"))?
+        .take(Instant::now());
+    if let Err(wait) = taken {
+        return Ok(too_many(wait));
+    }
     let fetcher = shared()?;
     let _permit = permits()
         .acquire()
         .await
         .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "busy"))?;
     let (mime, bytes) = fetcher.fetch(&q.u).await?;
+    let bytes = Arc::new(bytes);
+    if let (Some(key), Ok(mut c)) = (key, cache().lock()) {
+        c.put(key, mime, bytes.clone(), Instant::now());
+    }
     Ok(crate::handlers::attachment_response(
         "image",
         mime,
-        bytes,
-        // A sender's image can change under the same URL, but not usefully
-        // within a reading session; a day keeps a reopened mail instant.
-        "private, max-age=86400",
+        Arc::unwrap_or_clone(bytes),
+        CACHE_CONTROL,
     ))
+}
+
+/// 429 with a whole-second `Retry-After`, never zero.
+fn too_many(wait: Duration) -> Response {
+    let secs = wait.as_secs_f64().ceil().max(1.0) as u64;
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, secs.to_string())],
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -506,5 +679,77 @@ mod tests {
         let api: ApiError = err.into();
         assert!(!api.message.contains("secret-token-123"));
         assert_eq!(api.status, StatusCode::BAD_GATEWAY);
+    }
+
+    /// The bucket gives a burst, then one a second, and says how long to wait.
+    #[test]
+    fn the_bucket_allows_a_burst_then_the_steady_rate() {
+        let t0 = Instant::now();
+        let mut b = Bucket::new(t0);
+        for _ in 0..30 {
+            assert!(b.take(t0).is_ok());
+        }
+        let wait = b.take(t0).unwrap_err();
+        assert!(
+            wait > Duration::ZERO && wait <= Duration::from_secs(1),
+            "{wait:?}"
+        );
+        assert!(b.take(t0 + Duration::from_millis(1_100)).is_ok());
+        assert!(b.take(t0 + Duration::from_millis(1_100)).is_err());
+        // A long idle refills to the cap and no further.
+        let later = t0 + Duration::from_secs(3_600);
+        for _ in 0..30 {
+            assert!(b.take(later).is_ok());
+        }
+        assert!(b.take(later).is_err());
+    }
+
+    #[test]
+    fn a_throttled_answer_says_when_to_come_back() {
+        let resp = too_many(Duration::from_millis(200));
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()[header::RETRY_AFTER], "1");
+    }
+
+    /// The cache hands back what it holds until it is an hour old, keyed so
+    /// that spellings of one URL share an entry and a fragment is ignored.
+    #[test]
+    fn the_cache_serves_until_its_entries_expire() {
+        let t0 = Instant::now();
+        let mut c = Cache::default();
+        let key = cache_key("HTTPS://Images.Example:443/a.png#x").unwrap();
+        assert_eq!(key, cache_key("https://images.example/a.png").unwrap());
+        c.put(key.clone(), "image/png", Arc::new(vec![1, 2, 3]), t0);
+        let (mime, bytes) = c.get(&key, t0 + Duration::from_secs(60)).unwrap();
+        assert_eq!((mime, bytes.as_slice()), ("image/png", &[1u8, 2, 3][..]));
+        assert!(c.get(&key, t0 + CACHE_TTL).is_none());
+        assert_eq!(c.bytes, 0, "an expired entry gives its bytes back");
+    }
+
+    /// Bounded by bytes, evicting the least recently used first.
+    #[test]
+    fn the_cache_evicts_the_least_recently_used_to_stay_in_budget() {
+        let t0 = Instant::now();
+        let mut c = Cache::default();
+        let third = CACHE_BYTES / 3;
+        c.put("a".into(), "image/png", Arc::new(vec![0; third]), t0);
+        c.put("b".into(), "image/png", Arc::new(vec![0; third]), t0);
+        c.put("c".into(), "image/png", Arc::new(vec![0; third]), t0);
+        // Touch `a`, so `b` is now the oldest use.
+        assert!(c.get("a", t0).is_some());
+        c.put("d".into(), "image/png", Arc::new(vec![0; third]), t0);
+        assert!(c.get("b", t0).is_none(), "the least recently used went");
+        assert!(c.get("a", t0).is_some());
+        assert!(c.get("c", t0).is_some());
+        assert!(c.get("d", t0).is_some());
+        assert!(c.bytes <= CACHE_BYTES);
+        // Something larger than the whole budget is never kept.
+        c.put(
+            "huge".into(),
+            "image/png",
+            Arc::new(vec![0; CACHE_BYTES + 1]),
+            t0,
+        );
+        assert!(c.get("huge", t0).is_none());
     }
 }

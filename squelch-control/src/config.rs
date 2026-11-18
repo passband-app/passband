@@ -367,6 +367,13 @@ pub struct Config {
     /// is NOT MOUNTED (a 404): a deployment that cannot complete an AuthKit
     /// login must not open Google consents on AuthKit's behalf.
     pub workos: Option<WorkosConfig>,
+    /// The hosted web client's origin (`https://app.passband.app`), when this
+    /// deployment has one. `None` means an app sign-in started with
+    /// `?return=web` ends on the native deep-link page exactly as any other,
+    /// because there is nowhere else this service may send it. Set, it is the
+    /// ONLY web origin a pairing code is ever handed to, and it comes from here,
+    /// never from the request.
+    pub web_app_origin: Option<String>,
 }
 
 /// The WorkOS AuthKit "Standalone Connect" settings: the key the completion
@@ -519,6 +526,7 @@ impl std::fmt::Debug for Config {
             .field("posthog_url", &self.posthog_url)
             // WorkosConfig's own Debug redacts the API key.
             .field("workos", &self.workos)
+            .field("web_app_origin", &self.web_app_origin)
             .finish()
     }
 }
@@ -663,6 +671,7 @@ impl Config {
             alert_webhook_url: alert_webhook_from(var("SQUELCH_CONTROL_ALERT_WEBHOOK_URL"))?,
             posthog_url: Some(crate::posthog::POSTHOG_URL.to_string()),
             workos: workos_from(var("SQUELCH_CONTROL_WORKOS_API_KEY"))?,
+            web_app_origin: web_app_origin_from(var("SQUELCH_CONTROL_WEB_APP_ORIGIN"))?,
         })
     }
 
@@ -1042,6 +1051,25 @@ fn canonical_origin(name: &str, raw: &str) -> Result<String, ConfigError> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
+/// The web client's origin, validated: an exact origin, https, except plain
+/// http on a loopback host for a local run. Blank is unset.
+fn web_app_origin_from(raw: Option<String>) -> Result<Option<String>, ConfigError> {
+    const NAME: &str = "SQUELCH_CONTROL_WEB_APP_ORIGIN";
+    let Some(raw) = raw.filter(|r| !r.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let origin = canonical_origin(NAME, raw.trim())?;
+    let loopback = ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+        .iter()
+        .any(|p| origin == *p || origin.starts_with(&format!("{p}:")));
+    if !origin.starts_with("https://") && !loopback {
+        return Err(ConfigError::invalid(format!(
+            "invalid {NAME} `{origin}`: expected https (plain http only on a loopback host)"
+        )));
+    }
+    Ok(Some(origin))
+}
+
 /// Validate the hosted base domain. It is interpolated into every tenant URL
 /// and every deep link, so anything that is not a plain DNS name — a scheme, a
 /// port, a path, a leading dot, an underscore — is refused at boot.
@@ -1156,6 +1184,7 @@ mod tests {
                 api_key: "WORKOS-API-KEY-VALUE".into(),
                 api_url: WORKOS_API_URL.into(),
             }),
+            web_app_origin: Some("https://app.passband.test".into()),
         }
     }
 
@@ -1262,6 +1291,31 @@ mod tests {
             "pass_band.email",
         ] {
             assert!(canonical_domain(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The web origin is an exact https origin, or plain http on a loopback
+    /// host for a local run. Blank is unset; anything else refuses to boot.
+    #[test]
+    fn the_web_app_origin_is_an_exact_https_origin() {
+        assert_eq!(web_app_origin_from(None).unwrap(), None);
+        assert_eq!(web_app_origin_from(Some("  ".into())).unwrap(), None);
+        assert_eq!(
+            web_app_origin_from(Some("https://app.passband.test/".into())).unwrap(),
+            Some("https://app.passband.test".into())
+        );
+        assert_eq!(
+            web_app_origin_from(Some("http://localhost:5176".into())).unwrap(),
+            Some("http://localhost:5176".into())
+        );
+        for bad in [
+            "http://app.passband.test",
+            "http://localhost.evil.test",
+            "https://app.passband.test/connect",
+            "https://user@app.passband.test",
+            "app.passband.test",
+        ] {
+            assert!(web_app_origin_from(Some(bad.into())).is_err(), "{bad}");
         }
     }
 

@@ -250,6 +250,11 @@ data:
   # itself. Leave it out and every console is the pasted-code form only (which is
   # what a self-host gets, and what `squelchd pair` is for).
   SQUELCH_WARDEN_CONSOLE_SSO_URL: "https://signup.passband.app"
+  # The hosted web client's origin, handed to every tenant daemon as
+  # SQUELCH_PAIR_ORIGINS: the only browser origin allowed to claim a pairing
+  # code cross-origin. An https ORIGIN, no path. Leave it out and no tenant's
+  # pairing route answers any browser page on another origin.
+  # SQUELCH_WARDEN_WEB_APP_ORIGIN: "https://app.passband.app"
   # The agent door. UNSET IS THE DOOR SHUT: no tenant Ingress routes /mcp and no
   # pod is told anything about it. Set, it is the WorkOS AuthKit issuer (an
   # https origin, no path, exactly as AuthKit's own metadata spells `issuer`),

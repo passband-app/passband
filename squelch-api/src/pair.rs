@@ -70,6 +70,11 @@ struct PairRequest {
     /// The label this device carries in `squelchd token list`, so the operator
     /// can tell which row to revoke later.
     device_name: String,
+    /// Optional: the claiming app's platform (`"web"`), recorded with the mint
+    /// so a web token is under the web idle rule from its first moment. An
+    /// unknown value is ignored rather than refused, like the client header.
+    #[serde(default)]
+    platform: Option<String>,
 }
 
 /// The mint. `token` is the ONLY copy that will ever exist: the daemon keeps a
@@ -143,7 +148,11 @@ async fn claim(
     // closed like everything else.
     let store = state.store.clone();
     let issued = crate::handlers::blocking_on(&state.pair_slots, move || {
-        store.claim_pairing_code(&body.code, &body.device_name)
+        let platform = body
+            .platform
+            .as_deref()
+            .and_then(squelch_core::store::ClientPlatform::parse);
+        store.claim_pairing_code_as(&body.code, &body.device_name, platform)
     })
     .await;
 

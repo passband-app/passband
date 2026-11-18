@@ -71,6 +71,7 @@ impl Harness {
             posthog_url: None,
             bifrost: None,
             workos: None,
+            web_app_origin: None,
             waitlist: Some(WaitlistConfig {
                 admin_token: ADMIN_TOKEN.into(),
                 resend_api_key: "re_test_0123456789".into(),

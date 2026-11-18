@@ -16415,3 +16415,79 @@ async fn client_cors_names_the_headers_a_browser_client_sends() {
         .to_ascii_lowercase();
     assert!(exposed.contains("content-disposition"), "{exposed:?}");
 }
+
+/// A device signs itself out: its own token is revoked and gets a 401 from
+/// then on, another device's token is untouched, and the master token, which
+/// has no row, is refused rather than revoking anything.
+#[tokio::test]
+async fn a_device_can_revoke_its_own_token_and_nothing_else() {
+    let h = common::harness(|_, _| {});
+    let web = h.store.issue_device_token(h.acct, "Web browser").unwrap();
+    let mac = h.store.issue_device_token(h.acct, "Mac").unwrap();
+    let with = |token: &str, method: &str, uri: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(with(&web.token, "DELETE", "/client/session"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(with(&web.token, "GET", "/client/stats"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "the token is dead");
+    let resp = h
+        .app
+        .clone()
+        .oneshot(with(&mac.token, "GET", "/client/stats"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "another device is untouched");
+
+    // Audited under the device's own actor, by id, never by value.
+    let log = h.store.list_audit(h.acct, 50).unwrap();
+    let revoke = log.iter().find(|e| e.action == "token.revoke").unwrap();
+    assert_eq!(revoke.actor, "device");
+    assert!(log.iter().all(|e| {
+        let row = format!("{e:?}");
+        !row.contains(&web.token) && !row.contains(&mac.token)
+    }));
+
+    // The master token cannot sign itself out, and still works afterwards.
+    let resp = h
+        .app
+        .clone()
+        .oneshot(common::authed("DELETE", "/client/session"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let resp = h
+        .app
+        .clone()
+        .oneshot(common::authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        h.store
+            .list_audit(h.acct, 50)
+            .unwrap()
+            .iter()
+            .filter(|e| e.action == "token.revoke")
+            .count(),
+        1,
+        "the refused call revoked nothing"
+    );
+}

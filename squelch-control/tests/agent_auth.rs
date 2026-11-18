@@ -246,6 +246,7 @@ impl Harness {
                 api_key: WORKOS_KEY.into(),
                 api_url: workos_url,
             }),
+            web_app_origin: None,
         };
 
         let (store, _url) = common::fresh_store().await;

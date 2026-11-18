@@ -217,6 +217,7 @@ impl Harness {
             posthog_url: None,
             // No agent door: `/agent/auth` is not mounted.
             workos: None,
+            web_app_origin: None,
             bifrost: None,
             waitlist: waitlist.then(|| WaitlistConfig {
                 admin_token: ADMIN_TOKEN.into(),

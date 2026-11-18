@@ -1631,6 +1631,11 @@ fn daemon_env_for(config: &Config, name: &TenantName, provider: MailProvider) ->
     // renders for a human, the other an API it authenticates to. An operator
     // configuring the control plane twice is an operator who can get them out
     // of step.
+    // The web client's origin, the only browser origin the tenant's pairing
+    // route answers. Absent when unset, so the route keeps no CORS at all.
+    if let Some(origin) = &config.web_app_origin {
+        env.push(plain("SQUELCH_PAIR_ORIGINS", origin));
+    }
     if let Some(url) = &config.console_sso_url {
         env.push(plain("SQUELCH_CONSOLE_SSO_URL", url));
         env.push(plain("SQUELCH_CONTROL_URL", url));
@@ -2778,6 +2783,32 @@ mod tests {
                 .iter()
                 .any(|e| e.name == "SQUELCH_CONSOLE_SSO_URL")
         );
+    }
+
+    /// The web client's origin reaches the daemon as `SQUELCH_PAIR_ORIGINS`
+    /// when configured, and is absent otherwise.
+    #[test]
+    fn the_web_app_origin_reaches_the_daemon_only_when_configured() {
+        let find = |c: &Config| {
+            tenant_deployment(c)
+                .spec
+                .unwrap()
+                .template
+                .spec
+                .unwrap()
+                .containers[0]
+                .env
+                .clone()
+                .unwrap()
+                .into_iter()
+                .find(|e| e.name == "SQUELCH_PAIR_ORIGINS")
+        };
+        let mut c = test_config();
+        assert!(find(&c).is_none());
+        c.web_app_origin = Some("https://app.passband.app".to_string());
+        let var = find(&c).expect("SQUELCH_PAIR_ORIGINS is missing from the tenant pod");
+        assert_eq!(var.value.as_deref(), Some("https://app.passband.app"));
+        assert!(var.value_from.is_none());
     }
 
     /// Every container bounded, and the one writable scratch volume bounded

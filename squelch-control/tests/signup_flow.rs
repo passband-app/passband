@@ -842,6 +842,7 @@ impl Harness {
             posthog_url: Some(warden_url.clone()),
             // No agent door: `/agent/auth` is not mounted.
             workos: None,
+            web_app_origin: None,
             // The struct is constructed directly, so an http mock URL is fine
             // here; `from_env` is where https is enforced.
             bifrost: bifrost_url.map(|url| BifrostConfig {

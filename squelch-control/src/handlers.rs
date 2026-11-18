@@ -869,14 +869,27 @@ pub async fn console_auth(
 /// is the one they just proved they hold.
 ///
 /// NO RETURN URL, and no parameter that could become one, exactly as next door.
-/// The only place it can send anybody is a `passband://` link built from this
-/// deployment's own base domain.
+/// The only places it can send anybody are a `passband://` link built from this
+/// deployment's own base domain, or, for the web client, the ONE web origin this
+/// deployment is configured with ([`crate::config::Config::web_app_origin`]).
+/// `?return=web` picks between those two; it names no destination.
+///
+/// THE WEB CLIENT'S `state` rides through untouched. It is the web client's own
+/// one-shot value, shape-checked here and handed back beside the code, so the
+/// web client can refuse a sign-in it did not start. A missing or malformed
+/// one, or a deployment with no web origin, is an ordinary native sign-in.
 pub async fn app_auth(State(state): State<ControlState>, RawQuery(query): RawQuery) -> Response {
     let config = state.config();
     let Some(provider) = provider_choice(&state, param(query.as_deref(), "provider").as_deref())
     else {
         return app_unavailable();
     };
+    let web_state = config
+        .web_app_origin
+        .as_ref()
+        .filter(|_| param(query.as_deref(), "return").as_deref() == Some("web"))
+        .and_then(|_| param(query.as_deref(), "state"))
+        .filter(|s| is_web_state(s));
 
     let (sid, csrf_state) = match (random_token(), random_token()) {
         (Ok(a), Ok(b)) => (a, b),
@@ -901,7 +914,7 @@ pub async fn app_auth(State(state): State<ControlState>, RawQuery(query): RawQue
 
     let inserted = state.sessions().insert_full(
         sid.clone(),
-        SessionKind::App,
+        SessionKind::App { web_state },
         consent.state,
         consent.pkce_verifier,
         // EMPTY, and it stays empty: this flow does not know which tenant it is
@@ -1412,8 +1425,8 @@ pub async fn oauth_callback(
                 console_login(&state, &label, code, session.pkce_verifier, provider).await,
             );
         }
-        SessionKind::App => {
-            return done(app_login(&state, code, session.pkce_verifier, provider).await);
+        SessionKind::App { web_state } => {
+            return done(app_login(&state, code, session.pkce_verifier, provider, web_state).await);
         }
         // RECONNECT forks here with the two logins rather than continuing into
         // the signup half, even though it is a GRANT like signup is. What it
@@ -2364,6 +2377,7 @@ async fn app_login(
     code: String,
     pkce_verifier: String,
     provider: Provider,
+    web_state: Option<String>,
 ) -> Response {
     let Some(login_endpoints) = endpoints_for(state, provider) else {
         return app_unavailable();
@@ -2424,6 +2438,22 @@ async fn app_login(
             None
         }
     };
+
+    // THE WEB CLIENT'S RETURN: a redirect to the configured web origin, with
+    // everything in the FRAGMENT, which no browser sends to a server and no
+    // `Referer` carries. Built from config, the tenant URL and the warden's code;
+    // the only request-borne value in it is the web client's own `state`,
+    // shape-checked on the way in.
+    if let (Some(web_state), Some(origin)) = (web_state, state.config().web_app_origin.as_deref()) {
+        let location = pages::web_handoff(
+            origin,
+            &state.config().tenant_url(&label),
+            &pairing.pair_code,
+            &web_state,
+            analytics_id.as_deref(),
+        );
+        return no_store((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
+    }
 
     // The page builds the `passband://` link itself, from this deployment's own
     // tenant URL and the warden's code. Nothing a caller sent is in it, because
@@ -3299,7 +3329,7 @@ impl Voice {
         match kind {
             SessionKind::Signup { .. } => Voice::Signup,
             SessionKind::Console => Voice::Console(label.to_string()),
-            SessionKind::App => Voice::App,
+            SessionKind::App { .. } => Voice::App,
             // Both purposes refuse in the reconnect's words: the cookie carries
             // no purpose, so this is the only voice both sides can agree on.
             SessionKind::Reconnect { .. } => Voice::Reconnect,
@@ -3531,6 +3561,14 @@ fn param(query: Option<&str>, name: &str) -> Option<String> {
     url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.into_owned())
+}
+
+/// The web client's `state`: 32 to 128 characters of base64url's alphabet.
+/// Anything else is not the web client's, and the sign-in proceeds as native.
+fn is_web_state(s: &str) -> bool {
+    (32..=128).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// The shape of an authorization code: printable ASCII, no spaces, bounded.

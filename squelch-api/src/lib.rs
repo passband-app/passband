@@ -227,6 +227,7 @@ fn client_router(state: ApiState) -> Router {
         )
         .route("/client/attachments/{id}", get(handlers::get_attachment))
         .route("/client/image", get(image_proxy::get_image))
+        .route("/client/session", delete(auth::revoke_self))
         // FILES ON THEIR WAY OUT (see the handlers' header). The upload carries
         // its own body limit: the router's default is 2 MB, sized for JSON, and
         // this is the one route whose body is a file. Sized for the cap plus a

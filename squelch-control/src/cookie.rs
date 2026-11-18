@@ -33,14 +33,15 @@
 //!
 //! THE HANDOFF COOKIE is the third claim, and it is separated the same two
 //! ways. A signup that just finished at Google leaves one behind, and the app
-//! login that follows in the same browser spends it instead of sending the
-//! person to Google a second time (see [`crate::handlers::app_auth`]). Its own
-//! name, `Path=/app` so it rides on nothing but that route, and a required
-//! `aud` of [`HANDOFF_AUD`]: an admin claim carries a different `aud` and no
-//! label or nonce, a session claim carries no `aud` at all, and a handoff
-//! claim carries no `sid` or `tfp`, so none of the three verifies as another.
-//! The cookie is a shortcut and never a credential the server keeps
-//! believing: [`HandoffClaim::nonce`] is spent server side exactly once.
+//! login that follows in the same browser can offer to continue as that
+//! mailbox instead of sending the person to Google a second time (see
+//! [`crate::handlers::app_auth`]). Its own name, `Path=/app` so it rides on
+//! nothing but those routes, and a required `aud` of [`HANDOFF_AUD`]: an admin
+//! claim carries a different `aud` and no label or nonce, a session claim
+//! carries no `aud` at all, and a handoff claim carries no `sid` or `tfp`, so
+//! none of the three verifies as another. The cookie is a shortcut and never a
+//! credential the server keeps believing: [`HandoffClaim::nonce`] is spent
+//! server side exactly once.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -105,11 +106,12 @@ pub const RECONNECT_COOKIE_TTL_SECS: i64 = 24 * 60 * 60;
 /// answer.
 pub const HANDOFF_COOKIE_NAME: &str = "pb_handoff";
 
-/// How long a finished signup can stand in for the app's first sign-in. A DAY,
-/// because the success page says "get the app" and some people install it the
-/// next morning. The nonce is one-shot server side, so the window bounds how
-/// long an unspent cookie is worth anything, not how many times it can be used.
-pub const HANDOFF_COOKIE_TTL_SECS: i64 = 24 * 60 * 60;
+/// How long a finished signup can stand in for the app's first sign-in. TWO
+/// HOURS: somebody who installs the app straight after the success page is
+/// well inside it, and anybody later signs in with Google as before. The nonce
+/// is one-shot server side, so the window bounds how long an unspent cookie is
+/// worth anything, not how many times it can be used.
+pub const HANDOFF_COOKIE_TTL_SECS: i64 = 2 * 60 * 60;
 
 /// The `aud` every handoff claim carries. Distinct from [`ADMIN_AUD`], so the
 /// two `aud`-bearing claims are told apart by value as well as by shape.
@@ -242,23 +244,32 @@ impl AdminClaim {
 }
 
 /// What the handoff cookie asserts: that THIS browser just finished a signup
-/// for `label`, and when.
+/// that created tenant `tid`, at `label`, for `email`, and when.
 ///
-/// WHY IT IS SAFE TO SKIP GOOGLE ON IT. The cookie is only ever set on the
-/// response that completes a signup, so it lands in the browser that just
-/// approved Google's consent for that very mailbox; an app login from that
-/// browser inside the window would be waved through by Google anyway. It is
-/// `HttpOnly`, bound to this host, scoped to `/app`, good for a day, and its
-/// nonce is spent server side the first time it is used, so a copy presented
-/// again is worth nothing.
+/// THE MODEL. The cookie is only ever set on the response that completes a
+/// signup. It is `HttpOnly`, bound to this host, scoped to `/app`, good for
+/// [`HANDOFF_COOKIE_TTL_SECS`], and its nonce is spent server side the first
+/// time it is used. Holding it does not sign anybody in by itself: the app
+/// login shows a page naming the mailbox, and only a same-origin press of its
+/// button, carrying a token derived from the nonce ([`handoff_csrf`]), spends
+/// it. The person always confirms which mailbox, as Google's account chooser
+/// would have had them do.
+///
+/// BOUND TO ONE TENANT ROW, not to a label. Labels are reusable once a tenant
+/// is purged, so the claim carries the row id and the address as well, and all
+/// three must still match the ACTIVE row when it is used.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoffClaim {
     /// Always [`HANDOFF_AUD`]. No default and no `Option`, for the reason
     /// [`AdminClaim::aud`] has none.
     pub aud: String,
-    /// The tenant the signup created. Looked up again on use, so a tenant torn
-    /// down since is not signed in to on the strength of this.
+    /// The tenant row the signup created, by id.
+    pub tid: i64,
+    /// Its label.
     pub label: String,
+    /// The address that tenant was set up with, as the store holds it. Named
+    /// on the confirmation page, and matched against the row on use.
+    pub email: String,
     /// A random one-shot id. Recorded when the handoff is spent, which is what
     /// makes a second presentation fall through to Google rather than mint a
     /// second pairing code. Never logged.
@@ -271,14 +282,32 @@ pub struct HandoffClaim {
 impl HandoffClaim {
     /// The claim a finished signup signs. The only constructor callers need,
     /// so `aud` cannot be spelled wrong at a call site.
-    pub fn new(label: &str, nonce: String, now_unix: i64) -> Self {
+    pub fn new(tid: i64, label: &str, email: &str, nonce: String, now_unix: i64) -> Self {
         Self {
             aud: HANDOFF_AUD.to_string(),
+            tid,
             label: label.to_string(),
+            email: email.to_string(),
             nonce,
             iat: now_unix,
         }
     }
+}
+
+/// The CSRF token the handoff confirmation form carries: an HMAC of the nonce
+/// under the cookie key, with a prefix no cookie payload starts with (those are
+/// JSON, so they start with `{`). Only a page this service rendered for this
+/// cookie can hold it, and it dies with the nonce.
+pub fn handoff_csrf(key: &[u8], nonce: &str) -> String {
+    let mut input = b"handoff-csrf\0".to_vec();
+    input.extend_from_slice(nonce.as_bytes());
+    URL_SAFE_NO_PAD.encode(mac(key, &input))
+}
+
+/// Whether `presented` is [`handoff_csrf`] for `nonce`, compared constant time.
+pub fn handoff_csrf_ok(key: &[u8], nonce: &str, presented: &str) -> bool {
+    !presented.is_empty()
+        && squelch_httpauth::ct_eq(presented.as_bytes(), handoff_csrf(key, nonce).as_bytes())
 }
 
 /// A short, one-way name for an admin token.
@@ -465,7 +494,8 @@ pub fn set_reconnect_cookie(value: &str, secure: bool) -> String {
 /// The `Set-Cookie` value that leaves a finished signup's handoff behind.
 /// `HttpOnly`, `SameSite=Lax`, no `Domain`, and `Secure` whenever the origin is
 /// https, for the signup cookie's reasons. `Lax` because the app opens
-/// `/app/auth` as a top-level navigation, which `Lax` admits. `Path=/app`, so
+/// `/app/auth` as a top-level navigation, which `Lax` admits, while a
+/// cross-site POST to `/app/handoff` carries no cookie at all. `Path=/app`, so
 /// it rides on the app login and nothing else.
 pub fn set_handoff_cookie(value: &str, secure: bool) -> String {
     let secure = if secure { "; Secure" } else { "" };
@@ -801,7 +831,23 @@ mod tests {
     }
 
     fn handoff() -> HandoffClaim {
-        HandoffClaim::new("ada", "n".repeat(43), 1_000_000)
+        HandoffClaim::new(7, "ada", "ada@example.com", "n".repeat(43), 1_000_000)
+    }
+
+    /// The form token belongs to one nonce under one key, and nothing else
+    /// passes for it.
+    #[test]
+    fn the_handoff_csrf_token_is_bound_to_its_nonce() {
+        let t = handoff_csrf(KEY, "nonce-a");
+        assert!(handoff_csrf_ok(KEY, "nonce-a", &t));
+        assert!(!handoff_csrf_ok(KEY, "nonce-b", &t));
+        assert!(!handoff_csrf_ok(
+            b"another key that is long enough",
+            "nonce-a",
+            &t
+        ));
+        assert!(!handoff_csrf_ok(KEY, "nonce-a", ""));
+        assert!(!handoff_csrf_ok(KEY, "nonce-a", "AAAA"));
     }
 
     #[test]
@@ -816,9 +862,9 @@ mod tests {
         );
     }
 
-    /// The label is what the app login acts on and the nonce is what makes it
-    /// one-shot, so flipping either under the original MAC must fail, and so
-    /// must stretching `iat`.
+    /// The tenant (id, label, address) is what the app login acts on and the
+    /// nonce is what makes it one-shot, so flipping any of them under the
+    /// original MAC must fail, and so must stretching `iat`.
     #[test]
     fn refuses_a_tampered_handoff() {
         let c = handoff();
@@ -836,6 +882,16 @@ mod tests {
             ..c.clone()
         };
         assert_eq!(verify_handoff(KEY, &forge(&relabeled), c.iat), None);
+        let reid = HandoffClaim {
+            tid: 8,
+            ..c.clone()
+        };
+        assert_eq!(verify_handoff(KEY, &forge(&reid), c.iat), None);
+        let readdressed = HandoffClaim {
+            email: "eve@example.com".into(),
+            ..c.clone()
+        };
+        assert_eq!(verify_handoff(KEY, &forge(&readdressed), c.iat), None);
         let renonced = HandoffClaim {
             nonce: "m".repeat(43),
             ..c.clone()

@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS reconnect_views (
 -- Every signup-to-app handoff that has been used, by nonce. A row existing IS
 -- the spend: the INSERT that creates it is the one-shot check, so two control
 -- tasks presented the same cookie at the same moment cannot both win. Rows
--- outlive the cookie's own day by a margin and are pruned on the way in; a
+-- outlive the cookie's own window by a wide margin and are pruned on the way in; a
 -- nonce whose row is gone belongs to a cookie that no longer verifies.
 CREATE TABLE IF NOT EXISTS handoff_spends (
     nonce    TEXT PRIMARY KEY,
@@ -2026,6 +2026,49 @@ impl ControlStore {
         row.map(|r| Ok(r.try_get(0)?)).transpose()
     }
 
+    /// The row id and stored address of the ACTIVE tenant at `label`: what a
+    /// finished signup binds its handoff to.
+    pub async fn active_tenant_handle(&self, label: &str) -> Result<Option<(i64, String)>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT id, account_email FROM tenants WHERE label = $1 AND status = $2",
+                &[&label, &STATUS_ACTIVE],
+            )
+            .await?;
+        row.map(|r| Ok((r.try_get(0)?, r.try_get(1)?))).transpose()
+    }
+
+    /// Whether the tenant a handoff names is still exactly that tenant: the
+    /// same row, at the same label, for the same address, and active. ONE
+    /// QUERY, so a label purged and signed up again by somebody else (a new
+    /// row id) or a row that changed hands never matches.
+    pub async fn handoff_tenant_is_live(&self, id: i64, label: &str, email: &str) -> Result<bool> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT 1 FROM tenants
+                  WHERE id = $1 AND label = $2 AND account_email = $3 AND status = $4",
+                &[&id, &label, &email, &STATUS_ACTIVE],
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Whether a handoff nonce has already been spent. A READ, for the page
+    /// that offers the handoff; the spend itself is [`Self::spend_handoff`],
+    /// which is the only thing that decides.
+    pub async fn handoff_spent(&self, nonce: &str) -> Result<bool> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("SELECT 1 FROM handoff_spends WHERE nonce = $1", &[&nonce])
+            .await?;
+        Ok(row.is_some())
+    }
+
     /// Spend a signup-to-app handoff: `true` exactly once per nonce, `false`
     /// for every later presentation of it.
     ///
@@ -2035,9 +2078,9 @@ impl ControlStore {
     /// pairing code. The label rides along for an operator reading the table,
     /// and decides nothing.
     ///
-    /// Rows older than two days are pruned first. The cookie verifies for one,
-    /// so a pruned nonce is one whose cookie is already refused before it
-    /// reaches here.
+    /// Rows older than two days are pruned first. The cookie verifies for two
+    /// hours, so a pruned nonce is one whose cookie is already refused before
+    /// it reaches here.
     pub async fn spend_handoff(&self, nonce: &str, label: &str) -> Result<bool> {
         let client = self.client().await?;
         client
@@ -4234,7 +4277,9 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
         let one = ControlStore::connect(&url).await.unwrap();
         let two = ControlStore::connect(&url).await.unwrap();
 
+        assert!(!one.handoff_spent("nonce-a").await.unwrap());
         assert!(one.spend_handoff("nonce-a", "ada").await.unwrap());
+        assert!(two.handoff_spent("nonce-a").await.unwrap());
         assert!(!one.spend_handoff("nonce-a", "ada").await.unwrap());
         assert!(!two.spend_handoff("nonce-a", "ada").await.unwrap());
         // A different nonce for the same label is a different signup.
@@ -4255,6 +4300,36 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
             .unwrap()
             .get(0);
         assert_eq!(left, 2);
+    }
+
+    /// A handoff names one tenant ROW. Purging the label and signing it up
+    /// again makes a new row, and the old handoff's tenant is no longer live,
+    /// even for the same address.
+    #[tokio::test]
+    async fn a_handoff_tenant_does_not_survive_a_purge_and_resignup() {
+        let s = store().await;
+        s.insert_tenant("ada", "ada@example.com").await.unwrap();
+        let (id, email) = s.active_tenant_handle("ada").await.unwrap().unwrap();
+        assert_eq!(email, "ada@example.com");
+        assert!(s.handoff_tenant_is_live(id, "ada", &email).await.unwrap());
+        assert!(
+            !s.handoff_tenant_is_live(id, "ada", "eve@example.com")
+                .await
+                .unwrap()
+        );
+        assert!(!s.handoff_tenant_is_live(id, "bob", &email).await.unwrap());
+
+        s.purge_tenant("ada", -1).await.unwrap();
+        assert!(!s.handoff_tenant_is_live(id, "ada", &email).await.unwrap());
+        s.insert_tenant("ada", "ada@example.com").await.unwrap();
+        let (again, _) = s.active_tenant_handle("ada").await.unwrap().unwrap();
+        assert_ne!(again, id);
+        assert!(!s.handoff_tenant_is_live(id, "ada", &email).await.unwrap());
+        assert!(
+            s.handoff_tenant_is_live(again, "ada", &email)
+                .await
+                .unwrap()
+        );
     }
 
     /// One id per person, shaped the way the app will insist on, and NEVER

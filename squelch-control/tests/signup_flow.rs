@@ -1493,7 +1493,7 @@ async fn a_finished_signup_signs_the_app_in_without_a_second_google_trip() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("It connects right away."), "{body}");
+    assert!(body.contains("Get the app and press Sign in."), "{body}");
 
     let handoff = headers
         .get_all(header::SET_COOKIE)
@@ -1504,15 +1504,40 @@ async fn a_finished_signup_signs_the_app_in_without_a_second_google_trip() {
     assert!(handoff.contains("Path=/app;"), "{handoff}");
     assert!(handoff.contains("HttpOnly"), "{handoff}");
     assert!(handoff.contains("SameSite=Lax"), "{handoff}");
-    assert!(handoff.contains("Max-Age=86400"), "{handoff}");
+    assert!(handoff.contains("Max-Age=7200"), "{handoff}");
     let pair = handoff.split(';').next().unwrap().to_string();
 
+    // The app login asks first, naming the mailbox, and mints nothing yet.
     let (status, headers, body) = h.get("/app/auth", Some(&pair)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(headers.get(header::LOCATION).is_none());
+    assert!(body.contains("Continue as ada@example.com?"), "{body}");
+    assert!(!body.contains("ABCD-EFGH"), "{body}");
+    let start = body.find(r#"name="csrf" value=""#).unwrap() + 19;
+    let csrf = body[start..].split('"').next().unwrap().to_string();
+
+    // The press signs the app in.
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/app/handoff")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &pair)
+                .body(axum::body::Body::from(format!("csrf={csrf}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body =
+        String::from_utf8_lossy(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).to_string();
     assert!(body.contains("ABCD-EFGH"), "{body}");
     assert!(body.contains("passband://pair"), "{body}");
 
+    // Spent: the next app login is the ordinary trip to Google.
     let (status, headers, _) = h.get("/app/auth", Some(&pair)).await;
     assert_eq!(status, StatusCode::FOUND);
     assert!(

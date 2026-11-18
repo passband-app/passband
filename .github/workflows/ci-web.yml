@@ -3,8 +3,10 @@
 # Same shape as ci.yml: path-filtered on main, a `changes` job on PRs, drafts
 # skipped, and a gate job that always reports.
 #
-# The browser end-to-end suites are not here yet: the app's needs a daemon,
-# which is a Rust build away.
+# The hostile-mail suite runs here (it needs no daemon): every reader change
+# is checked against the corpus under the production CSP and Trusted Types.
+# The app's own end-to-end suite needs a daemon, which is a Rust build away,
+# and is not here yet.
 
 name: ci-web
 
@@ -76,6 +78,9 @@ jobs:
           grep -q "require-trusted-types-for 'script'" dist/index.html
       - name: Runtime dependencies have no known high-severity advisories
         run: npm audit --omit=dev --audit-level=high
+      - run: npx playwright install --with-deps chromium
+      - name: Hostile mail stays inert in the reading frame
+        run: npx playwright test --trace off -c e2e/mail.playwright.config.ts
 
   gate:
     # Unique check name: rulesets match the bare job name (see ci.yml).

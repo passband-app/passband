@@ -4,6 +4,8 @@ import { defineConfig } from "@playwright/test";
 // and Trusted Types, plus loopback daemons allowed) served by `vite preview`.
 export default defineConfig({
   testDir: "./e2e",
+  // The mail suite needs no daemon and runs under its own config.
+  testIgnore: /mail\.spec\.ts/,
   timeout: 30_000,
   fullyParallel: true,
   reporter: [["list"]],

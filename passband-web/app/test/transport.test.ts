@@ -110,6 +110,11 @@ describe("pairing", () => {
     expect(await store.load()).toEqual({ server: SERVER, token: "sqd_new" });
     expect(calls[0]!.credentials).toBe("omit");
     expect((calls[0]!.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(JSON.parse(String(calls[0]!.body))).toEqual({
+      code: "ABCD-EFGH",
+      device_name: "Web browser",
+      platform: "web",
+    });
   });
 
   test("a refused claim stores nothing", async () => {

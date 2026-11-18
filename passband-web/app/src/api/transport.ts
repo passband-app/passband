@@ -163,7 +163,9 @@ export class InPageTransport implements Transport {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, device_name: deviceName }),
+        // `platform` puts the token under the daemon's web idle rule from
+        // the moment it is minted.
+        body: JSON.stringify({ code, device_name: deviceName, platform: "web" }),
       },
       {},
     );

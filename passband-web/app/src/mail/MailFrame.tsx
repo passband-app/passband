@@ -2,8 +2,13 @@
 //
 // HTML mail renders in an iframe whose sandbox token list is the security
 // boundary: `allow-same-origin` so the PARENT can reach in (to measure, collapse
-// quotes, catch clicks and fill in images), and nothing else, so nothing in the
-// mail can run, submit, open a window or navigate the page. Its document is
+// quotes, catch clicks and fill in images), and no `allow-scripts`, so nothing
+// in the mail can run, submit or navigate the page. `allow-popups` and
+// `allow-popups-to-escape-sandbox` exist for Safari alone: WebKit fires no
+// listener inside this frame, so the parent's click capture never sees a link,
+// and the link has to open itself, in a new tab with no opener and no referrer
+// (prepare.ts sets that on every link). With no script in the frame, a popup
+// can only come from a reader's click on a link. Its document is
 // built by `prepare()` and loaded only through `setFrameDocument()` (the app's
 // one Trusted Types policy). Plain-text mail is shown as text, never parsed.
 //
@@ -32,7 +37,7 @@ export interface MailFrameProps {
 }
 
 /** Exactly this, and nothing more. A test pins it. */
-export const SANDBOX = "allow-same-origin";
+export const SANDBOX = "allow-same-origin allow-popups allow-popups-to-escape-sandbox";
 
 /** Heights already measured, so a reopened message paints at its final size. */
 const rememberedHeights = new Map<number, number>();

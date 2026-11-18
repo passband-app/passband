@@ -3,6 +3,14 @@
 //   npx playwright test --trace off -c e2e/mail.playwright.config.ts
 // Ported from passband-web/spikes/email-render/tests. No daemon needed.
 import { expect, test, type Page, type Request } from "@playwright/test";
+
+/**
+ * WebKit fires no listener inside the sandboxed, script-less frame, so the
+ * parent's link capture never runs there and a link opens itself in a new tab
+ * (see MailFrame.tsx). Everywhere else a link click reaches the app and no
+ * window opens.
+ */
+const linksOpenThemselves = (browserName: string) => browserName === "webkit";
 import { HOSTILE } from "./mail-corpus";
 
 /** The app origin of whichever config runs this suite (mail or app). */
@@ -14,6 +22,10 @@ interface Recorder {
   /** Every request that reached the network layer. */
   requests: string[];
   popups: number;
+  /** Top-level navigations of popups: what a link opened on its own. */
+  opened: { url: string; referer: string | null }[];
+  /** Whether any popup could reach back to the app through window.opener. */
+  anyOpener(): Promise<boolean>;
   /** CSP / Trusted Types violations in OUR page (not inside the mail frame). */
   violations: string[];
   /** Requests to any origin but the app's own. */
@@ -21,9 +33,14 @@ interface Recorder {
 }
 
 async function record(page: Page): Promise<Recorder> {
+  const openers: Promise<boolean>[] = [];
   const rec: Recorder = {
     requests: [],
     popups: 0,
+    opened: [],
+    async anyOpener() {
+      return (await Promise.all(openers)).some(Boolean);
+    },
     violations: [],
     offending() {
       return rec.requests.filter((u) => {
@@ -33,7 +50,23 @@ async function record(page: Page): Promise<Recorder> {
     },
   };
   await page.context().route("**/*", (route) => {
-    const url = route.request().url();
+    const req = route.request();
+    const url = req.url();
+    let popup = false;
+    if (req.isNavigationRequest()) {
+      try {
+        popup = req.frame().page() !== page;
+      } catch {
+        // WebKit issues a new tab's first navigation before its frame exists.
+        popup = true;
+      }
+    }
+    if (popup) {
+      // A popup's own page load: answered here so the tab has a document to
+      // inspect, and kept out of `requests` (the mail page fetched nothing).
+      rec.opened.push({ url, referer: req.headers()["referer"] ?? null });
+      return route.fulfill({ status: 200, contentType: "text/html", body: "<title>opened</title>" });
+    }
     rec.requests.push(url);
     return new URL(url).origin === app() ? route.continue() : route.abort();
   });
@@ -43,8 +76,14 @@ async function record(page: Page): Promise<Recorder> {
       // (CSP inside the mail frame). Recorded only so a test can see it.
     }
   });
-  page.on("popup", () => {
+  page.on("popup", (p) => {
     rec.popups++;
+    openers.push(
+      p
+        .waitForLoadState()
+        .then(() => p.evaluate(() => window.opener !== null))
+        .catch(() => false),
+    );
   });
   page.on("console", (m) => {
     const t = m.text();
@@ -82,7 +121,7 @@ async function frameGeometry(page: Page, index = 0) {
 for (const images of [false, true]) {
   test.describe(images ? "hostile, images on" : "hostile, images off", () => {
     for (const mail of HOSTILE) {
-      test(mail.id, async ({ page }) => {
+      test(mail.id, async ({ page, browserName }) => {
         const rec = await record(page);
         const url = harness(mail.id, images ? { images: "1" } : {});
         await page.goto(url);
@@ -101,9 +140,17 @@ for (const images of [false, true]) {
         //    through the ImageSource (the daemon's proxy), never the network.
         expect(rec.offending()).toEqual([]);
 
-        // 3. Neither the page nor the mail frame went anywhere; no window opened.
+        // 3. Neither the page nor the mail frame went anywhere. No window
+        //    opened, except, where links open themselves, a new tab for an
+        //    http(s) link, with no way back and no referrer.
         expect(page.url()).toBe(url);
-        expect(rec.popups).toBe(0);
+        if (linksOpenThemselves(browserName)) {
+          expect(rec.opened.every((o) => /^https?:\/\//.test(o.url) && o.referer === null)).toBe(true);
+          expect(rec.popups).toBe(rec.opened.length);
+          expect(await rec.anyOpener()).toBe(false);
+        } else {
+          expect(rec.popups).toBe(0);
+        }
         expect(page.frames()).toHaveLength(2);
         expect(page.frames()[1]!.url()).toBe("about:srcdoc");
 
@@ -125,11 +172,12 @@ for (const images of [false, true]) {
 
 // ---------------------------------------------------------------- the frame
 
-test("the sandbox is exactly allow-same-origin, with the frame's own policy", async ({ page }) => {
+test("the sandbox is exactly same-origin plus escaping popups, with the frame's own policy", async ({ page }) => {
   await page.goto(harness("long"));
   await waitForFrame(page);
   const f = page.locator("iframe");
-  expect(await f.getAttribute("sandbox")).toBe("allow-same-origin");
+  // No allow-scripts, allow-forms, allow-top-navigation or allow-modals, ever.
+  expect(await f.getAttribute("sandbox")).toBe("allow-same-origin allow-popups allow-popups-to-escape-sandbox");
   expect(await f.getAttribute("srcdoc")).not.toBeNull();
   expect(await f.getAttribute("data-csp")).toBe(
     "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; base-uri 'none'; form-action 'none'",
@@ -195,30 +243,37 @@ test("a bottom-posted reply keeps its quote", async ({ page }) => {
   await expect(page.frameLocator("iframe").locator("blockquote")).toBeVisible();
 });
 
-test("http(s) links reach the app and nothing navigates", async ({ page }) => {
+test("http(s) links reach the app and nothing navigates", async ({ page, browserName }) => {
   const rec = await record(page);
   const url = harness("links");
   await page.goto(url);
   await waitForFrame(page);
   const frame = page.frameLocator("iframe");
-  for (const id of ["https", "http", "mailto", "ftp", "rel", "hash", "inner"]) {
+  for (const id of ["https", "http", "mailto", "ftp", "rel", "hash", "creds", "inner"]) {
     await frame.locator(`#${id}`).click();
   }
   await frame.locator("#https").click({ button: "middle" });
   await frame.locator("#https").click({ modifiers: ["ControlOrMeta"] });
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(500);
   const links = await page.evaluate(() => window.__mail.links);
-  expect(links.slice(0, 3)).toEqual([
-    "https://links.example/a",
-    "http://links.example/b",
-    "https://links.example/nested",
-  ]);
-  expect(links.every((l) => /^https?:\/\//.test(l))).toBe(true);
+  const want = ["https://links.example/a", "http://links.example/b", "https://links.example/nested"];
+  if (linksOpenThemselves(browserName)) {
+    // Each http(s) link opened itself in a new tab, with no way back to the
+    // app and no referrer; nothing else opened anything.
+    expect(links).toEqual([]);
+    expect([...new Set(rec.opened.map((o) => o.url))].sort()).toEqual([...want].sort());
+    expect(rec.opened.every((o) => o.referer === null)).toBe(true);
+    expect(await rec.anyOpener()).toBe(false);
+  } else {
+    expect(links.slice(0, 3)).toEqual(want);
+    expect(links.every((l) => /^https?:\/\//.test(l))).toBe(true);
+    expect(rec.popups).toBe(0);
+  }
   expect(page.url()).toBe(url);
   expect(page.frames()[1]!.url()).toBe("about:srcdoc");
-  expect(rec.popups).toBe(0);
   expect(rec.offending()).toEqual([]);
 });
+
 
 test("mail CSS cannot style the parent page", async ({ page }) => {
   await page.goto(harness("style-parent"));

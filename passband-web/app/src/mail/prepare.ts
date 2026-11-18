@@ -186,9 +186,34 @@ const UNWRAP = ["form", "button", "input", "select", "textarea", "picture"];
 const DROP_ATTRS = new Set([
   "srcset", "background", "poster", "ping", "action", "formaction", "lowsrc",
   "dynsrc", "longdesc", "usemap", "manifest", "xmlns", "target", "download",
+  // A link's own referrer policy outranks the frame's no-referrer <meta>.
+  "referrerpolicy", "rel",
 ]);
 
 const SAFE_HREF = /^(https?:|mailto:)/i;
+
+/**
+ * Where a clicked link may go on its own, or null if it may not go anywhere.
+ *
+ * Every link click is caught from the parent (frame.ts) and the app opens it.
+ * WebKit is the exception: it fires no listener at all inside a sandboxed
+ * document that cannot run script, so in Safari the link itself is what
+ * opens. That is why the frame carries `allow-popups
+ * allow-popups-to-escape-sandbox`, and why every link that survives is sent to
+ * a new tab with no opener and no referrer. The rule matches `safeLinkTarget`
+ * in ui/links.ts: http(s) only, never with credentials in it.
+ */
+export function linkTarget(href: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(href.trim());
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  if (u.username || u.password) return null;
+  return u.toString();
+}
 
 export function prepareMail(html: string): Prepared {
   const doc = parseMail(html);
@@ -210,6 +235,22 @@ export function prepareMail(html: string): Prepared {
         el.setAttribute("style", rewriteCssUrls(attr.value, remotes));
       }
     }
+  }
+
+  // Links. http(s) opens in a new tab that cannot reach back or see where it
+  // came from (Safari's only path, see linkTarget); anything else keeps no
+  // place to go. mailto: stays readable and does nothing, as in the app.
+  for (const a of Array.from(doc.querySelectorAll("a[href], area[href]"))) {
+    const href = a.getAttribute("href") ?? "";
+    if (/^mailto:/i.test(href.trim())) continue;
+    const target = linkTarget(href);
+    if (!target) {
+      a.removeAttribute("href");
+      continue;
+    }
+    a.setAttribute("href", target);
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noopener noreferrer");
   }
 
   let blockedTrackers = 0;

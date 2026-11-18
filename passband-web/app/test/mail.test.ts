@@ -10,6 +10,7 @@ import {
   frameHead,
   isNetworkSrc,
   isTracker,
+  linkTarget,
   normalizeCid,
   pxDim,
   remoteToken,
@@ -33,6 +34,28 @@ describe("the frame policy", () => {
     expect(head).not.toMatch(/<\/style><img/i);
     expect(head).not.toMatch(/<\/STYLE ><p>/);
     expect(head.match(/<\/style>/g)).toHaveLength(3); // ours + the two mail sheets
+  });
+});
+
+describe("where a link may open on its own (Safari's path)", () => {
+  test("http(s) only, normalized", () => {
+    expect(linkTarget(" https://links.example/a ")).toBe("https://links.example/a");
+    expect(linkTarget("http://LINKS.example")).toBe("http://links.example/");
+  });
+  test("never another scheme, a relative path or credentials", () => {
+    for (const h of [
+      "javascript:alert(1)",
+      "data:text/html,x",
+      "ftp://files.example/x",
+      "mailto:dee@mail.example",
+      "/relative",
+      "#top",
+      "https://user:pw@links.example/",
+      "https://user@links.example/",
+      "",
+    ]) {
+      expect(linkTarget(h)).toBeNull();
+    }
   });
 });
 

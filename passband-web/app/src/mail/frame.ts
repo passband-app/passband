@@ -131,7 +131,9 @@ export function attachFrame(iframe: HTMLIFrameElement, cb: FrameCallbacks): Fram
   // click on a link is cancelled here, whatever its scheme: the sandbox does
   // not stop a frame navigating ITSELF, so this capture, the input gate in
   // MailFrame, and the app CSP's `frame-src 'self'` together are what keep a
-  // link from loading inside the frame.
+  // link from loading inside the frame. WebKit never calls this (it fires no
+  // listener in a script-less sandboxed document); there, the link's own
+  // target=_blank from prepare.ts opens it instead.
   const onClick = (e: MouseEvent) => {
     const target = e.target as Element | null;
     const a = target && typeof target.closest === "function" ? target.closest("a[href], area[href]") : null;

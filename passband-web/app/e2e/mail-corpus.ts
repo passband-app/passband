@@ -224,6 +224,7 @@ export const FUNCTIONAL: Record<string, string> = {
     `<p><a id="https" href="https://links.example/a">https</a> <a id="http" href="http://links.example/b">http</a> ` +
     `<a id="mailto" href="mailto:dee@mail.example">mail</a> <a id="ftp" href="ftp://files.example/x">ftp</a> ` +
     `<a id="rel" href="/relative">relative</a> <a id="hash" href="#top">hash</a> ` +
+    `<a id="creds" href="https://user:pw@links.example/c">creds</a> ` +
     `<a id="nested" href="https://links.example/nested"><span><b id="inner">nested</b></span></a></p>`,
 };
 

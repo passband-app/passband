@@ -139,9 +139,12 @@ struct Recorder {
     bifrost_overrides: Vec<(String, String, Value)>,
     /// When true, the override route answers 500.
     bifrost_fail_override: bool,
+    /// When true, the override route answers 200 and changes nothing: the
+    /// gateway that says yes and does not show it.
+    bifrost_ignore_override: bool,
     /// What each key has spent this window, by vk id; zero when absent.
     bifrost_usage: BTreeMap<String, f64>,
-    /// The window every budget is in (`last_reset`), or [`BIFROST_WINDOW`].
+    /// The window every budget is in (`last_reset`), or [`bifrost_window`]`(0)`.
     bifrost_window: Option<String>,
     /// The window each key's override was granted in, by vk id.
     bifrost_anchor: BTreeMap<String, String>,
@@ -648,8 +651,17 @@ fn vk_value_for(name: &str) -> String {
 const BIFROST_ADMIN: &str = "bifrost-admin:the-basic-password";
 
 /// The window the mock gateway's budgets are in unless a test moves it, in
-/// the gateway's own spelling (Go RFC3339 with nanoseconds).
-const BIFROST_WINDOW: &str = "2026-11-02T09:15:00.123456789Z";
+/// the gateway's own spelling (Go RFC3339 with nanoseconds): opened five days
+/// before this test process started, so it is always the CURRENT window, and
+/// fixed for the life of the process, so every listing names the same one.
+fn bifrost_window(months_later: i64) -> String {
+    static OPENED: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
+    let opened = *OPENED.get_or_init(|| {
+        chrono::Utc::now() - chrono::Duration::days(5) + chrono::Duration::nanoseconds(123_456_789)
+    });
+    (opened + chrono::Duration::days(30 * months_later))
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+}
 
 /// The provider key id the mock gateway lists, mirroring the one the live
 /// gateway auto-detects.
@@ -713,7 +725,7 @@ async fn spawn_bifrost(rec: Shared) -> String {
                 |AxumState(rec): AxumState<Shared>, headers: HeaderMap| async move {
                     let mut r = rec.lock().unwrap();
                     r.bifrost_auths.push(bearer_of(&headers));
-                    let window = r.bifrost_window.clone().unwrap_or(BIFROST_WINDOW.into());
+                    let window = r.bifrost_window.clone().unwrap_or_else(|| bifrost_window(0));
                     let keys: Vec<Value> = r
                         .bifrost_minted
                         .iter()
@@ -755,8 +767,11 @@ async fn spawn_bifrost(rec: Shared) -> String {
                     if r.bifrost_fail_override {
                         return StatusCode::INTERNAL_SERVER_ERROR;
                     }
+                    if r.bifrost_ignore_override {
+                        return StatusCode::OK;
+                    }
                     let amount = body["amount"].as_f64().unwrap_or(0.0);
-                    let window = r.bifrost_window.clone().unwrap_or(BIFROST_WINDOW.into());
+                    let window = r.bifrost_window.clone().unwrap_or_else(|| bifrost_window(0));
                     r.bifrost_anchor.insert(id.clone(), window);
                     for key in r.bifrost_minted.iter_mut().filter(|(k, _)| *k == id) {
                         key.1 = amount;
@@ -2464,7 +2479,7 @@ async fn a_tenant_about_to_run_out_is_topped_up_once_per_window() {
     // expired. Eligible again, for one month on top of nothing.
     {
         let mut r = h.rec.lock().unwrap();
-        r.bifrost_window = Some("2026-12-02T09:15:00.123456789Z".into());
+        r.bifrost_window = Some(bifrost_window(1));
         for key in r.bifrost_minted.iter_mut() {
             key.1 = 0.0;
         }
@@ -2509,6 +2524,95 @@ async fn a_failed_auto_top_up_alerts_and_is_not_recorded() {
         c[0].last_applied_cycle, None,
         "a failed top-up is still owed"
     );
+}
+
+/// Make every pending claim look older than the retry interval, as if half an
+/// hour had passed.
+async fn lapse_topup_claims(h: &Harness) {
+    common::raw_client(&h.db_url)
+        .await
+        .execute(
+            "UPDATE llm_auto_topups SET attempted_at = '2000-01-01T00:00:00.000Z'",
+            &[],
+        )
+        .await
+        .unwrap();
+}
+
+/// THE STALE RETRY. The first attempt fails; the operator tops the key up by
+/// hand with MORE than the claim recorded; the retry then finds the larger
+/// override live, writes nothing, and records the window as done. It never
+/// lowers what the operator set. Failure alerts in between are rate-limited:
+/// the retry that fails again inside the quiet interval does not page.
+#[tokio::test]
+async fn a_stale_retry_never_lowers_a_bigger_manual_top_up() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    alerts_after(&h.rec, 1).await;
+    let triage = vk_id_for("tenant-ada");
+    let b = DEFAULT_LLM_BUDGET_USD;
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_usage.insert(triage.clone(), 2.0 * b);
+        r.bifrost_fail_override = true;
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    alerts_after(&h.rec, 2).await;
+
+    // The retry fails too, inside the quiet interval: logged, not paged.
+    lapse_topup_claims(&h).await;
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    assert_eq!(h.rec.lock().unwrap().bifrost_overrides.len(), 3);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(h.rec.lock().unwrap().alerts.len(), 2, "rate-limited");
+
+    // The operator runs `llm topup ada --usd 12` and the tenant spends into it.
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_fail_override = false;
+        for key in r.bifrost_minted.iter_mut().filter(|(k, _)| *k == triage) {
+            key.1 = 12.0;
+        }
+        r.bifrost_usage.insert(triage.clone(), 16.5);
+    }
+    lapse_topup_claims(&h).await;
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    {
+        let r = h.rec.lock().unwrap();
+        assert_eq!(r.bifrost_overrides.len(), 3, "nothing written over it");
+        let live = r
+            .bifrost_minted
+            .iter()
+            .find(|(k, _)| *k == triage)
+            .unwrap()
+            .1;
+        assert_eq!(live, 12.0);
+    }
+    let c = h.state.store().auto_topup_candidates(10).await.unwrap();
+    assert!(c[0].last_applied_cycle.is_some(), "the window is done");
+}
+
+/// A write the gateway accepts but the read-back does not show is reported
+/// as NOT CONFIRMED, not as a refusal that asks for a manual top-up.
+#[tokio::test]
+async fn an_unconfirmed_auto_top_up_says_so() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    alerts_after(&h.rec, 1).await;
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_usage
+            .insert(vk_id_for("tenant-ada"), 2.0 * DEFAULT_LLM_BUDGET_USD);
+        r.bifrost_ignore_override = true;
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    let alerts = alerts_after(&h.rec, 2).await;
+    assert!(alerts[1].contains("NOT CONFIRMED"), "{}", alerts[1]);
+    assert!(!alerts[1].contains("llm topup"), "{}", alerts[1]);
 }
 
 /// THE ORPHAN PROMISE: Bifrost minted the keys but the warden would not take

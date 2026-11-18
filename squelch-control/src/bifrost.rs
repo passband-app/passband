@@ -141,6 +141,15 @@ pub enum BifrostError {
     /// validates first); it means the validators have drifted.
     #[error("refusing a label this client would not have validated")]
     BadLabel,
+    /// A top-up write was sent and may have LANDED, but the read-back did not
+    /// show it: the write timed out, the listing failed, or it shows another
+    /// amount. Not the same as a refusal: topping up by hand on top of it can
+    /// give twice what was meant.
+    #[error(
+        "the LLM gateway may have applied the top-up but the read-back did not confirm it; \
+         check the key in the gateway before topping up by hand"
+    )]
+    Unconfirmed,
 }
 
 /// A freshly minted virtual key.
@@ -227,6 +236,8 @@ pub struct BudgetState {
     /// (`override_anchor_reset`). An override anchored before `last_reset`
     /// belongs to a window that has already closed.
     pub override_anchor_reset: Option<DateTime<Utc>>,
+    /// How long a window lasts, in the gateway's spelling (`"1M"`).
+    pub reset_duration: String,
 }
 
 impl BudgetState {
@@ -420,6 +431,8 @@ struct WireBudget {
     override_mode: Option<String>,
     #[serde(default)]
     override_anchor_reset: Option<String>,
+    #[serde(default)]
+    reset_duration: Option<String>,
 }
 
 /// A gateway timestamp (Go's RFC3339), or `None` for anything unreadable and
@@ -656,6 +669,7 @@ impl BifrostClient {
                                 override_anchor_reset: gateway_time(
                                     b.override_anchor_reset.as_deref(),
                                 ),
+                                reset_duration: b.reset_duration.unwrap_or_default(),
                             })
                             .collect(),
                     })
@@ -745,7 +759,9 @@ impl BifrostClient {
     ///
     /// A key with anything but exactly one budget was not made by a mint, and
     /// guessing which budget to raise is how the wrong one gets raised: that
-    /// is an error, as is a read-back that does not show the top-up.
+    /// is an error. A write that timed out, or a read-back that fails or does
+    /// not show the top-up, is [`BifrostError::Unconfirmed`]: the write may
+    /// have landed.
     pub async fn top_up_key(&self, vk_id: &str, amount_usd: f64) -> Result<(), BifrostError> {
         let find = || async {
             let key = self
@@ -760,12 +776,18 @@ impl BifrostClient {
             }
         };
         let budget = find().await?;
-        self.set_budget_override(vk_id, &budget.id, amount_usd)
-            .await?;
-        if (find().await?.override_amount - amount_usd).abs() > 0.005 {
-            return Err(BifrostError::Failed);
+        match self
+            .set_budget_override(vk_id, &budget.id, amount_usd)
+            .await
+        {
+            Ok(()) => {}
+            Err(BifrostError::Unreachable) => return Err(BifrostError::Unconfirmed),
+            Err(e) => return Err(e),
         }
-        Ok(())
+        match find().await {
+            Ok(after) if (after.override_amount - amount_usd).abs() <= 0.005 => Ok(()),
+            _ => Err(BifrostError::Unconfirmed),
+        }
     }
 
     /// Mint the TRIAGE virtual key, named `tenant-<label>`, with a monthly
@@ -1663,6 +1685,7 @@ mod tests {
         assert_eq!(b.last_reset, Some(opened));
         assert_eq!(b.override_anchor_reset, Some(opened));
         assert_eq!(b.override_mode, "cycles");
+        assert_eq!(b.reset_duration, "1M");
         for k in &keys[1..] {
             let b = &k.budgets[0];
             assert_eq!(b.last_reset, None, "{}", k.name);
@@ -1786,7 +1809,9 @@ mod tests {
         }));
         let c = client_for(&rec).await;
         let err = c.top_up_key("vk-123", 75.0).await.unwrap_err();
-        assert!(matches!(err, BifrostError::Failed), "{err:?}");
+        // Accepted but not shown: the write may have landed, which is its own
+        // answer rather than a plain refusal.
+        assert!(matches!(err, BifrostError::Unconfirmed), "{err:?}");
         assert_eq!(rec.lock().unwrap().overrides.len(), 1);
 
         // A key the gateway does not list is an error, not a top-up of some

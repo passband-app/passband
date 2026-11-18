@@ -356,6 +356,9 @@ CREATE TABLE IF NOT EXISTS llm_auto_topups (
     attempts     INTEGER NOT NULL DEFAULT 1,
     attempted_at TEXT COLLATE \"C\" NOT NULL,
     applied_at   TEXT COLLATE \"C\",
+    -- When the operator was last told this window's top-up failed, so a
+    -- top-up that keeps failing is announced at a bounded rate.
+    alerted_at   TEXT COLLATE \"C\",
     PRIMARY KEY (tenant_id, cycle_start)
 );
 ";
@@ -2306,6 +2309,29 @@ impl ControlStore {
         row.map(|r| Ok((r.try_get(0)?, r.try_get(1)?))).transpose()
     }
 
+    /// Whether to tell the operator about a failed attempt on this window now.
+    /// `true` (and the moment recorded) when nobody has been told yet, or not
+    /// since `quiet_before`. One statement, so two tasks cannot both say yes.
+    pub async fn take_topup_failure_alert(
+        &self,
+        tenant_id: i64,
+        cycle: &str,
+        now: DateTime<Utc>,
+        quiet_before: DateTime<Utc>,
+    ) -> Result<bool> {
+        let n = self
+            .client()
+            .await?
+            .execute(
+                "UPDATE llm_auto_topups SET alerted_at = $3
+                  WHERE tenant_id = $1 AND cycle_start = $2
+                    AND (alerted_at IS NULL OR alerted_at < $4)",
+                &[&tenant_id, &cycle, &stamp(now), &stamp(quiet_before)],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+
     /// Record that the window's top-up landed and was read back. `true` when a
     /// pending claim took it.
     pub async fn mark_auto_topup_applied(
@@ -3605,6 +3631,26 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
                 .unwrap(),
             None,
             "an applied window is done"
+        );
+        // Failure alerts for a window are rate-limited: the first one goes,
+        // the next inside the quiet interval does not, a later one does.
+        let quiet = chrono::Duration::hours(6);
+        assert!(
+            s.take_topup_failure_alert(ada, nov, t0, t0 - quiet)
+                .await
+                .unwrap()
+        );
+        let t4 = t0 + chrono::Duration::hours(1);
+        assert!(
+            !s.take_topup_failure_alert(ada, nov, t4, t4 - quiet)
+                .await
+                .unwrap()
+        );
+        let t5 = t0 + chrono::Duration::hours(7);
+        assert!(
+            s.take_topup_failure_alert(ada, nov, t5, t5 - quiet)
+                .await
+                .unwrap()
         );
         // Next month is its own window.
         let dec = "2026-12-02T09:15:00.000Z";

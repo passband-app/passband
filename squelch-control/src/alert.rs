@@ -195,14 +195,26 @@ pub fn llm_auto_topup_applied(label: &str) -> String {
     )
 }
 
-/// The budget poller tried to top up a tenant's triage key and could not
-/// confirm it. Sent on every failed attempt.
+/// The gateway refused a tenant's automatic top-up. Sent on the first failed
+/// attempt in a window and then at a bounded rate while it keeps failing.
 pub fn llm_auto_topup_failed(label: &str, error: &str, attempt: i32) -> String {
     format!(
         ":rotating_light: *LLM budget auto top-up FAILED:* `{label}` (attempt {attempt})\n\
          {error}\n\
          Triage for this tenant stops when its budget runs out. It is retried automatically; \
          by hand: `squelch-control llm topup {label}`"
+    )
+}
+
+/// A tenant's automatic top-up was sent and may have landed, but the
+/// read-back did not show it. NOT a prompt to top up by hand: doing so on top
+/// of a write that landed gives more than one month.
+pub fn llm_auto_topup_unconfirmed(label: &str, attempt: i32) -> String {
+    format!(
+        ":warning: *LLM budget auto top-up NOT CONFIRMED:* `{label}` (attempt {attempt})\n\
+         The write may have landed; the read-back did not show it. It is retried \
+         automatically with the same amount. Check the key in the gateway before topping \
+         up by hand."
     )
 }
 
@@ -340,6 +352,7 @@ mod tests {
             signup_provisioned("ethan"),
             llm_auto_topup_applied("ethan"),
             llm_auto_topup_failed("ethan", "the LLM gateway refused the request", 2),
+            llm_auto_topup_unconfirmed("ethan", 1),
         ];
         for m in &msgs {
             assert!(m.contains("`ethan`"), "{m}");
@@ -355,6 +368,8 @@ mod tests {
         }
         assert!(msgs[5].contains("FAILED") && msgs[5].contains("attempt 2"));
         assert!(msgs[5].contains("llm topup ethan"), "{}", msgs[5]);
+        assert!(msgs[6].contains("NOT CONFIRMED") && !msgs[6].contains("FAILED"));
+        assert!(!msgs[6].contains("llm topup"), "{}", msgs[6]);
         // No keys minted, no orphan line.
         assert!(!signup_incomplete("ethan", &err, None, None).contains("Orphaned"));
 

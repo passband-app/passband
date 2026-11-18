@@ -1,6 +1,7 @@
 // THE DEFAULT MAIL APP ASK. One small card in the bottom-right corner, once,
-// right after a send: should email links open in Passband? See DefaultMailApp
-// for when it may go up and why only once.
+// after a send: should email links open in Passband? See DefaultMailApp for
+// when it is wanted, when it waits (a composer open, the sitrep corner taken)
+// and why only once.
 //
 // QUIET ON PURPOSE. Not the ad family's hero card and not a system alert: a
 // line, a sentence and two buttons on the same glass, in the same corner the
@@ -8,13 +9,14 @@
 // card does not get to own Return, and the composer that just closed may have
 // a ⌘Enter still in somebody's fingers.
 //
-// "Make default" hands over to the system, which shows its own confirmation.
+// "Make default" is a request to the system, which may ask to confirm it.
 // "Not now" never asks again. Settings > Mail keeps the button.
 
 #if os(macOS)
     import SwiftUI
 
     struct DefaultMailNudgeCard: View {
+        @Environment(AppStore.self) private var store
         private var model: DefaultMailApp { DefaultMailApp.shared }
 
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -22,9 +24,21 @@
         @State private var leaving = false
 
         var body: some View {
-            if model.showingNudge {
+            if model.drawn(
+                composerOpen: store.composeOpen || store.inlineReply != nil,
+                cornerOccupied: store.bottomTrailingCornerOccupied)
+            {
                 card
                     .adCardPlacement()
+                    // Drawn, so asked: the stamp is written here and not when
+                    // the card was wanted (DefaultMailApp.noteShown).
+                    .onAppear { model.noteShown() }
+                    .onDisappear {
+                        // Hidden by a composer or the corner, not closed: it
+                        // arrives again when it comes back.
+                        arrived = false
+                        leaving = false
+                    }
             }
         }
 
@@ -84,9 +98,7 @@
             Analytics.capture("default_mail_nudge_closed", ["made_default": madeDefault])
             Task {
                 try? await Task.sleep(for: .milliseconds(200))
-                model.showingNudge = false
-                arrived = false
-                leaving = false
+                model.close()
             }
         }
     }

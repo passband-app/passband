@@ -106,9 +106,10 @@ struct MailtoTests {
         precondition(big?.to.count == Mailto.recipientLimit && big?.cc == [])
     }
 
-    /// Passband as the default mail app: the system hands over a URL, and
-    /// what reaches `Mailto` is its absoluteString. It reads like a link in a
-    /// message would, and is no more trusted.
+    /// REGRESSION PIN, not a new path: a link from another app reaches
+    /// `Mailto` as `URL.absoluteString`, and must read exactly as the same
+    /// link inside a message does (the parser is shared; this pins that the
+    /// URL round trip does not change what it sees).
     static func aLinkFromAnotherApp() {
         let url = URL(string: "mailto:ada@example.com?cc=bo@example.org&subject=Lunch%20on%20Friday&body=Are%20you%20free%3F")!
         let m = Mailto(url.absoluteString)
@@ -116,21 +117,71 @@ struct MailtoTests {
         precondition(m?.cc == ["bo@example.org"])
         precondition(m?.subject == "Lunch on Friday")
         precondition(m?.body == "Are you free?")
-        // Browsers send the scheme in any case.
         precondition(Mailto(URL(string: "MAILTO:ada@example.com")!.absoluteString)?.to == ["ada@example.com"])
-        // A web page can name the same headers a message can, and is dropped
-        // the same way.
         let sneaky = URL(string: "mailto:ada@example.com?from=boss@example.com&attach=%2Fetc%2Fhosts")!
         precondition(Mailto(sneaky.absoluteString) == Mailto("mailto:ada@example.com"))
-        // An empty link from a web page asks for nothing.
         precondition(Mailto(URL(string: "mailto:")!.absoluteString) == nil)
     }
 
-    /// A cold launch from a link: held while the connection is found, opened
-    /// once a mailbox is up, dropped at the Connect screen.
+    /// Links from another app, held for a mailbox: in order, a few at a
+    /// time, one composer at a time, never past a minute without one, and
+    /// never dropped without a reason to show.
     static func whenALinkFromAnotherAppOpens() {
-        precondition(Mailto.route(connected: true, gate: false) == .open, "a mailbox on screen opens now")
-        precondition(Mailto.route(connected: false, gate: false) == .hold, "still loading holds it")
-        precondition(Mailto.route(connected: false, gate: true) == .drop, "the Connect screen drops it")
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+        // Connected and verified, nothing open: the link opens at once.
+        var inbox = MailtoInbox()
+        precondition(inbox.add("mailto:a@x.com", at: t0) == nil)
+        var r = inbox.settle(connected: true, free: true, gate: false, now: t0)
+        precondition(r.open == "mailto:a@x.com" && r.dropped.isEmpty && inbox.isEmpty)
+
+        // A cold launch: held while the connection is unverified...
+        inbox = MailtoInbox()
+        _ = inbox.add("mailto:a@x.com", at: t0)
+        r = inbox.settle(connected: false, free: true, gate: false, now: t0.addingTimeInterval(5))
+        precondition(r.open == nil && r.dropped.isEmpty && !inbox.isEmpty, "held, not dropped")
+        precondition(inbox.nextExpiry == t0.addingTimeInterval(MailtoInbox.holdFor))
+        // ...and opened once it is verified.
+        r = inbox.settle(connected: true, free: true, gate: false, now: t0.addingTimeInterval(8))
+        precondition(r.open == "mailto:a@x.com" && inbox.isEmpty)
+
+        // Never verified within the hold: dropped, with a reason.
+        inbox = MailtoInbox()
+        _ = inbox.add("mailto:a@x.com", at: t0)
+        r = inbox.settle(connected: false, free: true, gate: false, now: t0.addingTimeInterval(59))
+        precondition(r.dropped.isEmpty, "a second short is still held")
+        r = inbox.settle(connected: false, free: true, gate: false, now: t0.addingTimeInterval(60))
+        precondition(r.open == nil && r.dropped == [.expired] && inbox.isEmpty, "expired")
+        precondition(inbox.nextExpiry == nil)
+
+        // The Connect screen: no mailbox, every held link dropped.
+        inbox = MailtoInbox()
+        _ = inbox.add("mailto:a@x.com", at: t0)
+        _ = inbox.add("mailto:b@x.com", at: t0)
+        r = inbox.settle(connected: false, free: true, gate: true, now: t0)
+        precondition(r.open == nil && r.dropped == [.noMailbox, .noMailbox] && inbox.isEmpty)
+
+        // FIFO, three deep: a fourth is refused, not swapped in.
+        inbox = MailtoInbox()
+        for (i, h) in ["mailto:a@x.com", "mailto:b@x.com", "mailto:c@x.com"].enumerated() {
+            precondition(inbox.add(h, at: t0.addingTimeInterval(Double(i))) == nil)
+        }
+        precondition(inbox.add("mailto:d@x.com", at: t0) == .full, "a fourth is refused")
+        // One composer at a time, oldest first.
+        r = inbox.settle(connected: true, free: true, gate: false, now: t0)
+        precondition(r.open == "mailto:a@x.com")
+        r = inbox.settle(connected: true, free: false, gate: false, now: t0.addingTimeInterval(600))
+        precondition(r.open == nil && r.dropped.isEmpty,
+            "waits on the open composer, and no clock runs on a person writing")
+        r = inbox.settle(connected: true, free: true, gate: false, now: t0.addingTimeInterval(601))
+        precondition(r.open == "mailto:b@x.com")
+        r = inbox.settle(connected: true, free: true, gate: false, now: t0.addingTimeInterval(602))
+        precondition(r.open == "mailto:c@x.com" && inbox.isEmpty)
+
+        // Every drop has words, plain and without an em dash.
+        for d in [MailtoInbox.Drop.noMailbox, .expired, .full] {
+            let line = MailtoInbox.copy(d)
+            precondition(line.hasPrefix("Couldn't open that email link.") && !line.contains("\u{2014}"))
+        }
     }
 }

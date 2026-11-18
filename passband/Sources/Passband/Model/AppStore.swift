@@ -558,9 +558,9 @@ final class AppStore {
             // A launch that lands on a gate paints no board: its interval
             // ends here, not whenever a pull finally lands.
             if connStatus == .disconnected || connStatus == .error { LaunchSignpost.end(.skipped) }
-            // A mailto: link from another app that arrived before there was a
+            // mailto: links from another app that arrived before there was a
             // mailbox to write from (`receiveMailtoURL`).
-            if pendingMailto != nil { routePendingMailto() }
+            if !mailtoInbox.isEmpty { settleMailtoInbox() }
         }
     }
     /// Set to the epoch of a launch painted from disk (`restorePersistedBoard`)
@@ -1154,6 +1154,19 @@ final class AppStore {
         activeView == .sitrep && threadId == nil && !composeOpen
     }
 
+    /// The unsubscribe tray, under it the smart clear receipt: drawn by
+    /// ActionLayer in the bottom-right corner. Not while the smart clear list
+    /// is up, which is a page over the board they belong to.
+    var showsUnsubscribeTray: Bool {
+        showsSitrepCorner && !smartClearListOpen && !UnsubscribeJobs.shared.items.isEmpty
+    }
+    var showsSmartClearReceipt: Bool {
+        showsSitrepCorner && !smartClearListOpen && smartClearReceipt != nil
+    }
+    /// Something already holds the bottom-right corner, so a one-time card
+    /// set there (`DefaultMailNudgeCard`) waits.
+    var bottomTrailingCornerOccupied: Bool { showsUnsubscribeTray || showsSmartClearReceipt }
+
     /// The press. Asks the daemon, takes what it cleared off the board at
     /// once, and puts up the receipt.
     ///
@@ -1512,6 +1525,9 @@ final class AppStore {
         didSet {
             let open = compose != nil
             if composeOpen != open { composeOpen = open }
+            // The composer a held mailto: link opened has gone: the next
+            // link's turn (`MailtoInbox`).
+            if !open, !mailtoInbox.isEmpty { settleMailtoInbox() }
         }
     }
     /// WHETHER a composer is open, kept apart from WHICH: `compose` is
@@ -2204,6 +2220,7 @@ final class AppStore {
         guard unverifiedEpoch != nil else { return }
         unverifiedEpoch = nil
         Notifier.shared.connectionBecameReady()
+        if !mailtoInbox.isEmpty { settleMailtoInbox() }
         if tracking == nil { Task { await refreshTrackingConfig() } }
     }
 
@@ -5241,13 +5258,21 @@ final class AppStore {
     func openComposeMailto(_ url: String) {
         // A new click is a new question; an older one left behind is dropped.
         mailtoAsk = nil
-        guard let link = Mailto(url) else { return }
+        // Nothing a composer could show, or past the size cap. The link was
+        // clicked, so it gets an answer.
+        guard let link = Mailto(url) else {
+            pushToast("Couldn't open that email link.", .error)
+            return
+        }
         guard let open = compose else {
             openMailto(link)
             return
         }
         // A send in flight owns its composer; there is nothing to put away.
-        guard !open.sending else { return }
+        guard !open.sending else {
+            pushToast("Couldn't open that email link while a message is sending.", .error)
+            return
+        }
         // ASK ONLY ABOUT WRITING: what the person typed, not what a composer
         // opened holding. A composer seeded by an earlier link (or restored
         // from a draft) and left alone is not "the one you're writing", and
@@ -5300,38 +5325,58 @@ final class AppStore {
 
     // MARK: - mailto: links from other apps
 
-    /// A mailto: link from outside (Passband as the default mail app) that
-    /// came before a mailbox was ready: a cold launch from a link lands while
-    /// the keychain is still being read. Held until the connection settles.
-    @ObservationIgnored private var pendingMailto: String?
+    /// mailto: links from outside (Passband as the default mail app) waiting
+    /// for a verified mailbox, or for the composer the last one opened to
+    /// close. See `MailtoInbox` for the rules.
+    @ObservationIgnored private var mailtoInbox = MailtoInbox()
+    /// The composer the last held link opened (or asked about), whose close
+    /// is the next link's turn.
+    @ObservationIgnored private var mailtoInboxComposer: UUID?
+    /// Drops the held links that run out of time while nothing else happens.
+    @ObservationIgnored private var mailtoInboxTimer: Task<Void, Never>?
 
     /// A mailto: link another app handed the system, which handed it here.
-    /// The same composer an in-message link opens (`openComposeMailto`),
-    /// with the same caution about a composer somebody is writing in, on the
-    /// account on screen; the composer's From switcher is there for another.
-    /// Held while the connection is still being found, and dropped if it
-    /// lands on the Connect screen: with no mailbox there is nothing to send
-    /// from, and the link would otherwise fire minutes later, after a connect
-    /// the person made for its own sake.
-    func receiveMailtoURL(_ url: URL) {
+    /// Held in `mailtoInbox` and opened by `settleMailtoInbox` into the same
+    /// composer an in-message link opens (`openComposeMailto`), with the same
+    /// caution about a composer somebody is writing in, on the account on
+    /// screen; the composer's From switcher is there for another.
+    func receiveMailtoURL(_ url: URL, now: Date = Date()) {
         let href = url.absoluteString
         guard Mailto.isMailto(href) else { return }
-        pendingMailto = href
-        routePendingMailto()
+        if let refused = mailtoInbox.add(href, at: now) {
+            pushToast(MailtoInbox.copy(refused), .error)
+            return
+        }
+        settleMailtoInbox(now: now)
     }
 
-    private func routePendingMailto() {
-        guard let href = pendingMailto else { return }
-        switch Mailto.route(connected: connStatus == .connected, gate: connStatus == .disconnected) {
-        case .hold:
-            return
-        case .drop:
-            pendingMailto = nil
-        case .open:
-            pendingMailto = nil
-            // One hop later, so a connection that just came up has finished
-            // laying out its account before a composer opens on it.
-            Task { @MainActor in self.openComposeMailto(href) }
+    /// Open, hold or drop what the inbox holds, from where the connection
+    /// stands. Called on every change that can move it: a link arriving,
+    /// `connStatus`, the connection verified, a composer closing, the timer.
+    func settleMailtoInbox(now: Date = Date()) {
+        let free = mailtoInboxComposer == nil || compose?.id != mailtoInboxComposer
+        let (href, dropped) = mailtoInbox.settle(
+            connected: connStatus == .connected && connectionVerified,
+            free: free,
+            gate: connStatus == .disconnected,
+            now: now)
+        // One toast, however many went: they went for the same reason.
+        if let first = dropped.first { pushToast(MailtoInbox.copy(first), .error) }
+        if let href {
+            openComposeMailto(href)
+            mailtoInboxComposer = compose?.id
+        }
+        scheduleMailtoInboxExpiry()
+    }
+
+    private func scheduleMailtoInboxExpiry() {
+        mailtoInboxTimer?.cancel()
+        mailtoInboxTimer = nil
+        guard let due = mailtoInbox.nextExpiry else { return }
+        mailtoInboxTimer = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, due.timeIntervalSinceNow) + 0.05))
+            guard !Task.isCancelled else { return }
+            self?.settleMailtoInbox()
         }
     }
 

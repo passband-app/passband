@@ -175,15 +175,11 @@ struct ActionLayer: View {
     }
 
     /// NOT WHILE THE SMART CLEAR LIST IS UP: it is a page in the content
-    /// pane, and the corner's cards belong to the board it covers.
-    private var showsUnsubscribeTray: Bool {
-        store.showsSitrepCorner && !store.smartClearListOpen
-            && !UnsubscribeJobs.shared.items.isEmpty
-    }
+    /// pane, and the corner's cards belong to the board it covers. On the
+    /// store so the default-mail card can wait for the same corner.
+    private var showsUnsubscribeTray: Bool { store.showsUnsubscribeTray }
 
-    private var showsSmartClearReceipt: Bool {
-        store.showsSitrepCorner && !store.smartClearListOpen && store.smartClearReceipt != nil
-    }
+    private var showsSmartClearReceipt: Bool { store.showsSmartClearReceipt }
 
     // MARK: - toasts
 

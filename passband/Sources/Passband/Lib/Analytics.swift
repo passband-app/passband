@@ -244,8 +244,9 @@ enum Analytics {
         // measured here, at any level.
         "agent_nudge_closed",
         // The default-mail-app ask closing, with one bool: whether "Make
-        // default" was pressed. The system's own confirmation comes after, so
-        // this is a ceiling on uptake, not a count of defaults set.
+        // default" was pressed. The change can still be declined or fail
+        // after that, so this is a ceiling on uptake, not a count of defaults
+        // set.
         "default_mail_nudge_closed",
         // Send groups carry a mode and a member COUNT. Whether people organize
         // their correspondents into audiences at all, and which shape they

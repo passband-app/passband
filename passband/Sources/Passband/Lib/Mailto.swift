@@ -152,24 +152,77 @@ struct Mailto: Equatable, Sendable {
     }
 }
 
-// MARK: - a link from another app
+// MARK: - links from another app
 
-extension Mailto {
-    /// What happens to a mailto: link another app sent while Passband is the
-    /// default mail app, given where the connection stands.
-    enum Route: Equatable, Sendable {
-        /// A mailbox is on screen: the composer opens now.
-        case open
-        /// Still finding out (a cold launch reading the keychain, a daemon
-        /// being waited on, a connect in flight): kept until it settles.
-        case hold
-        /// The Connect screen: there is no mailbox to write from, so the link
-        /// goes rather than firing after a connect made for its own sake.
-        case drop
+/// mailto: links another app sent while Passband is the default mail app,
+/// waiting for a mailbox to write from. A cold launch from a link lands while
+/// the keychain is still being read; the links are held, a few of them, in
+/// the order they came, until the connection is VERIFIED (the same signal the
+/// notification taps wait on), and opened one at a time: the next when the
+/// composer the last one opened has closed.
+///
+/// NOTHING GOES QUIETLY. Every link that will not open says so: the Connect
+/// screen (no mailbox), a hold that ran past `holdFor`, a fourth link while
+/// three wait. A link Passband cannot read at all is the store's to report.
+///
+/// Pure, with the clock passed in, so a headless suite can pin it.
+struct MailtoInbox: Sendable {
+    static let capacity = 3
+    static let holdFor: TimeInterval = 60
+
+    enum Drop: Equatable, Sendable {
+        /// The Connect screen: no mailbox to write from.
+        case noMailbox
+        /// The connection did not come up within `holdFor`.
+        case expired
+        /// `capacity` links already waiting.
+        case full
     }
 
-    static func route(connected: Bool, gate: Bool) -> Route {
-        if connected { return .open }
-        return gate ? .drop : .hold
+    private(set) var held: [(href: String, at: Date)] = []
+
+    var isEmpty: Bool { held.isEmpty }
+
+    /// Hold a link. Nil when held; the reason when it was turned away.
+    mutating func add(_ href: String, at now: Date) -> Drop? {
+        guard held.count < Self.capacity else { return .full }
+        held.append((href, now))
+        return nil
+    }
+
+    /// What to do now. `connected` is a VERIFIED connection; `free` is that
+    /// no composer a held link opened is still up; `gate` is the Connect
+    /// screen.
+    ///   * the Connect screen: every link goes, `.noMailbox`;
+    ///   * connected and free: the oldest link opens, the rest wait their
+    ///     turn (no clock on them now: they wait on the person, not on us);
+    ///   * not connected: links held past `holdFor` go, `.expired`.
+    mutating func settle(
+        connected: Bool, free: Bool, gate: Bool, now: Date
+    ) -> (open: String?, dropped: [Drop]) {
+        if gate {
+            let dropped = held.map { _ in Drop.noMailbox }
+            held.removeAll()
+            return (nil, dropped)
+        }
+        if connected {
+            guard free, !held.isEmpty else { return (nil, []) }
+            return (held.removeFirst().href, [])
+        }
+        let expired = held.filter { now.timeIntervalSince($0.at) >= Self.holdFor }.count
+        held.removeAll { now.timeIntervalSince($0.at) >= Self.holdFor }
+        return (nil, Array(repeating: .expired, count: expired))
+    }
+
+    /// When the oldest held link expires, for the timer that drops it.
+    var nextExpiry: Date? { held.first.map { $0.at.addingTimeInterval(Self.holdFor) } }
+
+    /// The toast for a drop.
+    static func copy(_ drop: Drop) -> String {
+        switch drop {
+        case .noMailbox: "Couldn't open that email link. Connect a mailbox first."
+        case .expired: "Couldn't open that email link. Passband wasn't connected in time."
+        case .full: "Couldn't open that email link. Too many are waiting."
+        }
     }
 }

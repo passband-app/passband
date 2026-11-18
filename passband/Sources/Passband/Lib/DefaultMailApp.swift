@@ -1,29 +1,35 @@
 // PASSBAND AS THE MAC'S DEFAULT MAIL APP: whether it is, the one time it asks
 // to be, and the button that makes it so.
 //
-// THE ASK COMES AFTER A SEND, not at launch. Somebody who has just sent mail
-// from Passband has a reason to want email links to land here; somebody who
-// has only opened the app has not. So the card can only go up right after a
-// send from Passband succeeds: the first one on a new install, and the first
-// one after this update on an install that predates it (the stamp is new, so
-// neither has been asked).
+// THE ASK IS EARNED BY A SEND, not by a launch. Somebody who has just sent
+// mail from Passband has a reason to want email links to land here; somebody
+// who has only opened the app has not. So the card can only be wanted right
+// after a send from Passband goes out: the first one on a new install, and
+// the first one after this update on an install that predates it (the stamp
+// is new, so neither has been asked).
 //
 // ONLY IF IT IS NOT ALREADY THE DEFAULT. Asked of Launch Services at the
 // moment of the send, by bundle id, so a person who set it in Mail's
-// preferences, or from Settings here, is never asked.
+// settings, or from Settings here, is never asked.
 //
-// ASKED ONCE, EVER, like the other one-time cards: the stamp is written when
-// the card goes up, before any answer, so a crash with it on screen has still
-// asked. "Not now" is an answer. Settings > Mail keeps the button for anyone
-// who changes their mind.
+// WANTED IS NOT DRAWN. The card waits while a composer is open (it sits in
+// the corner the Send button is in, and the next mail is often started right
+// after the last one went) and while the sitrep's corner holds the
+// unsubscribe tray or the smart clear receipt. It comes back when they go.
 //
-// NEVER ON TOP OF ANOTHER CARD. A send while another one-time card is up does
-// not stamp anything; the next send gets the chance instead.
+// ASKED ONCE, EVER, like the other one-time cards: the stamp is written the
+// first time the card is actually DRAWN (`noteShown`), before any answer, so
+// a crash with it on screen has still asked. A card wanted and never drawn
+// (quit with a composer open) is not an ask; the next send earns it again.
+// "Not now" is an answer. Settings > Mail keeps the button for anyone who
+// changes their mind.
 //
-// The system shows its own confirmation when an app asks to become the
-// default (`setDefaultApplication`), so "Make default" is only the request.
-// What Launch Services says afterwards is the answer, re-read rather than
-// assumed.
+// NEVER ON TOP OF ANOTHER ONE-TIME CARD. A send while one is up wants
+// nothing; the next send gets the chance instead.
+//
+// "Make default" is a request: macOS may ask the person to confirm it, and it
+// can fail. What Launch Services says afterwards is the answer, re-read
+// rather than assumed.
 
 import Foundation
 import Observation
@@ -37,7 +43,7 @@ import Observation
 final class DefaultMailApp {
     static let shared = DefaultMailApp()
 
-    private nonisolated static let askedKey = "passband.defaultMail.asked"
+    nonisolated static let askedKey = "passband.defaultMail.asked"
 
     /// `PASSBAND_FORCE_DEFAULT_MAIL_NUDGE=1` puts the card up at launch without
     /// recording an ask, so it can be looked at without sending mail. Same
@@ -46,30 +52,47 @@ final class DefaultMailApp {
     nonisolated static let forced =
         ProcessInfo.processInfo.environment["PASSBAND_FORCE_DEFAULT_MAIL_NUDGE"] == "1"
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
+    /// Launch Services' answer: is Passband the app mailto: links open in.
+    /// Injected so a suite can answer without the system.
+    private let probe: () -> Bool
+    private let isForced: Bool
 
-    /// Whether the card is up right now.
+    /// Whether the card is WANTED: earned and not yet answered. Whether it is
+    /// drawn right now is `drawn(composerOpen:cornerOccupied:)`.
     var showingNudge = false
 
-    /// What Launch Services last said: is Passband the app mailto: links open
-    /// in. Refreshed on `refresh()`, which the Settings row calls on appear.
+    /// What Launch Services last said. Refreshed on `refresh()`, which the
+    /// Settings row calls on appear and on every return to the app.
     private(set) var isDefault = false
 
-    /// The last "Make default" failed or was declined at the system's prompt.
+    /// The last "Make default" failed or was declined.
     private(set) var lastRequestFailed = false
 
-    private init() {
+    init(
+        defaults: UserDefaults = .standard,
+        forced: Bool = DefaultMailApp.forced,
+        probe: @escaping () -> Bool = DefaultMailApp.systemSaysPassband
+    ) {
+        self.defaults = defaults
+        self.probe = probe
+        self.isForced = forced
         refresh()
-        showingNudge = Self.forced
+        showingNudge = forced
     }
 
-    /// THE RULE, pure, so a headless suite can pin it. `sentFromPassband` is
-    /// whether this moment follows a send that went out; nothing else is a
-    /// moment to ask at.
+    /// THE RULE, pure. `sentFromPassband` is whether this moment follows a
+    /// send that went out; nothing else is a moment to ask at.
     nonisolated static func earned(
         sentFromPassband: Bool, isDefault: Bool, asked: Bool, othersShowing: Bool
     ) -> Bool {
         sentFromPassband && !isDefault && !asked && !othersShowing
+    }
+
+    /// THE PLACEMENT RULE, pure: a wanted card is drawn only with no composer
+    /// open and nothing else in the bottom-right corner.
+    nonisolated static func drawn(wanted: Bool, composerOpen: Bool, cornerOccupied: Bool) -> Bool {
+        wanted && !composerOpen && !cornerOccupied
     }
 
     /// The default handler's bundle id against this app's, both lowercased.
@@ -83,35 +106,42 @@ final class DefaultMailApp {
 
     var asked: Bool { defaults.bool(forKey: Self.askedKey) }
 
-    /// A send from Passband just went out. Puts the card up if this is the
-    /// moment, and stamps the ask when it does. The one entry point the store
-    /// calls.
+    func drawn(composerOpen: Bool, cornerOccupied: Bool) -> Bool {
+        Self.drawn(wanted: showingNudge, composerOpen: composerOpen, cornerOccupied: cornerOccupied)
+    }
+
+    /// A send from Passband just went out. Wants the card if this is the
+    /// moment. The one entry point the store calls (`release`).
     func noteSent(othersShowing: Bool) {
-        #if os(macOS)
-            guard !FixtureMode.isEnabled, !showingNudge else { return }
-            refresh()
-            guard
-                Self.earned(
-                    sentFromPassband: true, isDefault: isDefault, asked: asked,
-                    othersShowing: othersShowing)
-            else { return }
-            defaults.set(true, forKey: Self.askedKey)
-            showingNudge = true
-        #endif
+        guard !FixtureMode.isEnabled, !showingNudge else { return }
+        refresh()
+        guard
+            Self.earned(
+                sentFromPassband: true, isDefault: isDefault, asked: asked,
+                othersShowing: othersShowing)
+        else { return }
+        showingNudge = true
+    }
+
+    /// The card is on screen. Stamps the ask the first time; a forced card
+    /// (the preview override) stamps nothing.
+    func noteShown() {
+        guard showingNudge, !isForced, !asked else { return }
+        defaults.set(true, forKey: Self.askedKey)
+    }
+
+    /// Either answer. Never wanted again.
+    func close() {
+        showingNudge = false
     }
 
     /// Re-read the system's answer.
     func refresh() {
-        #if os(macOS)
-            let handler = Self.probeURL.flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) }
-            let handlerId = handler.flatMap { Bundle(url: $0)?.bundleIdentifier }
-            isDefault = Self.isPassband(
-                handlerBundleId: handlerId, ownBundleId: Bundle.main.bundleIdentifier)
-        #endif
+        isDefault = probe()
     }
 
-    /// Ask the system to make Passband the mailto: handler. The system shows
-    /// its own confirmation; `isDefault` follows whatever it decided.
+    /// Ask the system to make Passband the mailto: handler. macOS may ask the
+    /// person to confirm; `isDefault` follows whatever it decided.
     func makeDefault() {
         #if os(macOS)
             lastRequestFailed = false
@@ -127,5 +157,18 @@ final class DefaultMailApp {
         #endif
     }
 
-    private nonisolated static let probeURL = URL(string: "mailto:someone@example.com")
+    /// Launch Services' handler for mailto:, compared by bundle id. Always
+    /// false off the Mac.
+    nonisolated static func systemSaysPassband() -> Bool {
+        #if os(macOS)
+            guard let probeURL = URL(string: "mailto:someone@example.com"),
+                let handler = NSWorkspace.shared.urlForApplication(toOpen: probeURL)
+            else { return false }
+            return isPassband(
+                handlerBundleId: Bundle(url: handler)?.bundleIdentifier,
+                ownBundleId: Bundle.main.bundleIdentifier)
+        #else
+            return false
+        #endif
+    }
 }

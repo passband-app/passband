@@ -129,6 +129,22 @@ sed -e 's/\$(EXECUTABLE_NAME)/Passband/g' \
     -e 's/\$(MACOSX_DEPLOYMENT_TARGET)/26.0/g' \
     "$SRC_DIR/Info.plist" > "$APP/Contents/Info.plist"
 
+# ONLY A RELEASE BUILD CLAIMS mailto:. Every build shares one bundle id, so a
+# preview or worktree build that declared the scheme would be a candidate for
+# Launch Services, and an email link clicked anywhere could open in a stale
+# preview. Dev builds keep passband:// and lose the mailto entry.
+if [[ "$MODE" != "release" ]]; then
+  PLIST="$APP/Contents/Info.plist"
+  i=0
+  while name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:$i:CFBundleURLName" "$PLIST" 2>/dev/null); do
+    if [[ "$name" == "app.passband.client.mailto" ]]; then
+      /usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes:$i" "$PLIST"
+      break
+    fi
+    i=$((i + 1))
+  done
+fi
+
 cp -R "$RES_DIR/." "$APP/Contents/Resources/" 2>/dev/null || true
 
 # App icon. ./Passband.icon is the only icon source in the repo; actool compiles

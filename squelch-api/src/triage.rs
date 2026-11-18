@@ -24,12 +24,12 @@ pub struct FeedQuery {
 /// Shared with [`smart_clear`], which scans the Reading inventory a 30-day
 /// feed would return (not the Reading board, which leaves first-load backlog
 /// off).
-fn feed_limit(requested: Option<usize>) -> usize {
+pub(crate) fn feed_limit(requested: Option<usize>) -> usize {
     requested.unwrap_or(200).clamp(1, 1000)
 }
 
 /// Where a feed's window starts when the caller names no `since`.
-fn default_feed_since(now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+pub(crate) fn default_feed_since(now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     now - chrono::Duration::days(30)
 }
 

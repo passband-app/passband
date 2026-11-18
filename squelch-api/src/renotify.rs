@@ -18,6 +18,13 @@
 //! A banner is only ever sent to a Mac that is listening, and only recorded
 //! when it was.
 //!
+//! QUICK CLEAR IS ANOTHER OUTCOME OF THE SAME PASS (docs/RENOTIFY.md, "Quick
+//! clear"): same triggers, same gate, same budget, same tap route. One
+//! arrival sends at most one banner: due-soon mail first, then a quick clear
+//! that met its floors, then plain "still waiting" mail. It goes out as a
+//! `quick_clear` frame, recorded in `renotify_batches` with `kind =
+//! 'quick_clear'`.
+//!
 //! OFF IS AS IF IT DID NOT EXIST. With the `renotify` feature off, no session
 //! is written, no pass runs, and both routes 404.
 
@@ -34,7 +41,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use squelch_core::config::RenotifyConfig;
 use squelch_core::features;
-use squelch_core::renotify::{self, Habits, Hold, Moment, Policy, Trigger};
+use squelch_core::quick_clear;
+use squelch_core::renotify::{self, Banner, Habits, Hold, Moment, Policy, Trigger};
 use tokio::sync::{Notify, broadcast, watch};
 
 use crate::error::ApiError;
@@ -46,15 +54,26 @@ use crate::state::ApiState;
 const FRAME_BUFFER: usize = 8;
 /// How far back the habits look.
 const HABIT_DAYS: i64 = 30;
+/// How far back quick clear's calibration looks: long enough for a
+/// multiplier to settle, short enough to follow an owner's habits.
+const CALIBRATION_DAYS: i64 = 60;
 /// Busy intervals read around now, each way.
 const BUSY_HORIZON_HOURS: i64 = 12;
+
+/// One banner on its way to the Mac streams: the SSE event name
+/// (`renotify` or `quick_clear`) and the encoded payload.
+#[derive(Debug, Clone)]
+pub(crate) struct BannerFrame {
+    pub(crate) event: &'static str,
+    pub(crate) payload: Arc<str>,
+}
 
 /// What every clone of the state shares about re-notify.
 #[derive(Clone)]
 pub(crate) struct RenotifyShared {
     pub(crate) config: Arc<RenotifyConfig>,
-    /// Banners, as encoded frame payloads, to every Mac stream listening.
-    pub(crate) frames: broadcast::Sender<Arc<str>>,
+    /// Banners, as encoded frames, to every Mac stream listening.
+    pub(crate) frames: broadcast::Sender<BannerFrame>,
     /// Poked by a Mac stream that opened after a long enough absence.
     pub(crate) arrival: Arc<Notify>,
     /// The session that poke was for: the worker checks it is still open
@@ -163,6 +182,8 @@ pub enum PassOutcome {
     Held(Hold),
     /// A banner went out: its id and the messages it named.
     Fired { batch: i64, message_ids: Vec<i64> },
+    /// A quick-clear banner went out: its id and its queue, in order.
+    QuickClear { batch: i64, message_ids: Vec<i64> },
 }
 
 /// Encode a banner as the `renotify` frame's payload. `at` is when it was
@@ -173,14 +194,45 @@ fn frame_payload(
     trigger: Trigger,
     at: DateTime<Utc>,
     picks: &[renotify::Candidate],
-) -> Option<Arc<str>> {
+) -> Option<BannerFrame> {
     let v = serde_json::json!({
         "renotify": batch,
         "trigger": trigger.as_str(),
         "at": at.timestamp(),
         "items": picks,
     });
-    serde_json::to_string(&v).ok().map(Arc::from)
+    serde_json::to_string(&v).ok().map(|payload| BannerFrame {
+        event: "renotify",
+        payload: Arc::from(payload),
+    })
+}
+
+/// Encode a quick clear as the `quick_clear` frame's payload: the batch id,
+/// the trigger, when it was decided, the numbers the app words the banner
+/// from, and the queue in order (smart-clear rows first, with basis
+/// `smart_clear`, for the app to turn into one press). Like `renotify`, it
+/// names no account: the stream it arrives on is the account's.
+fn quick_clear_payload(
+    batch: i64,
+    trigger: Trigger,
+    at: DateTime<Utc>,
+    quick: &quick_clear::QuickClear,
+) -> Option<BannerFrame> {
+    let v = serde_json::json!({
+        "quick_clear": batch,
+        "trigger": trigger.as_str(),
+        "at": at.timestamp(),
+        "budget_secs": quick.budget_secs,
+        "est_secs": quick.est_secs,
+        "fit_count": quick.fit_count,
+        "open_count": quick.open_count,
+        "smart_clear_count": quick.smart_clear_count,
+        "items": quick.items,
+    });
+    serde_json::to_string(&v).ok().map(|payload| BannerFrame {
+        event: "quick_clear",
+        payload: Arc::from(payload),
+    })
 }
 
 /// ONE PASS: ask the planner about this moment and, if it picks anything and
@@ -200,21 +252,30 @@ pub async fn run_renotify_pass(
     let store = state.store.clone();
     let account_id = state.account_id;
     let due_policy = policy.clone();
-    let (zone, busy, candidates, fired_today, outcomes) = blocking(state, move || {
-        let zone = store.owner_zone(account_id)?.zone;
-        let horizon = chrono::Duration::hours(BUSY_HORIZON_HOURS);
-        let busy = store.calendar_busy(account_id, now - horizon, now + horizon)?;
-        // Unopened mail still waiting, then For-your-eyes mail coming due.
-        // The planner keeps one entry per message.
-        let mut candidates = store.renotify_candidates(account_id)?;
-        candidates.extend(store.renotify_due_candidates(account_id, &due_policy, zone, now)?);
-        let fired_today =
-            store.renotify_fired_since(account_id, renotify::local_day_start(zone, now))?;
-        let outcomes =
-            store.renotify_outcomes(account_id, now - chrono::Duration::days(HABIT_DAYS))?;
-        Ok((zone, busy, candidates, fired_today, outcomes))
-    })
-    .await?;
+    let (zone, busy, candidates, fired_today, outcomes, last_quick_clear) =
+        blocking(state, move || {
+            let zone = store.owner_zone(account_id)?.zone;
+            let horizon = chrono::Duration::hours(BUSY_HORIZON_HOURS);
+            let busy = store.calendar_busy(account_id, now - horizon, now + horizon)?;
+            // Unopened mail still waiting, then For-your-eyes mail coming due.
+            // The planner keeps one entry per message.
+            let mut candidates = store.renotify_candidates(account_id)?;
+            candidates.extend(store.renotify_due_candidates(account_id, &due_policy, zone, now)?);
+            let fired_today =
+                store.renotify_fired_since(account_id, renotify::local_day_start(zone, now))?;
+            let outcomes =
+                store.renotify_outcomes(account_id, now - chrono::Duration::days(HABIT_DAYS))?;
+            let last_quick_clear = store.last_quick_clear_at(account_id)?;
+            Ok((
+                zone,
+                busy,
+                candidates,
+                fired_today,
+                outcomes,
+                last_quick_clear,
+            ))
+        })
+        .await?;
     let habits = Habits::learn(&outcomes);
     let moment = Moment {
         now,
@@ -223,9 +284,47 @@ pub async fn run_renotify_pass(
         busy: &busy,
         fired_today,
         habits: &habits,
+        last_quick_clear,
     };
-    let picks = match renotify::plan(&policy, &moment, &candidates) {
-        Ok(picks) => picks,
+    let stage = match renotify::stage(&policy, &moment, &candidates) {
+        Ok(stage) => stage,
+        Err(hold) => return Ok(PassOutcome::Held(hold)),
+    };
+    // The backlog is read only when a quick clear could win: not when
+    // due-soon mail will, and not when habits or the gap rule it out.
+    let quick = if stage.wants_quick_clear() {
+        let store = state.store.clone();
+        let inventory = squelch_core::store::agent_triage::AgentListQuery {
+            since: Some(crate::triage::default_feed_since(now)),
+            include_done: false,
+        };
+        let limit = crate::triage::feed_limit(None);
+        let (backlog, samples) = blocking(state, move || {
+            let backlog = store.quick_clear_backlog(account_id, now, &inventory, limit)?;
+            let samples = store.quick_clear_calibration(
+                account_id,
+                now - chrono::Duration::days(CALIBRATION_DAYS),
+            )?;
+            Ok((backlog, samples))
+        })
+        .await?;
+        match quick_clear::plan(&backlog, quick_clear::multiplier(&samples)) {
+            Ok(quick) => Some(quick),
+            Err(hold) => {
+                eprintln!(
+                    "squelchd: renotify {} quick clear held: {}",
+                    trigger.as_str(),
+                    hold.as_str()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let picks = match renotify::finish(stage, quick) {
+        Ok(Banner::Renotify(picks)) => picks,
+        Ok(Banner::QuickClear(quick)) => return fire_quick_clear(state, trigger, now, quick).await,
         Err(hold) => return Ok(PassOutcome::Held(hold)),
     };
     // Counted again at the last moment: the Mac may have gone while the
@@ -248,11 +347,41 @@ pub async fn run_renotify_pass(
     Ok(PassOutcome::Fired { batch, message_ids })
 }
 
+/// Record a quick-clear banner and send it, if a Mac is still listening.
+async fn fire_quick_clear(
+    state: &ApiState,
+    trigger: Trigger,
+    now: DateTime<Utc>,
+    quick: quick_clear::QuickClear,
+) -> Result<PassOutcome, ApiError> {
+    let listeners = state.renotify.frames.receiver_count();
+    if listeners == 0 {
+        return Ok(PassOutcome::NoListener);
+    }
+    let message_ids: Vec<i64> = quick.items.iter().map(|p| p.message_id).collect();
+    let store = state.store.clone();
+    let account_id = state.account_id;
+    let items = quick.items.clone();
+    let batch = blocking(state, move || {
+        store.record_quick_clear(account_id, trigger, now, listeners, &items)
+    })
+    .await?;
+    if let Some(frame) = quick_clear_payload(batch, trigger, now, &quick) {
+        let _ = state.renotify.frames.send(frame);
+    }
+    Ok(PassOutcome::QuickClear { batch, message_ids })
+}
+
 fn log(trigger: Trigger, outcome: &Result<PassOutcome, ApiError>) {
     // Ids and counts only: never a sender or a subject.
     match outcome {
         Ok(PassOutcome::Fired { batch, message_ids }) => eprintln!(
             "squelchd: renotify {} fired batch {batch} ({} messages)",
+            trigger.as_str(),
+            message_ids.len()
+        ),
+        Ok(PassOutcome::QuickClear { batch, message_ids }) => eprintln!(
+            "squelchd: renotify {} fired quick clear {batch} ({} items)",
             trigger.as_str(),
             message_ids.len()
         ),
@@ -388,9 +517,11 @@ pub async fn renotify_opened(
     }
 }
 
-/// `GET /client/renotify/stats` — the last 30 days of banners, by trigger and
-/// by hour of the owner's day, and which triggers the owner's own responses
-/// have paused.
+/// `GET /client/renotify/stats` — the last 30 days of banners, by trigger, by
+/// kind and by hour of the owner's day, which triggers the owner's own
+/// responses have paused, and quick clear's calibration: predicted against
+/// actual seconds per basis over the last 60 days, and the multiplier the
+/// next plan will use.
 pub async fn renotify_stats(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
     if !enabled(&state) {
         return Err(ApiError::not_found());
@@ -398,17 +529,23 @@ pub async fn renotify_stats(State(state): State<ApiState>) -> Result<impl IntoRe
     let store = state.store.clone();
     let account_id = state.account_id;
     let now = Utc::now();
-    let (zone, outcomes) = blocking(&state, move || {
+    let (zone, outcomes, samples) = blocking(&state, move || {
         let zone = store.owner_zone(account_id)?.zone;
         let outcomes =
             store.renotify_outcomes(account_id, now - chrono::Duration::days(HABIT_DAYS))?;
-        Ok((zone, outcomes))
+        let samples = store
+            .quick_clear_calibration(account_id, now - chrono::Duration::days(CALIBRATION_DAYS))?;
+        Ok((zone, outcomes, samples))
     })
     .await?;
     Ok(Json(serde_json::json!({
         "days": HABIT_DAYS,
         "zone": zone.name(),
         "summary": renotify::summarize(&outcomes, zone),
+        "quick_clear": {
+            "days": CALIBRATION_DAYS,
+            "calibration": quick_clear::calibrate(&samples),
+        },
     })))
 }
 
@@ -434,8 +571,9 @@ mod tests {
             renotified: 1,
             last_renotified_at: Some(at),
         };
-        let raw = frame_payload(12, Trigger::MeetingEnd, at, &[c]).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let frame = frame_payload(12, Trigger::MeetingEnd, at, &[c]).unwrap();
+        assert_eq!(frame.event, "renotify");
+        let v: serde_json::Value = serde_json::from_str(&frame.payload).unwrap();
         assert_eq!(v["renotify"], 12);
         assert_eq!(v["trigger"], "meeting_end");
         assert_eq!(v["items"][0]["message_id"], 4);
@@ -450,5 +588,57 @@ mod tests {
         assert!(v["items"][0].get("notified_at").is_none());
         // Never mistakable for an event: no top-level `id`.
         assert!(v.get("id").is_none());
+    }
+
+    #[test]
+    fn the_quick_clear_frame_is_the_contract_shape() {
+        use squelch_core::quick_clear::{Basis, ItemKind, Planned, QuickClear};
+        let at = Utc::now();
+        let quick = QuickClear {
+            budget_secs: 300,
+            est_secs: 284,
+            fit_count: 2,
+            open_count: 3,
+            smart_clear_count: 1,
+            items: vec![
+                Planned {
+                    message_id: 3,
+                    thread_id: "t3".into(),
+                    est_secs: 0,
+                    basis: Basis::SmartClear,
+                    kind: ItemKind::SmartClear,
+                    sender: "deals@shop.example".into(),
+                    one_line: "Sale ended".into(),
+                },
+                Planned {
+                    message_id: 4,
+                    thread_id: "t4".into(),
+                    est_secs: 8,
+                    basis: Basis::Heuristic,
+                    kind: ItemKind::Receipt,
+                    sender: "alice@example.com".into(),
+                    one_line: "Your order shipped".into(),
+                },
+            ],
+        };
+        let frame = quick_clear_payload(12, Trigger::ClientOnline, at, &quick).unwrap();
+        assert_eq!(frame.event, "quick_clear");
+        let v: serde_json::Value = serde_json::from_str(&frame.payload).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "quick_clear": 12, "trigger": "client_online", "at": at.timestamp(),
+                "budget_secs": 300, "est_secs": 284, "fit_count": 2, "open_count": 3,
+                "smart_clear_count": 1,
+                "items": [
+                    {"message_id": 3, "thread_id": "t3", "est_secs": 0,
+                     "basis": "smart_clear", "kind": "smart_clear",
+                     "sender": "deals@shop.example", "one_line": "Sale ended"},
+                    {"message_id": 4, "thread_id": "t4", "est_secs": 8,
+                     "basis": "heuristic", "kind": "receipt",
+                     "sender": "alice@example.com", "one_line": "Your order shipped"}
+                ]
+            })
+        );
     }
 }

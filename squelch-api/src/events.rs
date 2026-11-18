@@ -128,8 +128,10 @@ fn open_draft_frame(draft_id: i64) -> SseEvent {
 /// A smart re-notify banner ([`crate::renotify`]), as an SSE frame. Like
 /// [`open_draft_frame`]: no `id:`, so it moves no cursor, and a payload an
 /// [`Event`] decoder rejects, so an app that does not know it carries on.
-fn renotify_frame(payload: &str) -> SseEvent {
-    SseEvent::default().event("renotify").data(payload)
+fn renotify_frame(banner: &crate::renotify::BannerFrame) -> SseEvent {
+    SseEvent::default()
+        .event(banner.event)
+        .data(banner.payload.as_ref())
 }
 
 /// A calendar reminder ([`crate::calendar_remind`]), as an SSE frame. Like
@@ -194,7 +196,7 @@ async fn run(
     mut wake: broadcast::Receiver<i64>,
     _anchor: Option<broadcast::Sender<i64>>,
     mut opens: Option<broadcast::Receiver<i64>>,
-    mut banners: Option<broadcast::Receiver<Arc<str>>>,
+    mut banners: Option<broadcast::Receiver<crate::renotify::BannerFrame>>,
     mut reminders: Option<broadcast::Receiver<Arc<str>>>,
     tx: mpsc::Sender<Result<SseEvent, Infallible>>,
 ) {
@@ -229,8 +231,8 @@ async fn run(
                     return;
                 }
             }
-            // A re-notify banner, for a Mac stream. A lag is a missed banner:
-            // it was about a moment that has passed.
+            // A re-notify or quick-clear banner, for a Mac stream. A lag is a
+            // missed banner: it was about a moment that has passed.
             Some(banner) = next_banner(&mut banners) => {
                 if let Some(payload) = banner
                     && tx.send(Ok(renotify_frame(&payload))).await.is_err()
@@ -282,10 +284,8 @@ async fn shutting_down(shutdown: Option<watch::Receiver<bool>>) {
     }
 }
 
-/// [`next_open`] for re-notify banners.
-async fn next_banner(
-    banners: &mut Option<broadcast::Receiver<Arc<str>>>,
-) -> Option<Option<Arc<str>>> {
+/// [`next_open`] for banners (re-notify, quick clear, calendar reminders).
+async fn next_banner<T: Clone>(banners: &mut Option<broadcast::Receiver<T>>) -> Option<Option<T>> {
     let Some(rx) = banners else {
         return std::future::pending().await;
     };

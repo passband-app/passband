@@ -199,7 +199,7 @@ fn a_quick_clear_is_recorded_as_its_own_kind_and_spends_no_renotify() {
 #[test]
 fn calibration_reads_predicted_against_what_each_item_really_took() {
     let (store, acct) = store();
-    for id in [1, 2, 3, 4] {
+    for id in [1, 2, 3, 4, 5] {
         store
             .append_event(&new_event(&store, acct, id))
             .unwrap()
@@ -225,6 +225,7 @@ fn calibration_reads_predicted_against_what_each_item_really_took() {
                 planned(2, 8, Basis::Heuristic),
                 planned(3, 12, Basis::Model),
                 planned(4, 5, Basis::Dwell),
+                planned(5, 0, Basis::SmartClear),
             ],
         )
         .unwrap();
@@ -254,6 +255,13 @@ fn calibration_reads_predicted_against_what_each_item_really_took() {
             (fired + Duration::minutes(1) + Duration::seconds(20)).to_rfc3339()
         ),
     );
+    // 5 was a smart-clear row the owner marked done by hand: the press
+    // did not take it, so it says nothing about the promise.
+    set(
+        &store,
+        5,
+        &format!("status = 'done', resolved_at = '{}'", after(3)),
+    );
     // 4 was opened BEFORE the banner: says nothing about the sprint.
     set(
         &store,
@@ -264,7 +272,7 @@ fn calibration_reads_predicted_against_what_each_item_really_took() {
     let mut samples = store
         .quick_clear_calibration(acct, fired - Duration::days(1))
         .unwrap();
-    samples.sort_by_key(|s| s.basis);
+    samples.sort_by_key(|s| (s.basis, std::cmp::Reverse(s.handled)));
     let got: Vec<(Basis, u32, Option<u32>, bool)> = samples
         .iter()
         .map(|s| (s.basis, s.predicted_secs, s.actual_secs, s.handled))
@@ -273,6 +281,7 @@ fn calibration_reads_predicted_against_what_each_item_really_took() {
         got,
         vec![
             (Basis::SmartClear, 0, Some(0), true),
+            (Basis::SmartClear, 0, None, false),
             (Basis::Dwell, 5, None, false),
             (Basis::Model, 12, Some(20), true),
             (Basis::Heuristic, 8, Some(7), true),

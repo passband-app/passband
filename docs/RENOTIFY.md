@@ -14,8 +14,10 @@ exists: no session is written, no pass runs, and the routes 404.
 | Piece | File |
 |---|---|
 | The rules (pure, no I/O) | `squelch-core/src/renotify.rs` |
+| Quick clear's estimator and planner (pure) | `squelch-core/src/quick_clear.rs` |
+| Quick clear's backlog read | `squelch-core/src/store/sqlite/quick_clear.rs` |
 | Sessions, candidates, busy times, banner record | `squelch-core/src/store/sqlite/renotify.rs` |
-| Tunables | `RenotifyConfig` in `squelch-core/src/config.rs` (`[renotify]`, `SQUELCH_RENOTIFY_*`) |
+| Tunables | `RenotifyConfig` in `squelch-core/src/config.rs` (`[renotify]`, `SQUELCH_RENOTIFY_*`); quick clear has none, its numbers are constants in `quick_clear.rs` |
 | Worker, frame, routes | `squelch-api/src/renotify.rs` |
 | Session + frame on the Mac stream | `squelch-api/src/events.rs` |
 | Spawned | `squelchd/src/bin/squelchd.rs` |
@@ -97,6 +99,107 @@ past, for urgent-tier mail and for due-soon mail, minus a penalty per
 re-notify already spent (ordinary candidates only). At
 most `max_items` (default 3) go in one banner.
 
+## Quick clear
+
+The same pass can send a different banner: "5 minutes clears 14 of your 23
+emails". Tapping it opens a sprint queue holding exactly the items counted.
+Same triggers, same gate (meeting, guard, working hours, daily budget), same
+feature flag, same table and tap route.
+
+**One banner per arrival**, in this order (`renotify::stage` then
+`renotify::finish`):
+
+1. Due-soon mail. A bill due tomorrow outranks a tidy inbox. The backlog is
+   not even read.
+2. A quick clear that met its floors.
+3. Plain "still waiting" mail.
+
+A quick clear is allowed only when its (trigger, `quick_clear`) pair is not
+paused by habits and the last one fired at least `quick_clear::GAP_HOURS`
+(4) ago. It counts against `daily_budget` like any banner.
+
+**The backlog (the denominator).** Every card on the For your eyes board
+(`agent_triage::list_items("fye")`, the rows the Dock badge counts) plus the
+Reading rows smart clear would take right now on stored facts alone (smart
+clear's own `scan`). Other Reading mail is not counted: Passband filed it as
+optional, so an unread newsletter is not a demand on the owner, and counting
+it would make a true sprint read as a small one. `open_count` is the number of
+distinct messages in that list, quick or not.
+
+**What an item costs** (`quick_clear::estimate`). Eligibility first, then the
+best evidence for the number:
+
+| Item | Cost | `kind` |
+|---|---|---|
+| Sealed, auth or restricted mail; a reminder pending or fired | never | |
+| A Reading row smart clear takes on stored facts (`event_passed`, `offer_ended`, `ignored_sender`, `skimmed_sender`, `stale_promo`; never the model-judged `expired`) | 0 each; the one press is 5s | `smart_clear` |
+| An open `reply`, `pay`, `decide` or `other` action on the thread | never | |
+| An open `review` / `attend` action | 40s / 25s, summed | `review` / `attend` |
+| `needs_user` with no action named | never (unknown) | |
+| Receipt, delivery or account notice, nothing open | 5s | `receipt` / `delivery` / `account_service` |
+| Reading content | words at 250 wpm, at least 10s | `read` |
+| Anything else (informational, resolved, waiting on others) | 8s | `glance` |
+
+A protected sender (known contact, `surface` rule, kept) is quick only with
+no open action and not as a read. Then the model's own estimate
+(`decision.effort`, below) replaces the heuristic's number, and a model
+`reply` or `involved` task takes the item out. Then the owner's own dwell on
+that sender's mail replaces both, once there are 3 reported looks since
+`dwell_ledger_since` (median, plus 10s per open action). Anything over 120s
+is left out.
+
+**The plan** (`quick_clear::plan`). Sort by cost (ties newest first), fill a
+300s budget, stop at the first item that does not fit. No banner when fewer
+than 5 items fit or under 25% of `open_count` fits. Smart-clear rows only
+ever add to what fits, and the press the client turns them into runs the same
+judgement, so it clears at least what was promised (more, if its model pass
+finds expired rows).
+
+**The model's estimate.** agent-triage-v18 added an optional `effort` to
+every decision: `{"seconds": n, "task": "glance|skim|quick_action|reply|long_read|involved"}`.
+Nullable in the strict schema, absent on every older stored decision (it
+defaults), clamped to an hour on write and on read, and dropped when it
+claims zero or fewer seconds. It is never a reason to fail a turn.
+
+**Calibration.** Each quick-clear item is stored with its predicted seconds
+and basis (`renotify_items.est_secs`, `basis`). What it really took is read
+later from the message's own state: the dwell the client reported after the
+banner, else open-to-done when that was one sitting (10 minutes or less). A
+smart-clear row is handled when a smart-clear press took it after the banner.
+Over the last 60 days, measured model and heuristic items give a per-owner
+multiplier (actual over predicted, clamped 0.5 to 2.0, 1.0 until 10 items
+are measured) that the next plan applies to model and heuristic numbers. Dwell
+numbers are already the owner's own clock and are not scaled.
+
+### The frame
+
+A `quick_clear` SSE frame on the Mac stream. Like `renotify`: no `id:`, and a
+payload no `Event` decoder accepts.
+
+```json
+{"quick_clear": 12, "trigger": "client_online", "at": 1793210000,
+ "budget_secs": 300, "est_secs": 284, "fit_count": 14, "open_count": 23,
+ "smart_clear_count": 6,
+ "items": [{"message_id": 4, "thread_id": "t4", "est_secs": 8,
+            "basis": "heuristic", "kind": "receipt",
+            "sender": "alice@example.com", "one_line": "Your order shipped"}]}
+```
+
+- `quick_clear` is the `renotify_batches` id; the tap is
+  `POST /client/renotify/{id}/opened`, as for a re-notify.
+- `items` are in queue order: smart-clear rows first (`est_secs` 0, basis
+  `smart_clear`, kind `smart_clear`), then cheapest first. The client turns
+  the smart-clear rows into one smart-clear press.
+- `basis` is `smart_clear`, `dwell`, `model` or `heuristic`; `kind` is
+  `smart_clear`, `glance`, `receipt`, `delivery`, `account_service`,
+  `review`, `attend` or `read`.
+- `est_secs` is the queue's total including the one press. `fit_count` is
+  `items.length`.
+- No account field: as with `renotify`, the stream a frame arrives on is the
+  account's.
+- The copy is the client's: counts first, and a percentage
+  (`fit_count / open_count`) only when it is both flattering and true.
+
 ## Delivery
 
 One `renotify` SSE frame on the Mac stream, like `open_draft`. It has no `id:`,
@@ -148,18 +251,25 @@ copy) and the re-notify half of `EventBanner.swift` (the tap), posted by
 ## Tracking
 
 `renotify_batches` is one row per banner, and `renotify_items` holds the
-messages it named. The app reports a tap with
+messages it named. `kind` says which banner it was (`renotify` or
+`quick_clear`). A message counted in a quick clear spends none of its
+re-notifies and starts no cooldown: the per-message cap and cooldown read
+re-notify batches only. The app reports a tap with
 `POST /client/renotify/{id}/opened` (optional body `{"message_id": n}`). The
 first tap is kept. Whether each message was handled after the banner (opened,
 done or archived, or replied to) is worked out on read from the message's own
 state, never stored.
 
-`GET /client/renotify/stats` serves the last 30 days by trigger and by hour of
-the owner's day, plus the paused triggers.
+`GET /client/renotify/stats` serves the last 30 days by trigger, by kind
+(`summary.by_kind`) and by hour of the owner's day, the paused triggers
+(`summary.muted` for re-notify, `summary.muted_quick_clear`), and
+`quick_clear.calibration`: per basis, items, handled, measured, and predicted
+against actual seconds over the measured ones, plus the multiplier.
 
-**Habits, first rung.** A trigger whose last 8 banners were all ignored (no tap,
-nothing handled) is paused for that owner until one of them is answered.
-Nothing else adapts yet.
+**Habits, first rung.** A (trigger, kind) pair whose last 8 banners were all
+ignored (no tap, nothing handled) is paused for that owner until one of them
+is answered. Ignoring quick clears does not pause "still waiting" banners, and
+the other way round. Beyond that, only quick clear's multiplier adapts.
 
 ## Known limits
 
@@ -171,10 +281,20 @@ Nothing else adapts yet.
   has the same exposure.
 - **Point queries.** Candidate reads run a few indexed queries per candidate
   under the store lock, on each pass (not each tick).
+- **A quick-clear pass is a heavier read.** When a quick clear could win, the
+  pass also runs smart clear's scan (which measures the busiest Reading
+  senders) and reads the FYE board, under the store lock, once per pass. A
+  pass runs on an arrival or a meeting end, not on every tick.
 - Every duration tunable is clamped to a year, so an absurd value cannot make
   the time arithmetic panic.
 
 ## Not built yet
+
+- **Scoring `effort` in the eval.** `squelch-eval` marks it unscored: gold
+  from before agent-triage-v18 has none, and the real check is the
+  calibration against the owner's dwell.
+- **A quick clear between arrivals.** Like a re-notify, a quick clear only
+  goes out on a trigger.
 
 - **The model layer.** A fast model that ranks or declines within what `plan`
   allows, fed the habit summary. The rules stay authoritative.

@@ -14,7 +14,7 @@ import { defineConfig, type Plugin } from "vite";
 //     through the daemon's proxy; the browser never contacts a sender's host.
 //   - frame-src 'self': the reading frame is srcdoc, and this also stops the
 //     frame navigating itself.
-function csp(mode: string): string {
+export function csp(mode: string): string {
   const connect = ["https://*.passband.email"];
   if (mode === "e2e" || mode === "development") connect.push("http://127.0.0.1:*", "http://localhost:*");
   return [

@@ -18,6 +18,8 @@ on:
     paths:
       - "passband-web/app/**"
       - ".github/workflows/ci-web.yml"
+      # test/csp.test.ts holds the shipped CSP header to the build's.
+      - "deploy/aws/tofu/main/app.tf"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -43,6 +45,7 @@ jobs:
             web:
               - "passband-web/app/**"
               - ".github/workflows/ci-web.yml"
+              - "deploy/aws/tofu/main/app.tf"
       - id: out
         env:
           EVENT: ${{ github.event_name }}

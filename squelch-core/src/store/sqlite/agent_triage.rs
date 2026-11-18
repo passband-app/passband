@@ -6164,6 +6164,123 @@ mod tests {
         assert_eq!(explained(24), None, "a code revealed from its notification");
     }
 
+    /// THE PUSH HOLD. A sign-in alert waits while triage has not ruled and
+    /// the owner just used a code from its service; once triage calls it a
+    /// plain sign-in alert beside that code it is explained; anything else
+    /// pushes. A Copy click (`copy_code`) counts as using the code, a reveal
+    /// from a notification tap does not, and Google's receipt never silences
+    /// a push.
+    #[test]
+    fn sign_in_hold_waits_explains_or_pushes() {
+        use crate::store::SignInHold::*;
+        use crate::triage::decision::AuthKind::*;
+        let store = fixture();
+        let base = Utc::now() - chrono::Duration::minutes(10);
+        let time = |offset: i64| (base + chrono::Duration::seconds(offset)).to_rfc3339();
+        let place = |id: i64, from: &str, at: i64| {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE messages SET from_addr=?2, received_at=?3, auth_pass=1 WHERE id=?1",
+                    params![id, from, time(at)],
+                )
+                .unwrap();
+        };
+        // Arrived, not yet triaged.
+        let arrive = |id: i64, from: &str, at: i64| {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,auth_pass)
+                 VALUES(?1,1,?2,?3,?4,'New sign-in',?5,'snippet','body',1)",
+                params![id, id.to_string(), format!("t{id}"), from, time(at)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO triage(account_id,message_id,created_at) VALUES(1,?1,?2)",
+                params![id, time(at)],
+            )
+            .unwrap();
+        };
+        let used = |id: i64, action: &str, detail: Option<&str>, at: i64| {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO audit_log(account_id,ts,actor,action,target,detail)
+                     VALUES(1,?1,'human',?2,?3,?4)",
+                    params![time(at), action, id.to_string(), detail],
+                )
+                .unwrap();
+        };
+        let hold = |id: i64| store.sign_in_hold(1, id).unwrap();
+
+        // A code copied from the Mac's panel.
+        seed_auth(&store, 30, auth(&[Otp], false), true);
+        place(30, "codes@example.com", 0);
+        used(30, "copy_code", None, 5);
+
+        arrive(31, "alerts@accounts.example.com", 30);
+        assert_eq!(hold(31), Wait, "same service, triage pending");
+        arrive(32, "alerts@other.test", 30);
+        assert_eq!(hold(32), Push, "no code used from this service");
+
+        seed_auth(&store, 33, auth(&[LoginAlert], false), false);
+        place(33, "alerts@accounts.example.com", 40);
+        assert_eq!(
+            hold(33),
+            Explained(30),
+            "triage ruled: a sign-in beside the copied code"
+        );
+        seed_auth(&store, 34, auth(&[AccountChange], true), false);
+        place(34, "alerts@accounts.example.com", 40);
+        assert_eq!(hold(34), Push, "a critical change is never explained");
+        seed_auth(&store, 35, auth(&[], false), false);
+        place(35, "news@example.com", 40);
+        assert_eq!(hold(35), Push, "triage ruled it is not auth");
+
+        // A reveal from a notification tap is not a use.
+        seed_auth(&store, 36, auth(&[Otp], false), true);
+        place(36, "codes@tapped.test", 0);
+        used(36, "reveal_sealed", Some("notification"), 5);
+        arrive(37, "alerts@tapped.test", 30);
+        assert_eq!(hold(37), Push);
+        seed_auth(&store, 38, auth(&[LoginAlert], false), false);
+        place(38, "alerts@tapped.test", 30);
+        assert_eq!(hold(38), Push);
+
+        // An interactive reveal is.
+        seed_auth(&store, 39, auth(&[Otp], false), true);
+        place(39, "codes@revealed.test", 0);
+        used(39, "reveal_sealed", None, 5);
+        arrive(40, "alerts@revealed.test", 30);
+        assert_eq!(hold(40), Wait);
+
+        // Google's receipt explains the Auth page's card, never the push.
+        seed_auth(&store, 41, auth(&[SigninReceipt], false), false);
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET from_addr='noreply-accounts@google.com',
+                    subject='You shared some Google Account data with Luma',
+                    received_at=?1, auth_pass=1 WHERE id=41",
+                [time(0)],
+            )
+            .unwrap();
+        seed_auth(&store, 42, auth(&[LoginAlert], false), false);
+        place(42, "hello@luma.com", 30);
+        assert_eq!(hold(42), Push);
+        let sealed = store.sealed_messages(1).unwrap();
+        let explained = |id: i64| sealed.iter().find(|row| row.id == id).unwrap().explained_by;
+        assert_eq!(explained(42), Some(41), "the card still reads the receipt");
+        assert_eq!(
+            explained(33),
+            Some(30),
+            "a copied code explains the card too"
+        );
+    }
+
     /// ARCHIVING ONE AUTH MESSAGE NEVER CLEARS AN UNRULED CRITICAL SIBLING.
     /// The Auth page archives the sign-in alert it used ("Used it, archive"),
     /// and Done is thread-wide; the recovery-phone change Gmail threaded with

@@ -11,6 +11,7 @@ import {
 } from "react";
 import { CARRIERS, createScope, markerPoint, type ScopeLayout } from "./scope";
 import { SF_SYMBOLS } from "./sf-symbols";
+import { identify, track } from "./analytics";
 
 // The "before" panel is a procedurally repeated fake inbox: the drudgery
 // Passband exists to kill. Snippets are written long so rows run the full
@@ -444,7 +445,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   background: color-mix(in srgb, rgba(52, 96, 150, 0.95) calc(var(--m, 0) * 100%), rgba(24, 34, 50, 0.97));
   box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.4), 0 18pt 44pt -10pt rgba(0, 0, 0, 0.75),
     0 0 40pt -12pt rgba(78, 155, 234, 0.55);
-  opacity: 0; visibility: hidden; transform-origin: 50% 50%; will-change: transform, opacity; }
+  opacity: 0; visibility: hidden; transform-origin: 0 0; }
 /* In flight the shell becomes the row it is about to form (its box, its
    corners, its padding, tinting toward the blue the row flashes as it
    lands). The avatar and sender stay, which is what a row is; the rest of
@@ -453,7 +454,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-in-body > :not(.pb-in-top), .pb-in-top small { opacity: var(--fade, 1); }
 .pb-in-body > .pb-in-read { opacity: calc(var(--r, 0) * var(--fade, 1)); }
 .pb-in-body > .pb-in-to { opacity: calc(var(--r, 0) * var(--fade, 1)); }
-.pb-in-top { display: flex; align-items: center; gap: 8pt; }
+.pb-in-top { display: flex; align-items: center; gap: 8pt; transform-origin: 0 0; }
+/* Layers only while moving: a phone has little memory for idle ones. */
+.pb-in[data-flying], .pb-in[data-flying] .pb-in-top { will-change: transform; }
 .pb-in-top .pb-logo { width: 22pt; height: 22pt; }
 .pb-in-top b { flex: 1; min-width: 0; color: var(--ink); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pb-in-top small { font-size: 10pt; color: var(--faintest); }
@@ -510,7 +513,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-mailpair .pb-step:last-child { min-height: 0; }
 .pb-inmail { margin-top: 1.4rem; }
 .pb-inrun { display: flex; flex-direction: column; gap: 14px; }
-.pb-inslot { position: relative; }
+/* Sized by the driver to the card fully read, and a layout boundary, so a
+   card opening up inside it never reflows the page around it. */
+.pb-inslot { position: relative; contain: layout style; }
 /* THE TALLY. Six dots in a row, empty rings until their email lands; the
    one that needed you rises above the rest in the accent. Then the sum in
    two words each. */
@@ -1281,7 +1286,7 @@ function JoinButton({
 }
 
 // The waitlist rig, in the slot the button held, under the first headline.
-function Waitlist({ focus = true }: { focus?: boolean }) {
+function Waitlist({ focus = true, where = "hero" }: { focus?: boolean; where?: "hero" | "join" }) {
   const { chrome, handlers } = useMeter();
   const nameRef = useRef<HTMLInputElement>(null);
   // The button that opened this is gone from under the cursor, so the first
@@ -1301,6 +1306,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
     event.preventDefault();
     if (state === "busy") return;
     setState("busy");
+    track("site_waitlist_submitted", { location: where });
     try {
       const res = await fetch(WAITLIST_URL, {
         method: "POST",
@@ -1313,8 +1319,15 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
         credentials: "omit",
       });
       setState(res.ok ? "done" : "error");
+      if (res.ok) {
+        identify(email, name);
+        track("site_waitlist_joined", { location: where });
+      } else {
+        track("site_waitlist_failed", { location: where, status: res.status });
+      }
     } catch {
       setState("error");
+      track("site_waitlist_failed", { location: where, status: 0 });
     }
   };
 
@@ -1366,6 +1379,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
             value={name}
             disabled={state === "busy"}
             onChange={(event) => setName(event.target.value)}
+            onFocus={() => track("site_waitlist_field_focused", { field: "name", location: where })}
           />
           <span className="pb-field-cap" aria-hidden="true">your name</span>
         </label>
@@ -1378,6 +1392,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
               name="email"
               required
               autoComplete="email"
+              onFocus={() => track("site_waitlist_field_focused", { field: "email", location: where })}
               placeholder="you@example.com"
               aria-label="email address"
               value={email}
@@ -1733,9 +1748,15 @@ function AppMock() {
 // the reading line (mid-screen, or lower on a phone where the window holds
 // the top) is the one the window shows. Before the first and after the last
 // the window is just the sitrep.
-function useTourFocus() {
+function useTourFocus(tour: "sitrep" | "calendar", titles: string[]) {
   const stepsRef = useRef<HTMLOListElement>(null);
   const [focus, setFocus] = useState(-1);
+  const reached = useRef(new Set<number>());
+  useEffect(() => {
+    if (focus < 0 || reached.current.has(focus)) return;
+    reached.current.add(focus);
+    track("site_tour_step", { tour, step: focus + 1, title: titles[focus] });
+  }, [focus]);
 
   useEffect(() => {
     const list = stepsRef.current;
@@ -1958,124 +1979,293 @@ function InCard({ m, full }: { m: Inbound; full?: boolean }) {
 }
 
 // Drives the cards off where each one is on screen. Every card sits in the
-// page and scrolls with it; only a card in flight is moved, by a transform
-// from its own place to its zone in the window. d is how far past the
-// reading line the card's middle is, in screen heights.
+// page and scrolls with it; only a card in flight is moved. d is how far past
+// the reading line the card's middle is, in screen heights.
+//
+// IN STEP WITH THE SCROLL, where the browser can be. Safari scrolls on its own
+// thread (at 120Hz on a ProMotion phone) and hands script the position late
+// and at most 60 times a second, so anything script moves on scroll steps
+// along in chunks against the page. So where scroll timelines exist (Safari
+// 26, Chrome), each card's whole path, rise, flight and morph, is worked out
+// once as keyframes against its slot's ViewTimeline, and the browser plays it
+// against the scroll itself. Script keeps only what is not motion: the read
+// opening, the row opening, colours, counts. Elsewhere script drives it all,
+// the same pose() either way.
+//
+// Within script's share, each frame reads every position first and then
+// writes, and a flight touches nothing but transforms, radius, opacity and
+// colour: the card is scaled (non-uniformly) from its own box to the row's,
+// and its sender line is counter-scaled inside it so the name lands at the
+// row's type size without a reflow. Each card's slot is sized once to the
+// card fully read, so the read opening never moves anything around it.
+type Flier = {
+  id: string; card: HTMLElement; slot: HTMLElement; top: HTMLElement;
+  target: HTMLElement; inner: HTMLElement | null;
+  counts: HTMLElement[]; tally: HTMLElement | null;
+  full: boolean; thread: boolean;
+  w0: number; h0: number; r0: number; pl: number; pt: number; topH: number; type0: number;
+  last: Record<string, string>; landed: boolean;
+};
+
+const flightOf = (f: Flier, d: number) =>
+  f.full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
+
+// One card at one moment. home is the slot's top left on screen; t the row's
+// box on screen, endH and rowR its height and radius once open.
+function pose(f: Flier, d: number, home: { left: number; top: number },
+  t: { left: number; top: number; width: number }, endH: number, rowR: number, typeEnd: number) {
+  const a = clamp01((d + (f.full ? 0.48 : 0.42)) / 0.18);
+  const fl = flightOf(f, d);
+  const e = ease(fl);
+  const lerp = (x: number, y: number) => x + (y - x) * e;
+  if (fl <= 0) {
+    return {
+      transform: `translate(0px, ${((1 - ease(a)) * 24).toFixed(2)}px) scale(1, 1)`,
+      opacity: a.toFixed(3),
+      borderRadius: `${f.r0}px / ${f.r0}px`,
+      top: "translate(0px, 0px) scale(1, 1)",
+    };
+  }
+  const sx = lerp(f.w0, t.width) / f.w0;
+  const sy = lerp(f.h0, endH) / f.h0;
+  const x = lerp(home.left, t.left) - home.left;
+  const y = lerp(home.top, t.top) - home.top - Math.sin(Math.PI * e) * 40;
+  const R = lerp(f.r0, rowR);
+  const u = lerp(1, typeEnd / f.type0);
+  const tx = lerp(f.pl, 10) / sx - f.pl;
+  const ty = lerp(f.pt, Math.max(0, (endH - f.topH * u) / 2)) / sy - f.pt;
+  return {
+    transform: `translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`,
+    opacity: fl >= 1 ? "0" : (1 - clamp01((fl - 0.86) / 0.14)).toFixed(3),
+    borderRadius: `${(R / sx).toFixed(2)}px / ${(R / sy).toFixed(2)}px`,
+    top: `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${(u / sx).toFixed(4)}, ${(u / sy).toFixed(4)})`,
+  };
+}
+
+// The nearest sticky ancestor: the window holds still in it while the cards fly.
+function stickyOf(el: HTMLElement) {
+  for (let n = el.parentElement; n; n = n.parentElement) {
+    if (getComputedStyle(n).position === "sticky") return n;
+  }
+  return null;
+}
+
+type ViewTimelineCtor = new (o: { subject: Element; axis: "block" }) => AnimationTimeline;
+
 function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
   useEffect(() => {
     const pair = pairRef.current;
     const shot = pair?.querySelector<HTMLElement>(".pb-shot");
     if (!pair || !shot) return;
     const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const cards = Array.from(pair.querySelectorAll<HTMLElement>(".pb-steps .pb-in"));
-    let raf = 0;
+    const VT = (window as unknown as { ViewTimeline?: ViewTimelineCtor }).ViewTimeline;
 
+    const fliers: Flier[] = [];
+    for (const card of Array.from(pair.querySelectorAll<HTMLElement>(".pb-steps .pb-in"))) {
+      const id = card.dataset.in!;
+      const target = shot.querySelector<HTMLElement>(`[data-land="${id}"], [data-ping="${id}"]`);
+      if (!target) continue;
+      fliers.push({
+        id, card, slot: card.parentElement as HTMLElement, top: card.querySelector<HTMLElement>(".pb-in-top")!,
+        target, inner: target.classList.contains("pb-land") ? (target.firstElementChild as HTMLElement) : null,
+        counts: Array.from(shot.querySelectorAll<HTMLElement>(`[data-count="${id}"]`)),
+        tally: pair.querySelector<HTMLElement>(`[data-tally="${id}"]`),
+        full: card.hasAttribute("data-full"), thread: card.hasAttribute("data-thread"),
+        w0: 0, h0: 0, r0: 0, pl: 0, pt: 0, topH: 0, type0: 1, last: {}, landed: false,
+      });
+    }
+
+    // Each card's resting metrics and its slot's height, measured with the
+    // card fully read. Batched: every write, then every read, then every
+    // write, so it costs one layout however many cards there are.
+    const measure = () => {
+      for (const f of fliers) {
+        f.slot.style.height = "";
+        f.card.style.setProperty("--r", "1");
+        f.last = {};
+      }
+      for (const f of fliers) {
+        const cs = getComputedStyle(f.card);
+        f.w0 = f.card.offsetWidth;
+        f.h0 = f.card.offsetHeight;
+        f.r0 = parseFloat(cs.borderTopLeftRadius) || 16;
+        f.pl = parseFloat(cs.paddingLeft) || 0;
+        f.pt = parseFloat(cs.paddingTop) || 0;
+        f.topH = f.top.offsetHeight;
+        f.type0 = parseFloat(getComputedStyle(f.slot).getPropertyValue("--pt")) || 1.15;
+      }
+      for (const f of fliers) f.slot.style.height = `${f.h0}px`;
+    };
+
+    // THE SCROLL TIMELINES. Every flight lands while the window is stuck, so
+    // a row's place on screen is the sticky box's resting top plus the row's
+    // offset inside it, measured with the rows that land before it open.
+    // Sampled finely through the flight, coarsely elsewhere, and handed to
+    // the browser against the slot's view timeline (cover: 0 when the slot's
+    // top meets the screen's bottom, 1 when its bottom leaves the top).
+    let anims: Animation[] = [];
+    const build = () => {
+      for (const an of anims) an.cancel();
+      anims = [];
+      const sticky = stickyOf(shot);
+      if (!VT || reduce || !sticky) return false;
+      const vh = innerHeight;
+      const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
+      const typeEnd = shot.offsetWidth / 1040;
+      const stickyTop = parseFloat(getComputedStyle(sticky).top) || 0;
+      const saved = fliers.map((f) => f.target.style.height);
+      const y0 = scrollY;
+      fliers.forEach((f, k) => {
+        const before = fliers[k - 1];
+        if (before?.inner) before.target.style.height = "auto";
+        const tr = f.target.getBoundingClientRect();
+        const sr = sticky.getBoundingClientRect();
+        const hr = f.slot.getBoundingClientRect();
+        const endH = f.inner ? f.inner.offsetHeight : tr.height;
+        const rowR = f.inner?.firstElementChild
+          ? parseFloat(getComputedStyle(f.inner.firstElementChild as HTMLElement).borderTopLeftRadius) || 0 : 0;
+        const t = { left: tr.left, top: stickyTop + (tr.top - sr.top), width: tr.width };
+        const pageTop = hr.top + y0;
+        const h = hr.height;
+        const start = pageTop - vh;
+        const span = vh + h;
+        // d runs from the rise's start to the flight's end inside this band.
+        const busy = (s: number) => {
+          const d = (line - (pageTop - s + h / 2)) / vh;
+          return d > -0.62 && d < 0.5;
+        };
+        const cardFrames: Keyframe[] = [];
+        const topFrames: Keyframe[] = [];
+        for (let s = start; ; ) {
+          const offset = Math.min(1, (s - start) / span);
+          const homeTop = pageTop - s;
+          const d = (line - (homeTop + h / 2)) / vh;
+          const p = pose(f, d, { left: hr.left, top: homeTop }, t, endH, rowR, typeEnd);
+          cardFrames.push({ offset, transform: p.transform, opacity: p.opacity, borderRadius: p.borderRadius });
+          topFrames.push({ offset, transform: p.top });
+          if (offset >= 1) break;
+          s += busy(s) ? 3 : 40;
+        }
+        const thin = (fr: Keyframe[], keys: string[]) => fr.filter((x, i) =>
+          i === 0 || i === fr.length - 1 ||
+          keys.some((k) => x[k] !== fr[i - 1][k]) || keys.some((k) => x[k] !== fr[i + 1][k]));
+        const timeline = new VT({ subject: f.slot, axis: "block" });
+        anims.push(
+          f.card.animate(thin(cardFrames, ["transform", "opacity", "borderRadius"]), { timeline, fill: "both" }),
+          f.top.animate(thin(topFrames, ["transform"]), { timeline, fill: "both" }),
+        );
+      });
+      fliers.forEach((f, k) => {
+        f.target.style.height = saved[k];
+      });
+      return true;
+    };
+    let timelines = false;
+
+    const set = (f: Flier, el: HTMLElement, key: string, prop: string, value: string) => {
+      if (f.last[key] === value) return;
+      f.last[key] = value;
+      if (prop.startsWith("--")) el.style.setProperty(prop, value);
+      else (el.style as unknown as Record<string, string>)[prop] = value;
+    };
+
+    let raf = 0;
     const frame = () => {
       raf = 0;
       const vh = innerHeight;
       const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
-      cards.forEach((card) => {
-        const id = card.dataset.in!;
-        // Measured without the flight's transform, so the page position is
-        // the card's own.
-        const home = (card.parentElement as HTMLElement).getBoundingClientRect();
-        const d = (line - (home.top + home.height / 2)) / vh;
-        // Jamie's takes its time over the read, low on the screen, before it
-        // goes; the run's cards only flash where they are going.
-        const full = card.hasAttribute("data-full");
-        const a = clamp01((d + (full ? 0.48 : 0.42)) / 0.18);
-        // A thread reads over longer, one message at a time.
-        const r = card.hasAttribute("data-thread") ? clamp01((d + 0.36) / 0.38)
-          : full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
-        const f = full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
-        card.style.setProperty("--r", String(r));
+      const typeEnd = shot.offsetWidth / 1040;
 
-        const target = shot.querySelector<HTMLElement>(`[data-land="${id}"], [data-ping="${id}"]`);
-        if (!target) return;
-        const arrived = f >= 1;
-        if (arrived !== target.hasAttribute("data-arrived")) target.toggleAttribute("data-arrived", arrived);
-        shot.querySelectorAll<HTMLElement>(`[data-count="${id}"]`).forEach((el) => {
-          const n = Number(el.dataset.from) + (arrived ? 1 : 0);
-          const text = `${n}${el.dataset.suffix ?? ""}`;
+      // READ everything.
+      const reads = fliers.map((f) => {
+        const home = f.slot.getBoundingClientRect();
+        const d = (line - (home.top + home.height / 2)) / vh;
+        const fl = flightOf(f, d);
+        const flying = !reduce && fl > 0 && fl < 1;
+        const live = flying && !timelines;
+        return {
+          home, d, fl, flying,
+          t: live ? f.target.getBoundingClientRect() : null,
+          rowH: f.inner ? f.inner.offsetHeight : 0,
+          rowR: live && f.inner?.firstElementChild
+            ? parseFloat(getComputedStyle(f.inner.firstElementChild as HTMLElement).borderTopLeftRadius) || 0 : 0,
+        };
+      });
+
+      // WRITE everything.
+      fliers.forEach((f, k) => {
+        const { home, d, fl, flying, t, rowH, rowR } = reads[k];
+        const r = f.thread ? clamp01((d + 0.36) / 0.38)
+          : f.full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
+        set(f, f.card, "r", "--r", r.toFixed(3));
+
+        const arrived = fl >= 1;
+        if (arrived !== f.target.hasAttribute("data-arrived")) f.target.toggleAttribute("data-arrived", arrived);
+        if (f.tally && arrived !== f.tally.hasAttribute("data-arrived")) f.tally.toggleAttribute("data-arrived", arrived);
+        if (arrived && !f.landed) {
+          f.landed = true;
+          track("site_mail_landed", { id: f.id });
+        }
+        for (const el of f.counts) {
+          const text = `${Number(el.dataset.from) + (arrived ? 1 : 0)}${el.dataset.suffix ?? ""}`;
           if (el.textContent !== text) el.textContent = text;
-          el.style.color = arrived ? "var(--accent-ink)" : "";
-        });
-        pair.querySelector(`[data-tally="${id}"]`)?.toggleAttribute("data-arrived", arrived);
+          const color = arrived ? "var(--accent-ink)" : "";
+          if (el.style.color !== color) el.style.color = color;
+        }
 
         // The row opens through the second half of the flight, so the card
         // and the row it becomes finish together.
-        const land = target.classList.contains("pb-land");
-        const inner = land ? (target.firstElementChild as HTMLElement) : null;
-        const rowH = inner ? inner.offsetHeight : 0;
-        const open = reduce ? (arrived ? 1 : 0) : clamp01((f - 0.45) / 0.55);
-        if (land) {
-          target.style.height = open >= 1 ? "auto" : `${open * rowH}px`;
-          target.style.opacity = String(open);
+        if (f.inner) {
+          const open = reduce ? (arrived ? 1 : 0) : clamp01((fl - 0.45) / 0.55);
+          set(f, f.target, "lh", "height", open >= 1 ? "auto" : `${(open * rowH).toFixed(1)}px`);
+          set(f, f.target, "lo", "opacity", open.toFixed(3));
         }
 
-        const slot = card.parentElement as HTMLElement;
-        const flying = !reduce && f > 0;
-        card.toggleAttribute("data-flying", flying);
-        if (!flying) {
-          slot.style.height = "";
-          card.style.width = card.style.height = card.style.borderRadius = card.style.padding = "";
-          card.style.removeProperty("--pt");
-          card.style.setProperty("--fade", "1");
-          card.style.setProperty("--m", "0");
-          card.dataset.w = String(card.offsetWidth);
-          card.dataset.h = String(card.offsetHeight);
-          const cs = getComputedStyle(card);
-          card.dataset.rad = cs.borderTopLeftRadius;
-          card.dataset.pv = cs.paddingTop;
-          card.dataset.pt = String(parseFloat(getComputedStyle(slot).getPropertyValue("--pt")) || 1.15);
-          card.dataset.ph = cs.paddingLeft;
-          card.style.transform = reduce ? "" : `translateY(${(1 - ease(a)) * 24}px)`;
-          card.style.opacity = String(reduce ? (arrived ? 0 : 1) : a);
+        f.card.toggleAttribute("data-flying", flying);
+        set(f, f.card, "fd", "--fade", flying ? (1 - clamp01((fl - 0.05) / 0.4)).toFixed(3) : "1");
+        set(f, f.card, "m", "--m", flying ? clamp01((fl - 0.4) / 0.6).toFixed(3) : "0");
+        if (timelines) return;
+
+        // No scroll timelines: script moves the card too.
+        if (reduce) {
+          set(f, f.card, "op", "opacity", arrived ? "0" : "1");
           return;
         }
-        // Hold the card's place in the page while it changes shape.
-        if (!slot.style.height) slot.style.height = `${slot.offsetHeight}px`;
-        const w0 = Number(card.dataset.w), h0 = Number(card.dataset.h), r0 = parseFloat(card.dataset.rad ?? "16");
-        const t = target.getBoundingClientRect();
-        const row = (inner?.firstElementChild as HTMLElement | null) ?? target;
-        const r1 = parseFloat(getComputedStyle(row).borderTopLeftRadius) || 0;
-        const end = { l: t.left, t: t.top, w: t.width, h: land ? rowH : t.height };
-        const e = ease(f);
-        const lerp = (x: number, y: number) => x + (y - x) * e;
-        const x = lerp(home.left, end.l);
-        const y = lerp(home.top, end.t) - Math.sin(Math.PI * e) * 40;
-        card.style.width = `${lerp(w0, end.w)}px`;
-        card.style.height = `${lerp(h0, end.h)}px`;
-        card.style.borderRadius = `${lerp(r0, r1)}px`;
-        // The type shrinks to the window's scale (its points are 1/1040 of
-        // its width), so the sender line lands at the row's size.
-        card.style.setProperty("--pt", `${lerp(Number(card.dataset.pt), shot.offsetWidth / 1040)}px`);
-        // Padding closes in so the sender line sits centred in the row.
-        const top = card.querySelector<HTMLElement>(".pb-in-top")!.offsetHeight;
-        const pv1 = Math.max(0, (end.h - top) / 2);
-        card.style.padding = `${lerp(parseFloat(card.dataset.pv!), pv1)}px ${lerp(parseFloat(card.dataset.ph!), 10)}px`;
-        card.style.transform = `translate(${x - home.left}px, ${y - home.top}px)`;
-        card.style.setProperty("--fade", String(1 - clamp01((f - 0.05) / 0.4)));
-        card.style.setProperty("--m", String(clamp01((f - 0.4) / 0.6)));
-        card.style.opacity = String(1 - clamp01((f - 0.86) / 0.14));
+        // Not in flight: pose()'s resting branch (fl is 0 or 1 here; a landed
+        // card is simply hidden), so no row box is needed.
+        const p = t
+          ? pose(f, d, home, t, f.inner ? rowH : t.height, rowR, typeEnd)
+          : pose(f, arrived ? -1 : d, home, { left: 0, top: 0, width: f.w0 }, 0, 0, typeEnd);
+        set(f, f.card, "tf", "transform", p.transform);
+        set(f, f.card, "op", "opacity", arrived ? "0" : p.opacity);
+        set(f, f.card, "br", "borderRadius", p.borderRadius);
+        set(f, f.top, "tt", "transform", p.top);
       });
     };
     const queue = () => {
       if (!raf) raf = requestAnimationFrame(frame);
     };
+    const remeasure = () => {
+      measure();
+      timelines = build();
+      queue();
+    };
+    remeasure();
     frame();
+    document.fonts?.ready.then(remeasure);
     addEventListener("scroll", queue, { passive: true });
-    addEventListener("resize", queue);
+    addEventListener("resize", remeasure);
     return () => {
       cancelAnimationFrame(raf);
+      for (const an of anims) an.cancel();
       removeEventListener("scroll", queue);
-      removeEventListener("resize", queue);
+      removeEventListener("resize", remeasure);
     };
   }, [pairRef]);
 }
 
 function Showcase() {
-  const { stepsRef, focus } = useTourFocus();
+  const { stepsRef, focus } = useTourFocus("sitrep", STEPS.map((x) => x.title));
   const pairRef = useRef<HTMLDivElement>(null);
   useArrivals(pairRef);
 
@@ -2514,7 +2704,7 @@ function ThreadCard({ m }: { m: Inbound }) {
 }
 
 function CalShowcase() {
-  const { stepsRef, focus } = useTourFocus();
+  const { stepsRef, focus } = useTourFocus("calendar", CAL_TOUR.map((x) => x.title));
   const pairRef = useRef<HTMLDivElement>(null);
   useArrivals(pairRef);
   // Past the last step the window keeps the last step's picture, so nothing
@@ -2779,6 +2969,7 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [scrolled, setScrolled] = useState(false);
   const [locked, setLocked] = useState(false);
+  const squelchSent = useRef(false);
   const readoutRef = useRef<HTMLElement>(null);
   const [layout, setLayout] = useState<ScopeLayout>(() => scopeLayout());
 
@@ -2818,6 +3009,10 @@ export function App() {
       const p = Math.min(1, t <= 1 ? t * SHUT : SHUT + (t - 1) * 0.3);
       scene?.setProgress(p);
       setLocked(p > 0.46);
+      if (p > 0.46 && !squelchSent.current) {
+        squelchSent.current = true;
+        track("site_squelch_closed");
+      }
       setScrolled(scrolled > innerHeight * 0.03);
     };
     const onResize = () => {
@@ -2854,6 +3049,7 @@ export function App() {
   }, []);
   const open = (next: boolean) => {
     if (next === joining) return;
+    if (next) track("site_waitlist_opened");
     history.pushState(null, "", next ? WAITLIST_PATH : "/");
     setJoining(next);
   };
@@ -2862,16 +3058,58 @@ export function App() {
     // tab, a new window, a saved link. Let the browser have those.
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
     event.preventDefault();
+    if (next) track("site_cta_clicked", { location: "hero" });
     open(next);
   };
 
   // The closing button goes back up to the hero and opens the rig there, so
   // there is only ever one form on the page.
   const backToTop = () => {
+    track("site_cta_clicked", { location: "close" });
     const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
     scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
     open(true);
   };
+
+  // WHAT GETS SEEN: each tagged section once, the first time a third of it
+  // (or a third of the screen, for one taller than that) is on screen; and
+  // how far down the page anyone gets.
+  useEffect(() => {
+    const seen = new Set<string>();
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const name = (e.target as HTMLElement).dataset.track!;
+        const enough = e.intersectionRatio >= 0.33 || e.intersectionRect.height >= innerHeight * 0.33;
+        if (e.isIntersecting && enough && !seen.has(name)) {
+          seen.add(name);
+          track("site_section_viewed", { section: name });
+        }
+      }
+    }, { threshold: [0, 0.1, 0.2, 0.33, 0.5] });
+    document.querySelectorAll<HTMLElement>("[data-track]").forEach((el) => io.observe(el));
+
+    const marks = [25, 50, 75, 90, 100];
+    const hit = new Set<number>();
+    let raf = 0;
+    const depth = () => {
+      raf = 0;
+      const max = document.documentElement.scrollHeight - innerHeight;
+      const pct = max <= 0 ? 100 : ((scrollY + 1) / max) * 100;
+      for (const m of marks) {
+        if (pct >= m && !hit.has(m)) {
+          hit.add(m);
+          track("site_scroll_depth", { percent: m });
+        }
+      }
+    };
+    const queue = () => { if (!raf) raf = requestAnimationFrame(depth); };
+    addEventListener("scroll", queue, { passive: true });
+    return () => {
+      io.disconnect();
+      cancelAnimationFrame(raf);
+      removeEventListener("scroll", queue);
+    };
+  }, []);
 
   return (
     <main className="pb">
@@ -2879,7 +3117,7 @@ export function App() {
       <style href="pb-cal" precedence="default">{CAL_CSS_RESOLVED}</style>
       <style href="pb-light" precedence="default">{LIGHT_CSS}</style>
 
-      <section ref={storyRef} className="pb-story">
+      <section ref={storyRef} className="pb-story" data-track="hero">
         <div
           ref={stageRef}
           className="pb-stage"
@@ -2954,7 +3192,7 @@ export function App() {
         </div>
       </section>
 
-      <section className="pb-section pb-clouded">
+      <section className="pb-section pb-clouded" data-track="sitrep_tour">
         <Clouds kind="mail" />
         <h2 className="pb-h2">
           Same inbox. <em>Squelched.</em>
@@ -2966,7 +3204,7 @@ export function App() {
         <Showcase />
       </section>
 
-      <section className="pb-section pb-clouded">
+      <section className="pb-section pb-clouded" data-track="calendar_tour">
         <Clouds kind="events" />
         <h2 className="pb-h2">
           Plans arrive by email. <em>So does your calendar.</em>
@@ -2978,14 +3216,14 @@ export function App() {
         <CalShowcase />
       </section>
 
-      <section className="pb-section pb-join">
+      <section className="pb-section pb-join" data-track="join">
         <h2 className="pb-h2">That’s an inbox built in the <em>modern era.</em></h2>
         <p className="pb-intro">Join the waitlist and we will email you when a spot opens.</p>
-        <Waitlist focus={false} />
+        <Waitlist focus={false} where="join" />
         <p className="pb-fine">For Mac and iPhone.</p>
       </section>
 
-      <section className="pb-section pb-layer">
+      <section className="pb-section pb-layer" data-track="intelligence_layer">
         <h2 className="pb-h2">An intelligence layer, <em>not a wrapper.</em></h2>
         <div className="pb-layer-body">
           <p>
@@ -3005,7 +3243,7 @@ export function App() {
         </div>
       </section>
 
-      <section className="pb-section" style={{ paddingTop: 0 }}>
+      <section className="pb-section" style={{ paddingTop: 0 }} data-track="trust_facts">
         <dl className="pb-facts">
           <div className="pb-fact">
             <dt><b>01</b> License</dt>
@@ -3040,7 +3278,7 @@ export function App() {
         </dl>
       </section>
 
-      <section className="pb-section pb-close">
+      <section className="pb-section pb-close" data-track="close">
         <h2 className="pb-h2">Find a little breathing room.</h2>
         <button className="pb-cta" type="button" onClick={backToTop}>
           <span className="pb-cta-label">join the waitlist</span>
@@ -3048,7 +3286,7 @@ export function App() {
         </button>
       </section>
 
-      <footer className="pb-foot">
+      <footer className="pb-foot" data-track="footer">
         <div className="pb-foot-grid">
           <a className="pb-foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width={42} height={23} /></a>
           <nav aria-label="Legal">

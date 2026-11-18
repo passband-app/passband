@@ -631,6 +631,18 @@ final class AccountManager {
         reload()
     }
 
+    /// Name an account nobody named after its mailbox address. Only ever
+    /// fills an EMPTY label, so a name somebody chose in Settings is never
+    /// overwritten, and a no-op after the first time.
+    func nameAfterMailbox(_ id: UUID, email: String) {
+        let email = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !email.isEmpty,
+            let record = accounts.first(where: { $0.id == id }),
+            record.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        rename(id, to: email)
+    }
+
     /// Record the host one account's credentials point at, so the UI can name
     /// it without a keychain read (see `AccountRecord.displayHost`).
     ///

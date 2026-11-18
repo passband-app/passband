@@ -341,6 +341,41 @@ async fn handling_an_event_asks_the_pusher_to_clear_it() {
     );
 }
 
+/// Copy on the Mac's code panel is the one caller: on an auth event it is
+/// the owner using the code, audited as `copy_code` on the MESSAGE (what the
+/// Auth page's pairing and the push hold read). A plain event leaves none.
+#[tokio::test]
+async fn handling_an_auth_event_records_the_code_as_used() {
+    let h = harness(|_, _| {});
+    let mut auth = event_for(&h.store, h.acct, 8);
+    auth.is_auth = true;
+    let message = auth.message_id;
+    let auth_id = h.store.append_event(&auth).unwrap().unwrap();
+    let plain = h.emit(9);
+    for id in [auth_id, plain] {
+        let resp = h
+            .app
+            .clone()
+            .oneshot(authed("POST", &format!("/client/events/{id}/handled")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+    let copies: Vec<_> = h
+        .store
+        .list_audit(h.acct, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.action == "copy_code")
+        .collect();
+    assert_eq!(copies.len(), 1, "only the auth event");
+    assert_eq!(
+        copies[0].target.as_deref(),
+        Some(message.to_string().as_str())
+    );
+    assert_eq!(copies[0].detail, None);
+}
+
 #[tokio::test]
 async fn handling_an_unknown_or_foreign_event_is_404_and_clears_nothing() {
     let mut h = harness(|_, _| {});

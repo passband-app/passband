@@ -263,18 +263,22 @@ crate::types::str_enum! {
         /// notify-worthy mail produced no event ever, with no counter and no log
         /// line to say so (docs/NOTIFY.md §2a).
         Expired => "expired",
+        /// An auth push left unsent because the owner explained it: a
+        /// sign-in alert beside a code they used (`SignInHold::Explained`).
+        Explained => "explained",
     }
 }
 
 impl NotifyDecision {
     /// Exposition order; the index into a lane's decision row.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Sent,
         Self::WouldSend,
         Self::DeclinedByModel,
         Self::Unavailable,
         Self::Suppressed,
         Self::Expired,
+        Self::Explained,
     ];
 }
 
@@ -2280,7 +2284,7 @@ mod tests {
         assert!(text.contains(
             "squelchd_notify_decisions_total{lane=\"deliberate\",decision=\"suppressed\"} 0\n"
         ));
-        // Twelve series, in ONE contiguous family block: the `# TYPE` line
+        // Fourteen series, in ONE contiguous family block: the `# TYPE` line
         // appears once and nothing else is interleaved between the samples.
         let body = text
             .split("# TYPE squelchd_notify_decisions_total counter\n")
@@ -2290,7 +2294,7 @@ mod tests {
             .lines()
             .take_while(|l| l.starts_with("squelchd_notify_decisions_total{"))
             .collect();
-        assert_eq!(block.len(), 12, "2 lanes x 6 decisions, always: {block:?}");
+        assert_eq!(block.len(), 14, "2 lanes x 7 decisions, always: {block:?}");
         assert_eq!(
             text.matches("# TYPE squelchd_notify_decisions_total")
                 .count(),

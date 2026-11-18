@@ -1314,7 +1314,7 @@ CREATE TABLE IF NOT EXISTS notify_decisions (
     -- 'fast' | 'deliberate' (crate::metrics::NotifyLane).
     lane              TEXT NOT NULL,
     -- sent | would_send | declined_by_model | unavailable | suppressed | expired
-    -- (crate::metrics::NotifyDecision). ONE closed set for both lanes, so the
+    -- | explained (crate::metrics::NotifyDecision). ONE closed set for both lanes, so the
     -- cross-lane questions are joins over one vocabulary rather than two that
     -- have to be reconciled.
     decision          TEXT NOT NULL,

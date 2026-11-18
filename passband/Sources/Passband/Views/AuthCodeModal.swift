@@ -2,7 +2,8 @@
 // auto-revealed (audited) and its code shown big, so the human copies it without
 // reading the mail. The code lives in store state only, never persisted, and is
 // dropped from the queue on dismiss. Auto-dismisses after 30s so a secret never
-// sits on screen; the timer is per code, and copying pauses it.
+// sits on screen; the timer is per code. Copying is the answer: the code pops
+// green, the button says so, and the modal takes itself down a beat later.
 
 import SwiftUI
 
@@ -10,6 +11,9 @@ struct AuthCodeModal: View {
     @Environment(AppStore.self) private var store
 
     private static let autoDismissSeconds = 30
+    /// Long enough to see the code turn green, short enough that the modal is
+    /// gone before the human is back at the field they are pasting into.
+    private static let copiedHold: Duration = .milliseconds(850)
 
     @State private var copied = false
     @State private var secondsLeft = autoDismissSeconds
@@ -27,8 +31,10 @@ struct AuthCodeModal: View {
                     if let code, !code.isEmpty {
                         Text(code)
                             .font(Typo.mono(46, weight: .semibold))
-                            .foregroundStyle(Palette.ink)
+                            .foregroundStyle(copied ? Palette.positive : Palette.ink)
                             .tracking(6)
+                            .scaleEffect(copied ? 1.06 : 1)
+                            .animation(.spring(response: 0.28, dampingFraction: 0.5), value: copied)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, Space.s10)
                             .accessibilityLabel("login code")
@@ -50,7 +56,7 @@ struct AuthCodeModal: View {
                             Text("\(secondsLeft)s")
                                 .font(Typo.num(10))
                                 .foregroundStyle(Palette.inkFaintest)
-                                .help("auto-dismisses; copying keeps it open")
+                                .help("auto-dismisses; copying closes it")
                         }
                         Spacer()
                     }
@@ -128,7 +134,10 @@ struct AuthCodeModal: View {
                 Button(action: copy) {
                     HStack(spacing: Space.s6) {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .contentTransition(.symbolEffect(.replace))
+                            .symbolEffect(.bounce, value: copied)
                         Text(copied ? "copied" : "copy")
+                            .contentTransition(.opacity)
                         // A keycap beside a button on a device with no keyboard
                         // is a control that does not exist. The button is the
                         // whole affordance there.
@@ -138,7 +147,9 @@ struct AuthCodeModal: View {
                     }
                 }
                 .buttonStyle(.glassProminent)
-                .tint(Palette.lock)
+                .tint(copied ? Palette.positive : Palette.lock)
+                .animation(.easeOut(duration: 0.15), value: copied)
+                .sensoryFeedback(.success, trigger: copied) { _, now in now }
             } else {
                 Button {
                     store.dismissAuthCode()
@@ -153,10 +164,16 @@ struct AuthCodeModal: View {
     }
 
     private func copy() {
-        guard let code, !code.isEmpty else { return }
-        // Copying is the human acting on the code — stop the auto-dismiss clock.
-        if Clip.copy(code, flashing: $copied) {
-            paused = true
+        guard !copied, let entry, let code, !code.isEmpty, Clip.copy(code) else { return }
+        // Copying is the human acting on the code: stop the clock, show it
+        // landed, then go. Only this entry: a newer code that took the modal
+        // in the meantime is not the one that was copied.
+        paused = true
+        copied = true
+        let id = entry.id
+        Task {
+            try? await Task.sleep(for: Self.copiedHold)
+            if store.authQueue.first?.id == id { store.dismissAuthCode() }
         }
     }
 

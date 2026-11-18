@@ -533,8 +533,11 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-tally figcaption b { font: 500 2.6rem/1 var(--serif); color: var(--ink); }
 .pb-tally figcaption .you, .pb-tally figcaption .you b { color: var(--accent-ink); }
 @media (prefers-reduced-motion: reduce) { .pb-tally-dots span { transition: none; } }
-.pb-steps .pb-in { position: relative; left: auto; top: auto; visibility: visible; }
-.pb-steps .pb-in[data-flying] { z-index: 5; }
+/* Always above the window: the browser starts a flight on its own scroll
+   thread, before script could raise the card, so a card raised only while
+   flying would leave from underneath the window. At rest no card overlaps
+   it, and a landed card is hidden. */
+.pb-steps .pb-in { position: relative; left: auto; top: auto; visibility: visible; z-index: 5; }
 @media (max-width: 900px) {
   .pb-mailpair .pb-step { min-height: 56svh; }
 }
@@ -2005,6 +2008,9 @@ type Flier = {
   full: boolean; thread: boolean;
   w0: number; h0: number; r0: number; pl: number; pt: number; topH: number; type0: number;
   last: Record<string, string>; landed: boolean;
+  // The flight as the timeline was built: the row's box, so script can keep
+  // the corners in step without measuring anything mid-scroll.
+  plan: { t: { left: number; top: number; width: number }; endH: number; rowR: number; typeEnd: number } | null;
 };
 
 const flightOf = (f: Flier, d: number) =>
@@ -2071,7 +2077,7 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
         counts: Array.from(shot.querySelectorAll<HTMLElement>(`[data-count="${id}"]`)),
         tally: pair.querySelector<HTMLElement>(`[data-tally="${id}"]`),
         full: card.hasAttribute("data-full"), thread: card.hasAttribute("data-thread"),
-        w0: 0, h0: 0, r0: 0, pl: 0, pt: 0, topH: 0, type0: 1, last: {}, landed: false,
+        w0: 0, h0: 0, r0: 0, pl: 0, pt: 0, topH: 0, type0: 1, last: {}, landed: false, plan: null,
       });
     }
 
@@ -2109,7 +2115,7 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
       anims = [];
       const sticky = stickyOf(shot);
       if (!VT || reduce || !sticky) return false;
-      const vh = innerHeight;
+      const vh = vhB;
       const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
       const typeEnd = shot.offsetWidth / 1040;
       const stickyTop = parseFloat(getComputedStyle(sticky).top) || 0;
@@ -2125,6 +2131,7 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
         const rowR = f.inner?.firstElementChild
           ? parseFloat(getComputedStyle(f.inner.firstElementChild as HTMLElement).borderTopLeftRadius) || 0 : 0;
         const t = { left: tr.left, top: stickyTop + (tr.top - sr.top), width: tr.width };
+        f.plan = { t, endH, rowR, typeEnd };
         const pageTop = hr.top + y0;
         const h = hr.height;
         const start = pageTop - vh;
@@ -2141,7 +2148,9 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
           const homeTop = pageTop - s;
           const d = (line - (homeTop + h / 2)) / vh;
           const p = pose(f, d, { left: hr.left, top: homeTop }, t, endH, rowR, typeEnd);
-          cardFrames.push({ offset, transform: p.transform, opacity: p.opacity, borderRadius: p.borderRadius });
+          // Transform and opacity only: anything else keeps Safari from
+          // running the animation off the main thread.
+          cardFrames.push({ offset, transform: p.transform, opacity: p.opacity });
           topFrames.push({ offset, transform: p.top });
           if (offset >= 1) break;
           s += busy(s) ? 3 : 40;
@@ -2149,10 +2158,15 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
         const thin = (fr: Keyframe[], keys: string[]) => fr.filter((x, i) =>
           i === 0 || i === fr.length - 1 ||
           keys.some((k) => x[k] !== fr[i - 1][k]) || keys.some((k) => x[k] !== fr[i + 1][k]));
+        // Anchored to the slot's top meeting the screen's top, in pixels of
+        // scroll, never to the screen's bottom: on a phone the screen's
+        // height changes as the toolbar slides away, and a range tied to it
+        // would shift every flight off its row.
         const timeline = new VT({ subject: f.slot, axis: "block" });
+        const range = { rangeStart: `exit ${(start - pageTop).toFixed(1)}px`, rangeEnd: `exit ${h.toFixed(1)}px` };
         anims.push(
-          f.card.animate(thin(cardFrames, ["transform", "opacity", "borderRadius"]), { timeline, fill: "both" }),
-          f.top.animate(thin(topFrames, ["transform"]), { timeline, fill: "both" }),
+          f.card.animate(thin(cardFrames, ["transform", "opacity"]), { timeline, fill: "both", ...range }),
+          f.top.animate(thin(topFrames, ["transform"]), { timeline, fill: "both", ...range }),
         );
       });
       fliers.forEach((f, k) => {
@@ -2161,6 +2175,11 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
       return true;
     };
     let timelines = false;
+    // The screen height everything is timed against, taken when the flights
+    // are built. A phone's toolbar changes innerHeight mid-scroll; that is
+    // not a reason to retime or rebuild anything.
+    let vhB = innerHeight;
+    let builtW = 0;
 
     const set = (f: Flier, el: HTMLElement, key: string, prop: string, value: string) => {
       if (f.last[key] === value) return;
@@ -2172,7 +2191,7 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
     let raf = 0;
     const frame = () => {
       raf = 0;
-      const vh = innerHeight;
+      const vh = vhB;
       const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
       const typeEnd = shot.offsetWidth / 1040;
 
@@ -2221,10 +2240,19 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
           set(f, f.target, "lo", "opacity", open.toFixed(3));
         }
 
-        f.card.toggleAttribute("data-flying", flying);
         set(f, f.card, "fd", "--fade", flying ? (1 - clamp01((fl - 0.05) / 0.4)).toFixed(3) : "1");
         set(f, f.card, "m", "--m", flying ? clamp01((fl - 0.4) / 0.6).toFixed(3) : "0");
-        if (timelines) return;
+        if (timelines) {
+          // The browser moves the card; script only keeps its corners in
+          // step (a frame late costs nothing there).
+          if (f.plan) {
+            const pl = f.plan;
+            set(f, f.card, "br", "borderRadius",
+              pose(f, flying ? d : -1, home, pl.t, pl.endH, pl.rowR, pl.typeEnd).borderRadius);
+          }
+          return;
+        }
+        f.card.toggleAttribute("data-flying", flying);
 
         // No scroll timelines: script moves the card too.
         if (reduce) {
@@ -2246,20 +2274,26 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
       if (!raf) raf = requestAnimationFrame(frame);
     };
     const remeasure = () => {
+      vhB = innerHeight;
+      builtW = innerWidth;
       measure();
       timelines = build();
       queue();
     };
+    // Only a change of width reflows the cards. A height change is a phone's
+    // toolbar coming or going, which happens as the scroll starts: rebuilding
+    // then is exactly when it would hurt.
+    const onResize = () => (innerWidth !== builtW ? remeasure() : queue());
     remeasure();
     frame();
     document.fonts?.ready.then(remeasure);
     addEventListener("scroll", queue, { passive: true });
-    addEventListener("resize", remeasure);
+    addEventListener("resize", onResize);
     return () => {
       cancelAnimationFrame(raf);
       for (const an of anims) an.cancel();
       removeEventListener("scroll", queue);
-      removeEventListener("resize", remeasure);
+      removeEventListener("resize", onResize);
     };
   }, [pairRef]);
 }

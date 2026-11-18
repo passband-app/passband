@@ -141,3 +141,49 @@ test("a forged sign-in link is refused and nothing is sent", async ({ page }) =>
   expect(requests.filter((u) => u.startsWith(DAEMON))).toEqual([]);
   expect(page.url()).toBe("http://localhost:5191/connect");
 });
+
+test("flow mode: Space walks For your eyes, E and S decide, the board celebrates", async ({ page }) => {
+  const violations = await watchViolations(page);
+  await signIn(page);
+  const eyes = page.getByRole("region", { name: "For your eyes" });
+  const total = await eyes.locator("li.eye").count();
+  const sealed = await eyes.locator("li.eye .pill.lock").count();
+  const walkable = total - sealed;
+  expect(walkable).toBeGreaterThan(2);
+
+  await page.keyboard.press(" ");
+  const bar = page.getByLabel("Flow mode");
+  await expect(bar).toContainText(`1 of ${walkable}`);
+  const firstPath = new URL(page.url()).pathname;
+
+  // E: done, and straight on to the next one.
+  await page.keyboard.press("e");
+  await expect(bar).toContainText(`2 of ${walkable}`);
+  expect(new URL(page.url()).pathname).not.toBe(firstPath);
+
+  // u: the done comes back, and the walk steps back onto it.
+  await expect(page.getByText(/^done · /)).toBeVisible();
+  await page.keyboard.press("u");
+  await expect(bar).toContainText(`1 of ${walkable}`);
+  expect(new URL(page.url()).pathname).toBe(firstPath);
+
+  // Arrows move without deciding.
+  await page.keyboard.press("ArrowRight");
+  await expect(bar).toContainText(`2 of ${walkable}`);
+  await page.keyboard.press("ArrowLeft");
+  await expect(bar).toContainText(`1 of ${walkable}`);
+
+  // S on every email: nothing is changed, and the last one ends the walk.
+  for (let i = 0; i < walkable; i++) await page.keyboard.press("s");
+  const done = page.getByRole("complementary", { name: "Flow complete" });
+  await expect(done).toContainText(`${walkable} saved for later`);
+  expect(new URL(page.url()).pathname).toBe("/");
+  await expect(eyes.locator("li.eye")).toHaveCount(total);
+
+  // Back from a walk leaves flow mode rather than stepping through it.
+  await page.keyboard.press(" ");
+  await expect(bar).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(eyes).toBeVisible();
+  expect(violations).toEqual([]);
+});

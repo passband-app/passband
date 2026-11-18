@@ -42,14 +42,28 @@ function asUpdate(inbox: Inbox, m: ClientMessage, threadId: string): AttentionUp
   );
 }
 
+/** Flow mode, when this thread is a step of a walk (src/app/walk.ts). */
+export interface ReaderWalk {
+  /** 1-based. */
+  position: number;
+  total: number;
+  done: number;
+  skipped: number;
+  step: (kind: "done" | "skip") => void;
+  move: (by: 1 | -1) => void;
+  end: () => void;
+}
+
 export function Reader({
   threadId,
   inbox,
   onSignedOut,
+  walk,
 }: {
   threadId: string;
   inbox: Inbox;
   onSignedOut: () => void;
+  walk?: ReaderWalk;
 }) {
   const [thread, setThread] = useState<ThreadView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,33 +105,82 @@ export function Reader({
     }
   };
 
-  useKeys({
-    Escape: () => (replying ? setReplying(false) : back()),
-    e: () => void act("done"),
-    d: () => void act("done"),
-    r: () => setReplying(true),
-  });
+  // In a walk, done moves on rather than going back to the board, and the
+  // arrows step through the queue without deciding (the Mac's E, S, ←/→).
+  useKeys(
+    walk
+      ? {
+          Escape: () => (replying ? setReplying(false) : walk.end()),
+          e: () => walk.step("done"),
+          d: () => walk.step("done"),
+          s: () => walk.step("skip"),
+          ArrowRight: () => walk.move(1),
+          l: () => walk.move(1),
+          ArrowLeft: () => walk.move(-1),
+          h: () => walk.move(-1),
+          r: () => setReplying(true),
+        }
+      : {
+          Escape: () => (replying ? setReplying(false) : back()),
+          e: () => void act("done"),
+          d: () => void act("done"),
+          r: () => setReplying(true),
+        },
+  );
 
   return (
-    <div className="reader">
+    <div className={`reader${walk ? " walking" : ""}`}>
+      {walk && (
+        <div className="flow-bar" aria-label="Flow mode">
+          <span className="flow-label">Flow</span>
+          <span className="flow-track" aria-hidden="true">
+            <span
+              className="flow-fill"
+              style={{ width: `${((walk.position - 1) / Math.max(walk.total, 1)) * 100}%` }}
+            />
+          </span>
+          <span className="flow-pos">
+            {walk.position} of {walk.total}
+          </span>
+        </div>
+      )}
       <div className="reader-bar">
-        <button className="btn quiet" onClick={back}>
-          <BackIcon size={16} /> Back <kbd>esc</kbd>
+        <button className="btn quiet" onClick={walk ? walk.end : back}>
+          <BackIcon size={16} /> {walk ? "End flow" : "Back"} <kbd>esc</kbd>
         </button>
         <span className="grow" />
-        {thread && (
-          <>
-            <button className="btn" onClick={() => void act("done")}>
-              <CheckIcon size={15} /> Done <kbd>e</kbd>
-            </button>
-            <button className="btn" onClick={() => void act("archive")}>
-              <ArchiveIcon size={15} /> Archive
-            </button>
-            <button className="btn primary" onClick={() => setReplying(true)}>
-              <ReplyIcon size={15} /> Reply <kbd>r</kbd>
-            </button>
-          </>
-        )}
+        {thread &&
+          (walk ? (
+            <>
+              <button className="btn quiet" onClick={() => walk.move(-1)} aria-label="Previous">
+                <kbd>←</kbd>
+              </button>
+              <button className="btn quiet" onClick={() => walk.move(1)} aria-label="Next">
+                <kbd>→</kbd>
+              </button>
+              <button className="btn" onClick={() => setReplying(true)}>
+                <ReplyIcon size={15} /> Reply <kbd>r</kbd>
+              </button>
+              <button className="btn" onClick={() => walk.step("skip")}>
+                Later <kbd>s</kbd>
+              </button>
+              <button className="btn primary" onClick={() => walk.step("done")}>
+                <CheckIcon size={15} /> Done, next <kbd>e</kbd>
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn" onClick={() => void act("done")}>
+                <CheckIcon size={15} /> Done <kbd>e</kbd>
+              </button>
+              <button className="btn" onClick={() => void act("archive")}>
+                <ArchiveIcon size={15} /> Archive
+              </button>
+              <button className="btn primary" onClick={() => setReplying(true)}>
+                <ReplyIcon size={15} /> Reply <kbd>r</kbd>
+              </button>
+            </>
+          ))}
       </div>
       {error && <p className="notice glass">{error}</p>}
       {!thread && !error && (
@@ -127,7 +190,9 @@ export function Reader({
       )}
       {thread && (
         <>
-          <h1 className="subject">{thread.subject || "(no subject)"}</h1>
+          <h1 className="subject" key={`s-${thread.thread_id}`}>
+            {thread.subject || "(no subject)"}
+          </h1>
           {replying && target && (
             <ReplyBox
               to={target}

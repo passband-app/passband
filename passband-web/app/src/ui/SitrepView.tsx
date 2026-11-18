@@ -19,6 +19,7 @@ import {
   ReadingIcon,
   LockIcon,
   ReceiptIcon,
+  WindIcon,
 } from "./icons";
 
 export interface SitrepHandlers {
@@ -34,6 +35,7 @@ export function SitrepView({
   selected,
   onSelect,
   handlers,
+  onFlow,
   banner,
 }: {
   sitrep: Sitrep;
@@ -41,6 +43,8 @@ export function SitrepView({
   selected: number;
   onSelect: (i: number) => void;
   handlers: SitrepHandlers;
+  /** Start flow mode (Space). Absent where there is no walk (the harness). */
+  onFlow?: () => void;
   banner?: ReactNode;
 }) {
   return (
@@ -56,7 +60,18 @@ export function SitrepView({
       {banner}
       <div className="board">
         <div className="col">
-          <Zone icon={<EyeIcon />} title="For your eyes" count={sitrep.eyes.length}>
+          <Zone
+            icon={<EyeIcon />}
+            title="For your eyes"
+            count={sitrep.eyes.length}
+            action={
+              onFlow && sitrep.eyes.some((e) => !e.sealed) ? (
+                <button className="btn flow-btn" onClick={onFlow} title="Walk these one at a time">
+                  <WindIcon size={15} /> flow mode <kbd>space</kbd>
+                </button>
+              ) : undefined
+            }
+          >
             {sitrep.eyes.length === 0 ? (
               <p className="zone-empty">Nothing needs you right now.</p>
             ) : (
@@ -208,6 +223,7 @@ function Zone({
   count,
   sub,
   tint,
+  action,
   children,
 }: {
   icon: ReactNode;
@@ -215,6 +231,7 @@ function Zone({
   count: number;
   sub?: string;
   tint?: "accent" | "warn" | "positive";
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -224,6 +241,12 @@ function Zone({
         <h2>{title}</h2>
         {count > 0 && <span className="count">{count}</span>}
         {sub && <span className="sub">{sub}</span>}
+        {action && (
+          <>
+            <span className="grow" />
+            {action}
+          </>
+        )}
       </header>
       {children}
     </section>

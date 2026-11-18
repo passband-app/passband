@@ -3,7 +3,10 @@ import { downloadLabel, platformOf } from "../app/nudge";
 import { navigate, type Route } from "../app/router";
 import { client, DESKTOP_DOWNLOAD_URL } from "../app/services";
 import { recordDownloadClick } from "./DesktopApp";
+import { cycleTheme, label as themeLabel, useThemeChoice } from "../app/theme";
 import { DownloadIcon, GaugeIcon, MailIcon, SignOutIcon } from "./icons";
+import { AutoThemeIcon, MoonIcon, SunIcon } from "./themeIcons";
+import { useKeys } from "./keys";
 
 const platform = platformOf(navigator.userAgent, navigator.maxTouchPoints);
 
@@ -22,6 +25,9 @@ export function Shell({
   children: ReactNode;
 }) {
   const at = (name: Route["name"]) => route.name === name;
+  const theme = useThemeChoice();
+  // `\` cycles the theme from anywhere, as on the Mac (never while typing).
+  useKeys({ "\\": cycleTheme });
   return (
     <div className="shell">
       <nav className="rail" aria-label="Passband">
@@ -55,6 +61,20 @@ export function Shell({
         >
           <DownloadIcon size={20} />
         </a>
+        <button
+          className="rail-btn"
+          title={`${themeLabel(theme)} (\\)`}
+          aria-label={themeLabel(theme)}
+          onClick={cycleTheme}
+        >
+          {theme === "dark" ? (
+            <MoonIcon size={20} />
+          ) : theme === "light" ? (
+            <SunIcon size={20} />
+          ) : (
+            <AutoThemeIcon size={20} />
+          )}
+        </button>
         <span className="divider" />
         <button
           className="rail-btn"

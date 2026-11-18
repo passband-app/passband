@@ -127,3 +127,10 @@ export const LockIcon = (p: P) => (
     <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" />
   </Icon>
 );
+export const WindIcon = (p: P) => (
+  <Icon {...p}>
+    <path d="M3 8.5h11a2.5 2.5 0 1 0-2.5-2.5" />
+    <path d="M3 12.5h15a2.5 2.5 0 1 1-2.5 2.5" />
+    <path d="M3 16.5h7" />
+  </Icon>
+);

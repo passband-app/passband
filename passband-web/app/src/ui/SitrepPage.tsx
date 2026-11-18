@@ -2,13 +2,29 @@ import { useEffect, useState } from "react";
 import { navigate } from "../app/router";
 import { useSitrep, type SitrepStore } from "../app/sitrep";
 import { toasts } from "../app/toasts";
+import { summaryLine, type WalkSummary } from "../app/walk";
+import type { EyesItem } from "../sitrep/model";
 import { DesktopBanner, nudgeLedger } from "./DesktopApp";
 import { useKeys } from "./keys";
 import { SitrepView } from "./SitrepView";
 
 const POLL_MS = 30_000;
 
-export function SitrepPage({ store, onSignedOut }: { store: SitrepStore; onSignedOut: () => void }) {
+export function SitrepPage({
+  store,
+  onSignedOut,
+  onFlow,
+  finished,
+  onDismissFinished,
+}: {
+  store: SitrepStore;
+  onSignedOut: () => void;
+  /** Space: walk For your eyes from the highlighted row (or the first). */
+  onFlow: (eyes: EyesItem[], highlighted?: EyesItem) => void;
+  /** The walk that just ended, for the board to celebrate. */
+  finished: WalkSummary | null;
+  onDismissFinished: () => void;
+}) {
   const s = useSitrep(store);
   const [sel, setSel] = useState(-1);
   const eyes = s.sitrep.eyes;
@@ -56,6 +72,7 @@ export function SitrepPage({ store, onSignedOut }: { store: SitrepStore; onSigne
     Enter: () => current && (current.sealed ? handlers.openSealed() : open(current.threadId)),
     e: () => current && handlers.done(current),
     d: () => current && handlers.done(current),
+    " ": () => onFlow(eyes, current),
   });
 
   if (s.loading) {
@@ -75,7 +92,19 @@ export function SitrepPage({ store, onSignedOut }: { store: SitrepStore; onSigne
         selected={sel}
         onSelect={setSel}
         handlers={handlers}
-        banner={<DesktopBanner ready={!s.loading} />}
+        onFlow={() => onFlow(eyes, current)}
+        banner={
+          finished ? (
+            <aside className="flow-done glass tint-positive" aria-label="Flow complete">
+              <strong>Flow complete.</strong> {summaryLine(finished)}
+              <button className="btn quiet" onClick={onDismissFinished}>
+                Close
+              </button>
+            </aside>
+          ) : (
+            <DesktopBanner ready={!s.loading} />
+          )
+        }
       />
     </>
   );

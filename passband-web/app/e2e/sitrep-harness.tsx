@@ -1,5 +1,6 @@
 // Design harness: the real Shell and SitrepView over synthetic data, so the
 // layout can be looked at (and screenshotted) without a daemon. e2e builds only.
+import "../src/app/theme-boot";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { SitrepView } from "../src/ui/SitrepView";

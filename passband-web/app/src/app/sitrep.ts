@@ -90,24 +90,32 @@ export class SitrepStore {
     this.set({ sitrep, loading: false, stale: false, signedOut: false });
   }
 
-  done(item: EyesItem): Promise<boolean> {
+  /** `afterUndo` runs once the undo has landed (flow mode rewinds its walk). */
+  done(item: EyesItem, afterUndo?: () => void): Promise<boolean> {
     return this.verb(
       item,
       () => this.client.setStatus(item.id, "done"),
       `done · ${item.sender}`,
       () => this.client.setStatus(item.id, "open").then(() => undefined),
       "done failed",
+      afterUndo,
     );
   }
 
-  archive(item: EyesItem): Promise<boolean> {
+  archive(item: EyesItem, afterUndo?: () => void): Promise<boolean> {
     return this.verb(
       item,
       () => this.client.archive(item.id),
       `archived · ${item.sender}`,
       () => this.client.label(item.id, [INBOX_LABEL]),
       "archive failed",
+      afterUndo,
     );
+  }
+
+  /** The current row for an id, for surfaces (the reader) that only know the id. */
+  find(id: number): EyesItem | undefined {
+    return this.state.sitrep.eyes.find((e) => e.id === id);
   }
 
   private async verb(
@@ -116,6 +124,7 @@ export class SitrepStore {
     label: string,
     revert: () => Promise<void>,
     failure: string,
+    afterUndo?: () => void,
   ): Promise<boolean> {
     const before = this.state.sitrep.eyes;
     this.hidden.add(item.id);
@@ -132,6 +141,7 @@ export class SitrepStore {
     this.toastStore.push(label, "info", async () => {
       await revert();
       this.hidden.delete(item.id);
+      afterUndo?.();
       await this.refresh();
     });
     void this.refresh().then(() => this.hidden.delete(item.id));

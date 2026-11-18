@@ -76,9 +76,10 @@ The experience starts with relief, then opens onto the person's own mail:
   later connect decides again, and the Connect gate is never left blocked.
 - **"Emails sorted"** is the daemon's total less what is still waiting on
   triage, which is most of a walk's mail.
-- **What comes after.** The first look ending is what stamps a newcomer for
-  What's New (`WhatsNew.meetNewcomer`), so the latest release's notes follow
-  on the board, never over the veil.
+- **What comes after.** Nothing release-shaped. The first look ending stamps
+  a newcomer as having read every release they installed
+  (`WhatsNew.meetNewcomer`), so What's New first appears on their first
+  update, never on a fresh install.
 - **Analytics.** `first_load_shown`, and `first_load_ended` with one bool,
   `early` (dismissed before the catch-up finished).
 

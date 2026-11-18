@@ -426,6 +426,12 @@ final class SitrepPoller {
             if store.statsEpoch != e { store.statsEpoch = e }
             // A live answer, which a board painted from disk never is.
             if store.liveStatsEpoch != e { store.liveStatsEpoch = e }
+            // Nobody is asked to name an account when they connect it: one
+            // with no name takes its mailbox's address the first time a live
+            // answer for it says what that is.
+            if let email = st.account_email, let id = AccountManager.shared.activeId {
+                AccountManager.shared.nameAfterMailbox(id, email: email)
+            }
             noteCatchUp(st.catch_up)
             // THE BADGE IS REFRESHED EVEN WHEN NOTHING CHANGED, and this is the
             // second write point rather than an accident. `AppStore.sitrep`'s

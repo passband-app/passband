@@ -109,8 +109,9 @@ Blackbox has NO public route, ever.
   upload the static files `server.ts` serves today.
 - `passband-site/server.ts` routing becomes a **CloudFront Function**: the
   static path map, `/download` and `/download/latest` → 302 to the latest
-  version's zip (version read from `appcast.xml` AT BUILD TIME and baked into
-  the function), `/download/Passband-X.Y.Z.zip` → 302 to the GitHub release
+  version's dmg (zip for versions before `server.ts`'s `DMG_SINCE`; version
+  read from `appcast.xml` AT BUILD TIME and baked into the function),
+  `/download/Passband-X.Y.Z.{zip,dmg}` → 302 to the GitHub release
   asset on `passband-app/passband-releases`, everything else → `index.html`.
   The `.woff2` keeps `Cache-Control: public, max-age=604800`; `appcast.xml`
   must be served `application/xml` and short-cached (Sparkle polls it).

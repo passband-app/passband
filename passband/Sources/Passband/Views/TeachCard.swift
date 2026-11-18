@@ -102,7 +102,7 @@ struct TeachCard: View {
             HStack(alignment: .top, spacing: Space.s8) {
                 TextField(
                     "", text: $text,
-                    prompt: Text(offered ?? Teach.example),
+                    prompt: Text(offered ?? (request.sender == nil ? Teach.generalExample : Teach.example)),
                     axis: .vertical
                 )
                 .textFieldStyle(.plain)

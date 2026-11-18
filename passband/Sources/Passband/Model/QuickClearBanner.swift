@@ -184,9 +184,16 @@ struct QuickClearSignal: Codable, Equatable, Sendable {
     /// The frame as the banner's userInfo carries it: JSON, with each line
     /// capped, so a tap after a relaunch still has the queue it promised.
     /// The words are the same ones the banner and the board already show.
+    ///
+    /// THE SWEEP'S ROWS ARE LEFT OUT, and the cap counts only what is left.
+    /// They come first in the frame and can number in the hundreds (a
+    /// promo-heavy month), so capping the frame as sent would fill the
+    /// payload with rows the one press clears anyway and cut the cards the
+    /// banner promised. `smart_clear_count` carries the press instead.
     var payload: String {
         var copy = self
-        copy.items = items.prefix(Self.payloadItems).map {
+        copy.smart_clear_count = smartClears
+        copy.items = items.filter { !$0.isSmartClear }.prefix(Self.payloadItems).map {
             var item = $0
             item.sender = EventBanner.flatten(item.sender, max: 120)
             item.one_line = EventBanner.flatten(item.one_line, max: 200)

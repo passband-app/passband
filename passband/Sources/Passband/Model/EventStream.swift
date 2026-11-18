@@ -420,6 +420,11 @@ final class EventStream {
         // phone never does. An agent's draft is only ever opened on the Mac.
         #if os(macOS)
             query.append(URLQueryItem(name: "opens", value: "1"))
+            // AND THAT IT CAN SHOW A QUICK CLEAR (`QuickClearSignal`). The
+            // daemon sends one only while a stream that said so is open; an
+            // older app, which would drop the frame, keeps getting its
+            // "still waiting" banner instead.
+            query.append(URLQueryItem(name: "quick_clear", value: "1"))
         #endif
         if !query.isEmpty { comps.queryItems = query }
         guard let url = comps.url else { return nil }

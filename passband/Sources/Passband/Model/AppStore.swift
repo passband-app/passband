@@ -7925,6 +7925,10 @@ final class AppStore {
     /// screen (the tap switched to it first). A sprint already open is
     /// finished first: one queue at a time.
     func openQuickClear(_ signal: QuickClearSignal) {
+        // A tap with an email open must show the card: the sprint is drawn
+        // only when no reader is over it (`quickClearUp`), so a reader left
+        // up would make the tap look like it did nothing.
+        if threadId != nil { closeThread() }
         quickClear?.finish()
         quickClear = QuickClearSprint(signal: signal, epoch: epoch)
     }

@@ -128,6 +128,29 @@ struct QuickClearTests {
         expect(back?.items.map(\.message_id) == [4, 5], "the payload carries the queue in order")
         expect(back?.items[0].account == nil, "the payload drops the daemon's account label")
         expect(back?.fit == 14 && back?.open == 23 && back?.smartClears == 6, "and the counts")
+
+        // A promo-heavy month: 70 sweep rows ahead of 20 cards. The payload
+        // keeps every card and carries the sweep as its count alone.
+        var rows: [String] = []
+        for id in 1...70 {
+            rows.append(
+                #"{"message_id":\#(id),"thread_id":"s\#(id)","est_secs":0,"basis":"smart_clear","kind":"smart_clear","sender":"d@shop.example","one_line":"Sale ended"}"#)
+        }
+        for id in 101...120 {
+            rows.append(
+                #"{"message_id":\#(id),"thread_id":"c\#(id)","est_secs":8,"basis":"heuristic","kind":"glance","sender":"n@acme.example","one_line":"Heads up"}"#)
+        }
+        let heavy = QuickClearSignal.parse(
+            #"{"quick_clear":13,"at":1793210000,"fit_count":90,"open_count":110,"smart_clear_count":70,"items":[\#(rows.joined(separator: ","))]}"#)!
+        let tapped = QuickClearSignal.parse(heavy.payload)
+        expect(tapped?.items.map(\.message_id) == Array(101...120), "the payload keeps all 20 cards, not 60 sweep rows")
+        expect(tapped?.smartClears == 70, "and the sweep rides as its count")
+        expect(tapped?.fit == 90 && tapped?.open == 110, "and the banner's counts are unchanged")
+        let sweepOnly = QuickClearSignal.parse(
+            #"{"quick_clear":14,"items":[\#(rows.prefix(70).joined(separator: ","))]}"#)!
+        expect(
+            QuickClearSignal.parse(sweepOnly.payload)?.smartClears == 70,
+            "a frame without a count still carries the sweep it listed")
     }
 
     static func aStaleFrameIsDropped() {

@@ -1,0 +1,292 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ApiError } from "../api/transport";
+import type { AttentionUpdate, ClientMessage, ThreadView } from "../api/wire";
+import type { Inbox } from "../app/inbox";
+import { navigate } from "../app/router";
+import { client } from "../app/services";
+import { UNDO_MS, toasts } from "../app/toasts";
+import { relAge } from "../lib/time";
+import { MailFrame, type ImageSource } from "../mail/MailFrame";
+import { DesktopButton, nudgeLedger } from "./DesktopApp";
+import { useKeys } from "./keys";
+import { openLink } from "./links";
+
+const images: ImageSource = {
+  attachment: (id, signal) => client.attachmentBlob(id, signal),
+  remote: (url, signal) => client.remoteImageBlob(url, signal),
+};
+
+/** The message the thread's verbs act on: the newest one someone else sent. */
+export function actionTarget(thread: ThreadView): ClientMessage | undefined {
+  const inbound = thread.messages.filter((m) => !m.is_sent);
+  return (inbound.length ? inbound : thread.messages).reduce<ClientMessage | undefined>(
+    (best, m) => (!best || m.id > best.id ? m : best),
+    undefined,
+  );
+}
+
+function asUpdate(inbox: Inbox, m: ClientMessage, threadId: string): AttentionUpdate {
+  return (
+    inbox.find(m.id) ?? {
+      id: m.id,
+      thread_id: threadId,
+      tier: "signal",
+      importance: 0,
+      sender: m.from_addr,
+      from_name: m.from_name,
+      one_line: m.subject ?? "",
+      reason: "",
+      status: "open",
+    }
+  );
+}
+
+export function Reader({
+  threadId,
+  inbox,
+  onSignedOut,
+}: {
+  threadId: string;
+  inbox: Inbox;
+  onSignedOut: () => void;
+}) {
+  const [thread, setThread] = useState<ThreadView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [replying, setReplying] = useState(false);
+
+  useEffect(() => {
+    const ctl = new AbortController();
+    setThread(null);
+    setError(null);
+    client
+      .thread(threadId)
+      .then((t) => {
+        if (ctl.signal.aborted) return;
+        setThread(t);
+        void client.opened(threadId).catch(() => {});
+      })
+      .catch((e: unknown) => {
+        if (ctl.signal.aborted) return;
+        if (e instanceof ApiError && (e.kind === "unauthorized" || e.kind === "signed_out")) {
+          onSignedOut();
+        } else if (e instanceof ApiError && e.kind === "not_found") {
+          setError("This conversation is no longer in your mailbox.");
+        } else {
+          setError("Couldn't load this conversation. Check your connection and try again.");
+        }
+      });
+    return () => ctl.abort();
+  }, [threadId, onSignedOut]);
+
+  const target = useMemo(() => (thread ? actionTarget(thread) : undefined), [thread]);
+  const back = () => navigate({ name: "home" });
+  const act = async (verb: "done" | "archive") => {
+    if (!target || !thread) return;
+    const u = asUpdate(inbox, target, thread.thread_id);
+    const ok = verb === "done" ? await inbox.done(u) : await inbox.archive(u);
+    if (ok) {
+      nudgeLedger.action();
+      back();
+    }
+  };
+
+  useKeys({
+    Escape: () => (replying ? setReplying(false) : back()),
+    e: () => void act("done"),
+    d: () => void act("done"),
+    r: () => setReplying(true),
+  });
+
+  return (
+    <div className="page reader">
+      <header className="masthead">
+        <button className="link" onClick={back}>
+          ← Inbox <kbd>esc</kbd>
+        </button>
+        <span className="spacer" />
+        <DesktopButton />
+      </header>
+      {error && <p className="notice">{error}</p>}
+      {!thread && !error && (
+        <p className="empty" aria-busy="true">
+          Loading…
+        </p>
+      )}
+      {thread && (
+        <>
+          <h1 className="subject">{thread.subject || "(no subject)"}</h1>
+          <div className="verbs">
+            <button onClick={() => void act("done")}>
+              Done <kbd>e</kbd>
+            </button>
+            <button onClick={() => void act("archive")}>Archive</button>
+            <button onClick={() => setReplying(true)}>
+              Reply <kbd>r</kbd>
+            </button>
+          </div>
+          {replying && target && (
+            <ReplyBox
+              to={target}
+              onClose={() => setReplying(false)}
+              onSent={() => {
+                nudgeLedger.action();
+                setReplying(false);
+              }}
+            />
+          )}
+          <ol className="messages">
+            {[...thread.messages].reverse().map((m) => (
+              <MessageCard key={m.id} m={m} />
+            ))}
+          </ol>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MessageCard({ m }: { m: ClientMessage }) {
+  const [allowRemote, setAllowRemote] = useState(false);
+  const [hasRemote, setHasRemote] = useState(false);
+  return (
+    <li className="message">
+      <div className="from">
+        <strong>{m.from_name ?? m.from_addr}</strong>
+        {m.from_name && <span className="addr"> &lt;{m.from_addr}&gt;</span>}
+        <span className="age">{relAge(m.received_at, Date.now())}</span>
+      </div>
+      {hasRemote && !allowRemote && (
+        <button className="link images" onClick={() => setAllowRemote(true)}>
+          Load images
+        </button>
+      )}
+      <MailFrame
+        message={m}
+        images={images}
+        allowRemoteImages={allowRemote}
+        onHasRemoteImages={setHasRemote}
+        onLink={openLink}
+      />
+      {m.attachments.filter((a) => !a.content_id).length > 0 && (
+        <ul className="attachments">
+          {m.attachments
+            .filter((a) => !a.content_id)
+            .map((a) => (
+              <li key={a.id}>
+                <AttachmentLink id={a.id} name={a.filename} size={a.size} />
+              </li>
+            ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+/**
+ * Attachments are DOWNLOADED, never shown on this origin: the bytes become a
+ * blob that the browser saves under the attachment's name, so nothing from a
+ * sender (an HTML or SVG file, say) is ever rendered as part of the app.
+ */
+function AttachmentLink({ id, name, size }: { id: number; name: string; size: number }) {
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const blob = await client.attachmentBlob(id);
+      const url = URL.createObjectURL(new Blob([blob], { type: "application/octet-stream" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      a.rel = "noopener";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch {
+      toasts.push("couldn't download that attachment", "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button className="link" onClick={() => void save()} disabled={busy}>
+      {name} <span className="size">{formatSize(size)}</span>
+    </button>
+  );
+}
+
+function formatSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Plain reply. Sent after a five-second hold, as on the Mac; undo puts the text back. */
+function ReplyBox({
+  to,
+  onClose,
+  onSent,
+}: {
+  to: ClientMessage;
+  onClose: () => void;
+  onSent: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [held, setHeld] = useState(false);
+  const area = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => area.current?.focus(), []);
+
+  const send = () => {
+    const body = text.trim();
+    if (!body || held) return;
+    setHeld(true);
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      client
+        .reply(to.id, body)
+        .then(() => {
+          toasts.push(`sent to ${to.from_name ?? to.from_addr}`);
+          onSent();
+        })
+        .catch(() => {
+          setHeld(false);
+          toasts.push("couldn't send. Your reply is still here.", "error");
+        });
+    }, UNDO_MS);
+    toasts.push("sending…", "info", async () => {
+      cancelled = true;
+      clearTimeout(timer);
+      setHeld(false);
+      area.current?.focus();
+    });
+  };
+
+  return (
+    <div className="reply">
+      <label htmlFor="reply-body">
+        Reply to {to.from_name ?? to.from_addr}
+      </label>
+      <textarea
+        id="reply-body"
+        ref={area}
+        value={text}
+        disabled={held}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            send();
+          }
+        }}
+        rows={6}
+      />
+      <div className="reply-actions">
+        <button className="primary" onClick={send} disabled={held || !text.trim()}>
+          Send <kbd>⌘↵</kbd>
+        </button>
+        <button className="link" onClick={onClose} disabled={held}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}

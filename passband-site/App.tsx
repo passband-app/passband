@@ -1965,14 +1965,22 @@ function InCard({ m, full }: { m: Inbound; full?: boolean }) {
 // page and scrolls with it; only a card in flight is moved. d is how far past
 // the reading line the card's middle is, in screen heights.
 //
-// BUILT FOR A PHONE'S FRAME BUDGET. Each frame reads every position first and
-// then writes, so it never forces a layout between cards. A flight touches
-// nothing but transforms, radius, opacity and colour: the card is scaled
-// (non-uniformly) from its own box to the row's, and its sender line is
-// counter-scaled inside it so the name lands at the row's type size without
-// a single reflow. Each card's slot is sized once to the card fully read, so
-// the read opening up inside it never moves anything around it. Writes are
-// skipped when nothing changed.
+// IN STEP WITH THE SCROLL, where the browser can be. Safari scrolls on its own
+// thread (at 120Hz on a ProMotion phone) and hands script the position late
+// and at most 60 times a second, so anything script moves on scroll steps
+// along in chunks against the page. So where scroll timelines exist (Safari
+// 26, Chrome), each card's whole path, rise, flight and morph, is worked out
+// once as keyframes against its slot's ViewTimeline, and the browser plays it
+// against the scroll itself. Script keeps only what is not motion: the read
+// opening, the row opening, colours, counts. Elsewhere script drives it all,
+// the same pose() either way.
+//
+// Within script's share, each frame reads every position first and then
+// writes, and a flight touches nothing but transforms, radius, opacity and
+// colour: the card is scaled (non-uniformly) from its own box to the row's,
+// and its sender line is counter-scaled inside it so the name lands at the
+// row's type size without a reflow. Each card's slot is sized once to the
+// card fully read, so the read opening never moves anything around it.
 type Flier = {
   id: string; card: HTMLElement; slot: HTMLElement; top: HTMLElement;
   target: HTMLElement; inner: HTMLElement | null;
@@ -1982,12 +1990,58 @@ type Flier = {
   last: Record<string, string>;
 };
 
+const flightOf = (f: Flier, d: number) =>
+  f.full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
+
+// One card at one moment. home is the slot's top left on screen; t the row's
+// box on screen, endH and rowR its height and radius once open.
+function pose(f: Flier, d: number, home: { left: number; top: number },
+  t: { left: number; top: number; width: number }, endH: number, rowR: number, typeEnd: number) {
+  const a = clamp01((d + (f.full ? 0.48 : 0.42)) / 0.18);
+  const fl = flightOf(f, d);
+  const e = ease(fl);
+  const lerp = (x: number, y: number) => x + (y - x) * e;
+  if (fl <= 0) {
+    return {
+      transform: `translate(0px, ${((1 - ease(a)) * 24).toFixed(2)}px) scale(1, 1)`,
+      opacity: a.toFixed(3),
+      borderRadius: `${f.r0}px / ${f.r0}px`,
+      top: "translate(0px, 0px) scale(1, 1)",
+    };
+  }
+  const sx = lerp(f.w0, t.width) / f.w0;
+  const sy = lerp(f.h0, endH) / f.h0;
+  const x = lerp(home.left, t.left) - home.left;
+  const y = lerp(home.top, t.top) - home.top - Math.sin(Math.PI * e) * 40;
+  const R = lerp(f.r0, rowR);
+  const u = lerp(1, typeEnd / f.type0);
+  const tx = lerp(f.pl, 10) / sx - f.pl;
+  const ty = lerp(f.pt, Math.max(0, (endH - f.topH * u) / 2)) / sy - f.pt;
+  return {
+    transform: `translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`,
+    opacity: fl >= 1 ? "0" : (1 - clamp01((fl - 0.86) / 0.14)).toFixed(3),
+    borderRadius: `${(R / sx).toFixed(2)}px / ${(R / sy).toFixed(2)}px`,
+    top: `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${(u / sx).toFixed(4)}, ${(u / sy).toFixed(4)})`,
+  };
+}
+
+// The nearest sticky ancestor: the window holds still in it while the cards fly.
+function stickyOf(el: HTMLElement) {
+  for (let n = el.parentElement; n; n = n.parentElement) {
+    if (getComputedStyle(n).position === "sticky") return n;
+  }
+  return null;
+}
+
+type ViewTimelineCtor = new (o: { subject: Element; axis: "block" }) => AnimationTimeline;
+
 function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
   useEffect(() => {
     const pair = pairRef.current;
     const shot = pair?.querySelector<HTMLElement>(".pb-shot");
     if (!pair || !shot) return;
     const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const VT = (window as unknown as { ViewTimeline?: ViewTimelineCtor }).ViewTimeline;
 
     const fliers: Flier[] = [];
     for (const card of Array.from(pair.querySelectorAll<HTMLElement>(".pb-steps .pb-in"))) {
@@ -2026,6 +2080,71 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
       for (const f of fliers) f.slot.style.height = `${f.h0}px`;
     };
 
+    // THE SCROLL TIMELINES. Every flight lands while the window is stuck, so
+    // a row's place on screen is the sticky box's resting top plus the row's
+    // offset inside it, measured with the rows that land before it open.
+    // Sampled finely through the flight, coarsely elsewhere, and handed to
+    // the browser against the slot's view timeline (cover: 0 when the slot's
+    // top meets the screen's bottom, 1 when its bottom leaves the top).
+    let anims: Animation[] = [];
+    const build = () => {
+      for (const an of anims) an.cancel();
+      anims = [];
+      const sticky = stickyOf(shot);
+      if (!VT || reduce || !sticky) return false;
+      const vh = innerHeight;
+      const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
+      const typeEnd = shot.offsetWidth / 1040;
+      const stickyTop = parseFloat(getComputedStyle(sticky).top) || 0;
+      const saved = fliers.map((f) => f.target.style.height);
+      const y0 = scrollY;
+      fliers.forEach((f, k) => {
+        const before = fliers[k - 1];
+        if (before?.inner) before.target.style.height = "auto";
+        const tr = f.target.getBoundingClientRect();
+        const sr = sticky.getBoundingClientRect();
+        const hr = f.slot.getBoundingClientRect();
+        const endH = f.inner ? f.inner.offsetHeight : tr.height;
+        const rowR = f.inner?.firstElementChild
+          ? parseFloat(getComputedStyle(f.inner.firstElementChild as HTMLElement).borderTopLeftRadius) || 0 : 0;
+        const t = { left: tr.left, top: stickyTop + (tr.top - sr.top), width: tr.width };
+        const pageTop = hr.top + y0;
+        const h = hr.height;
+        const start = pageTop - vh;
+        const span = vh + h;
+        // d runs from the rise's start to the flight's end inside this band.
+        const busy = (s: number) => {
+          const d = (line - (pageTop - s + h / 2)) / vh;
+          return d > -0.62 && d < 0.5;
+        };
+        const cardFrames: Keyframe[] = [];
+        const topFrames: Keyframe[] = [];
+        for (let s = start; ; ) {
+          const offset = Math.min(1, (s - start) / span);
+          const homeTop = pageTop - s;
+          const d = (line - (homeTop + h / 2)) / vh;
+          const p = pose(f, d, { left: hr.left, top: homeTop }, t, endH, rowR, typeEnd);
+          cardFrames.push({ offset, transform: p.transform, opacity: p.opacity, borderRadius: p.borderRadius });
+          topFrames.push({ offset, transform: p.top });
+          if (offset >= 1) break;
+          s += busy(s) ? 3 : 40;
+        }
+        const thin = (fr: Keyframe[], keys: string[]) => fr.filter((x, i) =>
+          i === 0 || i === fr.length - 1 ||
+          keys.some((k) => x[k] !== fr[i - 1][k]) || keys.some((k) => x[k] !== fr[i + 1][k]));
+        const timeline = new VT({ subject: f.slot, axis: "block" });
+        anims.push(
+          f.card.animate(thin(cardFrames, ["transform", "opacity", "borderRadius"]), { timeline, fill: "both" }),
+          f.top.animate(thin(topFrames, ["transform"]), { timeline, fill: "both" }),
+        );
+      });
+      fliers.forEach((f, k) => {
+        f.target.style.height = saved[k];
+      });
+      return true;
+    };
+    let timelines = false;
+
     const set = (f: Flier, el: HTMLElement, key: string, prop: string, value: string) => {
       if (f.last[key] === value) return;
       f.last[key] = value;
@@ -2044,21 +2163,21 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
       const reads = fliers.map((f) => {
         const home = f.slot.getBoundingClientRect();
         const d = (line - (home.top + home.height / 2)) / vh;
-        const fl = f.full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
+        const fl = flightOf(f, d);
         const flying = !reduce && fl > 0 && fl < 1;
+        const live = flying && !timelines;
         return {
-          home, d, fl,
-          t: flying ? f.target.getBoundingClientRect() : null,
+          home, d, fl, flying,
+          t: live ? f.target.getBoundingClientRect() : null,
           rowH: f.inner ? f.inner.offsetHeight : 0,
-          rowR: flying && f.inner?.firstElementChild
+          rowR: live && f.inner?.firstElementChild
             ? parseFloat(getComputedStyle(f.inner.firstElementChild as HTMLElement).borderTopLeftRadius) || 0 : 0,
         };
       });
 
       // WRITE everything.
       fliers.forEach((f, k) => {
-        const { home, d, fl, t, rowH, rowR } = reads[k];
-        const a = clamp01((d + (f.full ? 0.48 : 0.42)) / 0.18);
+        const { home, d, fl, flying, t, rowH, rowR } = reads[k];
         const r = f.thread ? clamp01((d + 0.36) / 0.38)
           : f.full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
         set(f, f.card, "r", "--r", r.toFixed(3));
@@ -2081,45 +2200,25 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
           set(f, f.target, "lo", "opacity", open.toFixed(3));
         }
 
-        if (!t) {
-          // At rest, or gone: rising in under its caption, or hidden once landed.
-          f.card.toggleAttribute("data-flying", false);
-          set(f, f.card, "tf", "transform", reduce || a >= 1 ? "" : `translateY(${((1 - ease(a)) * 24).toFixed(1)}px)`);
-          set(f, f.card, "op", "opacity", String(reduce ? (arrived ? 0 : 1) : arrived ? 0 : a));
-          set(f, f.card, "br", "borderRadius", "");
-          set(f, f.top, "tt", "transform", "");
-          set(f, f.card, "fd", "--fade", "1");
-          set(f, f.card, "m", "--m", "0");
+        f.card.toggleAttribute("data-flying", flying);
+        set(f, f.card, "fd", "--fade", flying ? (1 - clamp01((fl - 0.05) / 0.4)).toFixed(3) : "1");
+        set(f, f.card, "m", "--m", flying ? clamp01((fl - 0.4) / 0.6).toFixed(3) : "0");
+        if (timelines) return;
+
+        // No scroll timelines: script moves the card too.
+        if (reduce) {
+          set(f, f.card, "op", "opacity", arrived ? "0" : "1");
           return;
         }
-
-        // IN FLIGHT. The card's box goes from its own to the row's: scaled
-        // from its top left, with the radius written in pre-scale units so
-        // it renders as the row's at the end.
-        f.card.toggleAttribute("data-flying", true);
-        const e = ease(fl);
-        const lerp = (x: number, y: number) => x + (y - x) * e;
-        const endH = f.inner ? rowH : t.height;
-        const sx = lerp(f.w0, t.width) / f.w0;
-        const sy = lerp(f.h0, endH) / f.h0;
-        const x = lerp(home.left, t.left) - home.left;
-        const y = lerp(home.top, t.top) - home.top - Math.sin(Math.PI * e) * 40;
-        const R = lerp(f.r0, rowR);
-        set(f, f.card, "tf", "transform", `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`);
-        set(f, f.card, "br", "borderRadius", `${(R / sx).toFixed(2)}px / ${(R / sy).toFixed(2)}px`);
-
-        // The sender line, counter-scaled so it is never stretched, shrinking
-        // to the window's type size and settling where a row puts its name.
-        const u = lerp(1, typeEnd / f.type0);
-        const vl = lerp(f.pl, 10);
-        const vt = lerp(f.pt, Math.max(0, (endH - f.topH * u) / 2));
-        const tx = vl / sx - f.pl;
-        const ty = vt / sy - f.pt;
-        set(f, f.top, "tt", "transform", `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${(u / sx).toFixed(4)}, ${(u / sy).toFixed(4)})`);
-
-        set(f, f.card, "fd", "--fade", (1 - clamp01((fl - 0.05) / 0.4)).toFixed(3));
-        set(f, f.card, "m", "--m", clamp01((fl - 0.4) / 0.6).toFixed(3));
-        set(f, f.card, "op", "opacity", (1 - clamp01((fl - 0.86) / 0.14)).toFixed(3));
+        // Not in flight: pose()'s resting branch (fl is 0 or 1 here; a landed
+        // card is simply hidden), so no row box is needed.
+        const p = t
+          ? pose(f, d, home, t, f.inner ? rowH : t.height, rowR, typeEnd)
+          : pose(f, arrived ? -1 : d, home, { left: 0, top: 0, width: f.w0 }, 0, 0, typeEnd);
+        set(f, f.card, "tf", "transform", p.transform);
+        set(f, f.card, "op", "opacity", arrived ? "0" : p.opacity);
+        set(f, f.card, "br", "borderRadius", p.borderRadius);
+        set(f, f.top, "tt", "transform", p.top);
       });
     };
     const queue = () => {
@@ -2127,15 +2226,17 @@ function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
     };
     const remeasure = () => {
       measure();
+      timelines = build();
       queue();
     };
-    measure();
+    remeasure();
     frame();
     document.fonts?.ready.then(remeasure);
     addEventListener("scroll", queue, { passive: true });
     addEventListener("resize", remeasure);
     return () => {
       cancelAnimationFrame(raf);
+      for (const an of anims) an.cancel();
       removeEventListener("scroll", queue);
       removeEventListener("resize", remeasure);
     };

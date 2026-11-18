@@ -620,3 +620,13 @@ kbd {
   .eye .line { grid-column: 2 / -1; grid-row: 2; }
   .topbar .who { display: none; }
 }
+
+/* A sender's logo in place of initials: a neutral tile, the icon centred. */
+.has-logo {
+  display: inline-grid; place-items: center; flex: none; overflow: hidden;
+  background: var(--surface-strong); border: 1px solid var(--hairline);
+}
+.avatar.has-logo, .has-logo.avatar { border-radius: 50%; }
+.eye .has-logo { width: 26px; height: 26px; border-radius: 50%; }
+.eye .has-logo img { width: 16px; height: 16px; }
+.tile .logo.has-logo img { width: 30px; height: 30px; }

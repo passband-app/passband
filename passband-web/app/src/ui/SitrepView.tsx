@@ -7,6 +7,7 @@
 // empty state, so the right-hand column never disappears.
 import type { ReactNode } from "react";
 import { useState } from "react";
+import { Logo } from "./Logo";
 import { BILLING_FOLD, EYES_FOLD, READING_FOLD, type EyesItem, type Pill, type Sitrep } from "../sitrep/model";
 import {
   ArchiveIcon,
@@ -106,9 +107,12 @@ export function SitrepView({
               <div className="tiles">
                 {shown.map((g) => (
                   <button key={g.key} className="tile" onClick={() => handlers.open(g.threadId)}>
-                    <span className={`logo avatar h${g.avatarHue}`} aria-hidden="true">
-                      {g.initials}
-                    </span>
+                    <Logo
+                      className="logo"
+                      domain={g.domain}
+                      initials={g.initials}
+                      hue={g.avatarHue}
+                    />
                     <span style={{ minWidth: 0 }}>
                       <span className="top">
                         <span className="name">{g.sender}</span>
@@ -154,9 +158,13 @@ export function SitrepView({
                   tabIndex={s.threadId ? 0 : undefined}
                   onClick={() => s.threadId && handlers.open(s.threadId)}
                 >
-                  <span className="fav" aria-hidden="true">
-                    <BoxIcon size={15} />
-                  </span>
+                  <Logo
+                    className="fav"
+                    domain={s.domain}
+                    initials=""
+                    hue={0}
+                    fallback={<BoxIcon size={15} />}
+                  />
                   <span style={{ minWidth: 0 }}>
                     <div className="t">{s.title}</div>
                     {s.detail && <div className="d">{s.detail}</div>}
@@ -270,9 +278,12 @@ function EyeRow({
       onMouseEnter={onHover}
       onClick={() => (item.sealed ? handlers.openSealed(item) : handlers.open(item.threadId))}
     >
-      <span className={`avatar h${item.avatarHue}`} aria-hidden="true">
-        {item.initials}
-      </span>
+      <Logo
+        className="avatar"
+        domain={item.domain}
+        initials={item.initials}
+        hue={item.avatarHue}
+      />
       <span className="who">
         {item.sender}
         {item.hasAttachment && <PaperclipIcon size={13} label="has attachments" />}

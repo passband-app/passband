@@ -149,6 +149,20 @@ export class Client {
   }
 
   /**
+   * A brand's favicon, fetched by the daemon (`/client/favicon`) so the
+   * browser never contacts a third party. Only ever asked for robot and brand
+   * domains (`eligibleFaviconDomain`), never a person's. A 404 means "no icon".
+   */
+  async favicon(domain: string, signal?: AbortSignal): Promise<Blob> {
+    const resp = await this.transport.request("/client/favicon", {
+      query: { domain },
+      timeoutMs: 15_000,
+      signal,
+    });
+    return resp.blob();
+  }
+
+  /**
    * A remote mail image, fetched by the daemon on the reader's behalf
    * (`/client/image`), so the browser never contacts the sender's host.
    */

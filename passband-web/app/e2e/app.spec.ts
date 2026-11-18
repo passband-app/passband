@@ -187,3 +187,30 @@ test("flow mode: Space walks For your eyes, E and S decide, the board celebrates
   await expect(eyes).toBeVisible();
   expect(violations).toEqual([]);
 });
+
+test("sender logos come through the daemon, and a miss is just the initials", async ({ page }) => {
+  // The container cannot reach the icon source, so the daemon's favicon route
+  // is answered here: one brand has a logo, every other domain is a miss.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+    "base64",
+  );
+  const asked: string[] = [];
+  const cors = { "access-control-allow-origin": "*" };
+  await page.route(`${DAEMON}/client/favicon*`, (route) => {
+    if (route.request().method() === "OPTIONS") return route.continue();
+    const domain = new URL(route.request().url()).searchParams.get("domain") ?? "";
+    asked.push(domain);
+    const hasLogo = domain === asked[0];
+    return hasLogo
+      ? route.fulfill({ status: 200, contentType: "image/png", body: png, headers: cors })
+      : route.fulfill({ status: 404, headers: cors });
+  });
+  await signIn(page);
+  const reading = page.getByRole("region", { name: "Reading" });
+  await expect(reading.locator(".logo.has-logo img")).toHaveCount(1);
+  expect(await reading.locator(".logo.avatar").count()).toBeGreaterThan(0);
+  // Asked once per domain, and never for a person's address.
+  expect(new Set(asked).size).toBe(asked.length);
+  expect(asked.every((d) => !/gmail|outlook|icloud|yahoo/.test(d))).toBe(true);
+});

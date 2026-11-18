@@ -297,6 +297,9 @@ pub async fn run_renotify_pass(
         let inventory = squelch_core::store::agent_triage::AgentListQuery {
             since: Some(crate::triage::default_feed_since(now)),
             include_done: false,
+            // Smart clear's own inventory (`triage::smart_clear`): the whole
+            // month, not the Reading board, so the count matches the press.
+            reading_board: false,
         };
         let limit = crate::triage::feed_limit(None);
         let (backlog, samples) = blocking(state, move || {

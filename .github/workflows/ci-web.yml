@@ -1,0 +1,93 @@
+# PR gate for the web client in passband-web/app: typecheck, unit tests under
+# three time zones, a production build, and checks on what that build ships.
+# Same shape as ci.yml: path-filtered on main, a `changes` job on PRs, drafts
+# skipped, and a gate job that always reports.
+#
+# The browser end-to-end suites are not here yet: the app's needs a daemon,
+# which is a Rust build away.
+
+name: ci-web
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+    paths:
+      - "passband-web/app/**"
+      - ".github/workflows/ci-web.yml"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      web: ${{ steps.out.outputs.web }}
+    steps:
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            web:
+              - "passband-web/app/**"
+              - ".github/workflows/ci-web.yml"
+      - id: out
+        env:
+          EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          CHANGED: ${{ steps.filter.outputs.web }}
+        run: |
+          if [ "$EVENT" = push ]; then web=true
+          elif [ "$DRAFT" = true ]; then web=false
+          else web=${CHANGED:-false}; fi
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "web=$web"
+
+  web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: passband-web/app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: node --version && npm --version
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run test:tz
+      - run: npx vite build
+      - name: Production bundle carries no dev-only allowance
+        run: |
+          if grep -lE 'localhost|127\\\.0\\\.0\\\.1|127\.0\.0\.1' dist/assets/*.js; then
+            echo "a production bundle must not be able to pair with a loopback daemon"; exit 1
+          fi
+          grep -q "require-trusted-types-for 'script'" dist/index.html
+      - name: Runtime dependencies have no known high-severity advisories
+        run: npm audit --omit=dev --audit-level=high
+
+  gate:
+    # Unique check name: rulesets match the bare job name (see ci.yml).
+    name: ci-web-gate
+    if: always()
+    needs: [changes, web]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needs: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) exit 1 ;; esac
+          done

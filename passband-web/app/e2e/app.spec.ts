@@ -4,12 +4,14 @@
 //   SPIKE_SEED=<target/debug/examples/spike_seed> SPIKE_DB=<db> npm run e2e
 //
 // with `squelch-api` serving that db on 127.0.0.1:8849 and
-// SQUELCH_PAIR_ORIGINS=http://localhost:5191. Control is stubbed: the test
-// answers its sign-in URL with the redirect control would send.
+// SQUELCH_PAIR_ORIGINS=http://localhost:5191. A local squelchd already holds
+// 8849 on a dev machine: serve elsewhere (SQUELCH_API_HTTP=127.0.0.1:8852) and
+// set E2E_DAEMON=http://127.0.0.1:8852. Control is stubbed: the test answers
+// its sign-in URL with the redirect control would send.
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 
-const DAEMON = "http://127.0.0.1:8849";
+const DAEMON = process.env.E2E_DAEMON ?? "http://127.0.0.1:8849";
 const CONTROL = "http://127.0.0.1:5177/app/auth";
 
 function mintCode(): string {
@@ -37,9 +39,13 @@ async function signIn(page: Page) {
   await page.route(`${CONTROL}*`, (route) => {
     const state = new URL(route.request().url()).searchParams.get("state") ?? "";
     const frag = new URLSearchParams({ url: DAEMON, code, state });
+    const to = `http://localhost:5191/connect#${frag}`.replace(/&/g, "&amp;");
+    // Control answers with a 302. WebKit cannot fulfill a redirect status, so
+    // the stub lands the browser on the same URL with a refresh instead.
     return route.fulfill({
-      status: 302,
-      headers: { location: `http://localhost:5191/connect#${frag}` },
+      status: 200,
+      contentType: "text/html",
+      body: `<meta http-equiv="refresh" content="0;url=${to}">`,
     });
   });
   await page.goto("/");

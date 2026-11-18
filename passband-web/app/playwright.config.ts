@@ -7,7 +7,11 @@ export default defineConfig({
   // The mail suite needs no daemon and runs under its own config.
   testIgnore: /mail\.spec\.ts/,
   timeout: 30_000,
-  fullyParallel: true,
+  // One test at a time: each one mints a pairing code, and minting supersedes
+  // the account's previous code, so two tests signing in at once spend each
+  // other's.
+  fullyParallel: false,
+  workers: 1,
   reporter: [["list"]],
   use: { baseURL: "http://localhost:5191", trace: "off" },
   webServer: {

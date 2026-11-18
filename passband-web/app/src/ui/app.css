@@ -109,3 +109,4 @@ kbd {
   .row .due { display: none; }
   .masthead .account { display: none; }
 }
+button.primary kbd, .button.primary kbd { color: inherit; border-color: rgb(255 255 255 / 0.5); }

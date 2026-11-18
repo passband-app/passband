@@ -26,7 +26,7 @@ Requires OpenTofu >= 1.8 (variables in the backend and encryption blocks).
 
 Files in `main/`: `network.tf` (VPC, subnets, hand-rolled fck-nat),
 `security_groups.tf`, `alb.tf`, `ecs.tf`, `ecr.tf`, `rds.tf`, `efs.tf`,
-`monitor.tf`, `site.tf`, `iam.tf`, `kms.tf`, `secrets.tf`, `audit.tf`
+`monitor.tf`, `site.tf`, `app.tf`, `iam.tf`, `kms.tf`, `secrets.tf`, `audit.tf`
 (CloudTrail + budget), `outputs.tf`.
 
 ## Apply order

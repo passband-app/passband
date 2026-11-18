@@ -16,6 +16,8 @@
 #   AWS_SITE_BUCKET          landing-site S3 bucket
 #   AWS_SITE_DISTRIBUTION_ID CloudFront distribution
 #   AWS_SITE_FUNCTION_NAME   CloudFront Function (default passband-site-router)
+#   AWS_APP_BUCKET           web client (app.passband.app) S3 bucket
+#   AWS_APP_DISTRIBUTION_ID  its CloudFront distribution
 #   AWS_MONITOR_INSTANCE_ID  the monitor EC2 instance
 #   AWS_ARM64_RUNNER         runner label for the native arm64 Rust builds
 #                            (default ubuntu-24.04-arm)
@@ -25,10 +27,14 @@
 # and job_workflow_ref, and the role's trust (deploy/aws/tofu, iam.tf) pins
 # all three: this repo, environment:aws-production, and this file at
 # refs/heads/main. So EVERY job that assumes the role runs in the
-# `aws-production` environment (ecs, monitor, site), and id-token: write is
-# granted to those three jobs only; the workflow default is contents: read.
+# `aws-production` environment (ecs, monitor, site, app), and id-token: write
+# is granted to those four jobs only; the workflow default is contents: read.
+# The web client deploys with its OWN role, passband-github-deploy-app (same
+# trust, tofu app.tf), which can write the app bucket and invalidate its
+# distribution and nothing else; no other job can touch that bucket.
 # Jobs that run third-party code from a package manager (site-build: bun
-# install/test/build) get no id-token at all: with id-token: write, ANY step
+# install/test/build; app-build: npm ci/test/build) get no id-token at all:
+# with id-token: write, ANY step
 # in a job can mint a token itself, so "before configure-aws-credentials" is
 # not a boundary; a separate job is.
 #
@@ -55,13 +61,14 @@ on:
       - deploy/monitoring/**
       - passband-site/**
       - deploy/aws/site/**
+      - passband-web/app/**
   workflow_dispatch:
     inputs:
       service:
         description: Service to deploy
         required: true
         type: choice
-        options: [control, relay, bifrost, monitor, site, all]
+        options: [control, relay, bifrost, monitor, site, app, all]
   workflow_run:
     workflows: [release-passband-mac]
     types: [completed]
@@ -74,7 +81,7 @@ env:
 
 jobs:
   # Decides what to deploy. Outputs: `ecs` (a matrix of ECS services, maybe
-  # empty), `monitor` and `site` ('true'/'false').
+  # empty), `monitor`, `site` and `app` ('true'/'false').
   changes:
     if: vars.AWS_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
@@ -84,6 +91,7 @@ jobs:
       ecs: ${{ steps.plan.outputs.ecs }}
       monitor: ${{ steps.plan.outputs.monitor }}
       site: ${{ steps.plan.outputs.site }}
+      app: ${{ steps.plan.outputs.app }}
     steps:
       # Credentials persisted HERE ONLY (a read-only token, in a job with no
       # AWS access): paths-filter fetches the push's base commit with git.
@@ -130,6 +138,8 @@ jobs:
             site:
               - passband-site/**
               - deploy/aws/site/**
+            app:
+              - passband-web/app/**
 
       - id: plan
         env:
@@ -141,6 +151,7 @@ jobs:
           F_BIFROST: ${{ steps.filter.outputs.bifrost }}
           F_MONITOR: ${{ steps.filter.outputs.monitor }}
           F_SITE: ${{ steps.filter.outputs.site }}
+          F_APP: ${{ steps.filter.outputs.app }}
           ARM: ${{ vars.AWS_ARM64_RUNNER || 'ubuntu-24.04-arm' }}
         run: |
           want() { # want <service> <push-filter-result>
@@ -165,12 +176,14 @@ jobs:
           if want bifrost "$F_BIFROST"; then add bifrost deploy/aws/docker/Dockerfile.bifrost ubuntu-latest; fi
           monitor=false; if want monitor "$F_MONITOR"; then monitor=true; fi
           site=false; if want site "$F_SITE"; then site=true; fi
+          app=false; if want app "$F_APP"; then app=true; fi
           {
             echo "ecs=$ecs"
             echo "monitor=$monitor"
             echo "site=$site"
+            echo "app=$app"
           } >> "$GITHUB_OUTPUT"
-          echo "plan: ecs=$ecs monitor=$monitor site=$site"
+          echo "plan: ecs=$ecs monitor=$monitor site=$site app=$app"
 
   # control, relay, bifrost: build for linux/arm64, push to ECR by commit SHA,
   # register a task definition revision pinned to the pushed DIGEST (not the
@@ -528,3 +541,124 @@ jobs:
                 echo "prune $key"
                 aws s3 rm "s3://$BUCKET/$key" --only-show-errors
               done
+
+  # Web client (app.passband.app), in two jobs like the site. app-build runs
+  # npm ci/typecheck/test/build with NO id-token and no environment, and hands
+  # dist/ over as an artifact. app (aws-production, its own role) never checks
+  # out or executes repo code: hashed assets first (immutable), index.html
+  # last (revalidated on every load), invalidate it, then prune assets no
+  # build references any more.
+  #
+  # Ordering is what keeps a deploy atomic for users: until index.html flips,
+  # every client loads the old one, whose assets are all still in the bucket;
+  # after it flips, the new one's assets are already there.
+  app-build:
+    needs: changes
+    # Skipped, not failed, until the app's hosting is applied and its bucket
+    # variable set (see the header); a merge before that must not go red.
+    if: vars.AWS_DEPLOY_ENABLED == 'true' && vars.AWS_APP_BUCKET != '' && needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: passband-web/app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx vite build
+      # The checks ci-web runs on a PR, again on exactly what ships.
+      - name: Production bundle carries no dev-only allowance
+        run: |
+          if grep -lE 'localhost|127\\.0\\.0\\.1|127\.0\.0\.1' dist/assets/*.js; then
+            echo "::error::a production bundle must not be able to pair with a loopback daemon"; exit 1
+          fi
+          grep -q "require-trusted-types-for 'script'" dist/index.html
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app
+          path: passband-web/app/dist
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  app:
+    needs: [changes, app-build]
+    # Skipped, not failed, until the app's hosting is applied and its bucket
+    # variable set (see the header); a merge before that must not go red.
+    if: vars.AWS_DEPLOY_ENABLED == 'true' && vars.AWS_APP_BUCKET != '' && needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    environment: aws-production
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: deploy-aws-app
+      cancel-in-progress: false
+    timeout-minutes: 20
+    env:
+      BUCKET: ${{ vars.AWS_APP_BUCKET }}
+      DISTRIBUTION_ID: ${{ vars.AWS_APP_DISTRIBUTION_ID }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: app
+          path: dist
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/passband-github-deploy-app
+          role-session-name: deploy-app-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      # Everything but index.html: content-hashed, so cached for a year and
+      # never revalidated. Source maps are not shipped.
+      - name: Upload assets
+        run: |
+          set -euo pipefail
+          : "${BUCKET:?set the AWS_APP_BUCKET repo variable}"
+          aws s3 cp dist "s3://$BUCKET" --recursive --only-show-errors \
+            --exclude index.html --exclude '*.map' \
+            --cache-control 'public, max-age=31536000, immutable'
+
+      - name: Upload index.html
+        run: |
+          set -euo pipefail
+          aws s3 cp dist/index.html "s3://$BUCKET/index.html" --only-show-errors \
+            --content-type 'text/html; charset=utf-8' \
+            --cache-control 'no-cache'
+
+      - name: Invalidate index.html
+        run: |
+          set -euo pipefail
+          : "${DISTRIBUTION_ID:?set the AWS_APP_DISTRIBUTION_ID repo variable}"
+          id=$(aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" \
+            --paths '/' '/index.html' --query Invalidation.Id --output text)
+          aws cloudfront wait invalidation-completed --distribution-id "$DISTRIBUTION_ID" --id "$id"
+
+      # Last, and only under assets/: a tab still running the previous build
+      # can lazily request one of its chunks, so the previous build's assets
+      # are kept until the deploy after this one (anything not in this build
+      # AND not in the last one goes).
+      - name: Prune assets no recent build references
+        run: |
+          set -euo pipefail
+          (cd dist && find . -type f ! -name '*.map' | sed 's|^\./||' | sort) > "$RUNNER_TEMP/keep.txt"
+          prev="$RUNNER_TEMP/prev.txt"
+          aws s3 cp "s3://$BUCKET/.deployed-assets.txt" "$prev" --only-show-errors 2>/dev/null || : > "$prev"
+          sort -u "$RUNNER_TEMP/keep.txt" "$prev" > "$RUNNER_TEMP/keep-all.txt"
+          aws s3api list-objects-v2 --bucket "$BUCKET" --prefix assets/ --query 'Contents[].Key' --output text \
+            | tr '\t' '\n' | grep -v '^None$' | sort | comm -23 - "$RUNNER_TEMP/keep-all.txt" \
+            | while read -r key; do
+                [ -n "$key" ] || continue
+                echo "prune $key"
+                aws s3 rm "s3://$BUCKET/$key" --only-show-errors
+              done
+          aws s3 cp "$RUNNER_TEMP/keep.txt" "s3://$BUCKET/.deployed-assets.txt" --only-show-errors \
+            --content-type 'text/plain' --cache-control 'no-store'

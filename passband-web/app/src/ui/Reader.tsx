@@ -8,7 +8,7 @@ import { UNDO_MS, toasts } from "../app/toasts";
 import { relAge } from "../lib/time";
 import { MailFrame, type ImageSource } from "../mail/MailFrame";
 import { nudgeLedger } from "./DesktopApp";
-import { ArchiveIcon, BackIcon, CheckIcon, ReplyIcon } from "./icons";
+import { ArchiveIcon, BackIcon, CheckIcon, ForwardIcon, ReplyIcon } from "./icons";
 import { useKeys } from "./keys";
 import { openLink } from "./links";
 
@@ -152,11 +152,23 @@ export function Reader({
         {thread &&
           (walk ? (
             <>
-              <button className="btn quiet" onClick={() => walk.move(-1)} aria-label="Previous">
-                <kbd>←</kbd>
+              <button
+                className="icon-btn"
+                onClick={() => walk.move(-1)}
+                aria-label="Previous"
+                title="Previous (←)"
+                disabled={walk.position <= 1}
+              >
+                <BackIcon size={16} />
               </button>
-              <button className="btn quiet" onClick={() => walk.move(1)} aria-label="Next">
-                <kbd>→</kbd>
+              <button
+                className="icon-btn"
+                onClick={() => walk.move(1)}
+                aria-label="Next"
+                title="Next (→)"
+                disabled={walk.position >= walk.total}
+              >
+                <ForwardIcon size={16} />
               </button>
               <button className="btn" onClick={() => setReplying(true)}>
                 <ReplyIcon size={15} /> Reply <kbd>r</kbd>

@@ -134,3 +134,8 @@ export const WindIcon = (p: P) => (
     <path d="M3 16.5h7" />
   </Icon>
 );
+export const ForwardIcon = (p: P) => (
+  <Icon {...p}>
+    <path d="M9.5 5.5L16 12l-6.5 6.5" />
+  </Icon>
+);

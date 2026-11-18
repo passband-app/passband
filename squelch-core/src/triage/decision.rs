@@ -324,9 +324,9 @@ impl EventIdentity {
         self.same_as.filter(|id| self.offered.contains(id))
     }
 }
-/// What dealing with a message takes, in the model's words: the closed half
-/// of [`EffortEstimate`]. `Reply` and `Involved` are never a quick clear,
-/// whatever the seconds say (`crate::quick_clear`).
+// What dealing with a message takes, in the model's words: the closed half
+// of `EffortEstimate`. `reply` and `involved` are never a quick clear,
+// whatever the seconds say (`crate::quick_clear`).
 decision_enum!(EffortTask {
     Glance,
     Skim,

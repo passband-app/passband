@@ -56,6 +56,20 @@ crate::types::str_enum! {
     }
 }
 
+crate::types::str_enum! {
+    /// What a banner is. A CLOSED set: it is stored on the batch, and habits
+    /// pause each (trigger, kind) pair on its own, so an owner who ignores
+    /// quick-clear banners keeps their "still waiting" ones and vice versa.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum BannerKind {
+        /// Mail that still needs handling ([`Why::Unhandled`], [`Why::DueSoon`]).
+        Renotify => "renotify",
+        /// A short sprint over the open backlog ([`crate::quick_clear`]).
+        QuickClear => "quick_clear",
+    }
+}
+
 /// One stretch of the owner's calendar that counts as busy. Built by the store
 /// from start, end, transparency and the owner's response alone: no title, no
 /// guests, no location ever reaches this module.
@@ -236,6 +250,7 @@ pub fn due_instant(policy: &Policy, time: &SupportedTime, zone: Tz) -> Option<Da
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub trigger: Trigger,
+    pub kind: BannerKind,
     pub fired_at: DateTime<Utc>,
     /// The banner was tapped.
     pub opened: bool,
@@ -257,35 +272,36 @@ impl Outcome {
 pub const MUTE_AFTER_IGNORED: usize = 8;
 
 /// THE PER-OWNER LEARNING, first rung: what the owner's own responses say
-/// about each trigger. Deliberately simple and deterministic. A trigger whose
-/// last [`MUTE_AFTER_IGNORED`] banners were ALL ignored is paused, because a
-/// banner nobody responds to is costing attention and buying nothing; one
-/// response anywhere in that run is enough to keep it.
+/// about each trigger and kind of banner. Deliberately simple and
+/// deterministic. A (trigger, kind) pair whose last [`MUTE_AFTER_IGNORED`]
+/// banners were ALL ignored is paused, because a banner nobody responds to
+/// is costing attention and buying nothing; one response anywhere in that
+/// run is enough to keep it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Habits {
-    muted: Vec<Trigger>,
+    muted: Vec<(Trigger, BannerKind)>,
 }
 
 impl Habits {
-    /// `outcomes` in any order; only the most recent run per trigger counts.
+    /// `outcomes` in any order; only the most recent run per pair counts.
     pub fn learn(outcomes: &[Outcome]) -> Self {
-        let mut by_trigger: BTreeMap<Trigger, Vec<&Outcome>> = BTreeMap::new();
+        let mut by_pair: BTreeMap<(Trigger, BannerKind), Vec<&Outcome>> = BTreeMap::new();
         for o in outcomes {
-            by_trigger.entry(o.trigger).or_default().push(o);
+            by_pair.entry((o.trigger, o.kind)).or_default().push(o);
         }
         let mut muted = Vec::new();
-        for (trigger, mut list) in by_trigger {
+        for (pair, mut list) in by_pair {
             list.sort_by_key(|o| std::cmp::Reverse(o.fired_at));
             let recent = &list[..list.len().min(MUTE_AFTER_IGNORED)];
             if recent.len() == MUTE_AFTER_IGNORED && recent.iter().all(|o| !o.engaged()) {
-                muted.push(trigger);
+                muted.push(pair);
             }
         }
         Self { muted }
     }
 
-    pub fn is_muted(&self, trigger: Trigger) -> bool {
-        self.muted.contains(&trigger)
+    pub fn is_muted(&self, trigger: Trigger, kind: BannerKind) -> bool {
+        self.muted.contains(&(trigger, kind))
     }
 }
 
@@ -301,6 +317,9 @@ pub struct Moment<'a> {
     /// Batches already fired since the owner's local midnight.
     pub fired_today: u32,
     pub habits: &'a Habits,
+    /// When the last quick-clear banner fired, if ever: they are
+    /// [`crate::quick_clear::GAP_HOURS`] apart.
+    pub last_quick_clear: Option<DateTime<Utc>>,
 }
 
 /// Why [`plan`] fired nothing. Each is a metric label and a log word, so the
@@ -475,6 +494,21 @@ pub fn plan(
     moment: &Moment<'_>,
     candidates: &[Candidate],
 ) -> Result<Vec<Candidate>, Hold> {
+    gate(policy, moment)?;
+    if moment.habits.is_muted(moment.trigger, BannerKind::Renotify) {
+        return Err(Hold::Muted);
+    }
+    let picks = ranked(policy, moment.now, candidates);
+    if picks.is_empty() {
+        return Err(Hold::NothingDue);
+    }
+    Ok(picks)
+}
+
+/// The owner's state, the half of [`plan`] that is about them and not the
+/// mail: busy, about to be, outside hours, or past the day's budget. Every
+/// kind of banner passes through it.
+pub fn gate(policy: &Policy, moment: &Moment<'_>) -> Result<(), Hold> {
     let now = moment.now;
     if in_meeting(moment.busy, now) {
         return Err(Hold::InMeeting);
@@ -488,13 +522,13 @@ pub fn plan(
     if moment.fired_today >= policy.daily_budget {
         return Err(Hold::BudgetSpent);
     }
-    if moment.habits.is_muted(moment.trigger) {
-        return Err(Hold::Muted);
-    }
+    Ok(())
+}
+
+/// The due candidates, best first, one per message, at most
+/// [`Policy::max_items`].
+fn ranked(policy: &Policy, now: DateTime<Utc>, candidates: &[Candidate]) -> Vec<Candidate> {
     let mut picks: Vec<&Candidate> = candidates.iter().filter(|c| due(policy, c, now)).collect();
-    if picks.is_empty() {
-        return Err(Hold::NothingDue);
-    }
     picks.sort_by(|a, b| {
         score(b, now)
             .cmp(&score(a, now))
@@ -505,7 +539,100 @@ pub fn plan(
     // unhandled and due soon.
     let mut seen = std::collections::HashSet::new();
     picks.retain(|c| seen.insert(c.message_id));
-    Ok(picks.into_iter().take(policy.max_items).cloned().collect())
+    picks.into_iter().take(policy.max_items).cloned().collect()
+}
+
+/// What one arrival may send, before the quick-clear backlog is read: the
+/// re-notify picks, and whether a quick-clear banner is allowed at all. Split
+/// from [`finish`] so the worker pays for the backlog read only when a
+/// quick-clear banner could actually win.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stage {
+    /// What [`plan`] would pick (empty when it is muted or nothing is due).
+    pub picks: Vec<Candidate>,
+    /// The re-notify kind is paused for this trigger.
+    pub renotify_muted: bool,
+    /// Quick clear is not paused for this trigger, and the last one is at
+    /// least [`crate::quick_clear::GAP_HOURS`] ago.
+    pub quick_allowed: bool,
+}
+
+impl Stage {
+    /// Should the caller read the backlog and plan a quick clear? Not when
+    /// due-soon mail is going to win anyway.
+    pub fn wants_quick_clear(&self) -> bool {
+        self.quick_allowed && !self.has_due_soon()
+    }
+
+    fn has_due_soon(&self) -> bool {
+        self.picks.iter().any(|c| c.why == Why::DueSoon)
+    }
+
+    fn hold(&self) -> Hold {
+        if self.renotify_muted {
+            Hold::Muted
+        } else {
+            Hold::NothingDue
+        }
+    }
+}
+
+/// THE FIRST HALF of a pass: the owner's state ([`gate`]), then the mail.
+/// `Err` when nothing at all could be sent.
+pub fn stage(
+    policy: &Policy,
+    moment: &Moment<'_>,
+    candidates: &[Candidate],
+) -> Result<Stage, Hold> {
+    gate(policy, moment)?;
+    let renotify_muted = moment.habits.is_muted(moment.trigger, BannerKind::Renotify);
+    let picks = if renotify_muted {
+        Vec::new()
+    } else {
+        ranked(policy, moment.now, candidates)
+    };
+    let quick_allowed = !moment
+        .habits
+        .is_muted(moment.trigger, BannerKind::QuickClear)
+        && moment
+            .last_quick_clear
+            .is_none_or(|last| moment.now - last >= Duration::hours(crate::quick_clear::GAP_HOURS));
+    let stage = Stage {
+        picks,
+        renotify_muted,
+        quick_allowed,
+    };
+    if stage.picks.is_empty() && !stage.quick_allowed {
+        return Err(stage.hold());
+    }
+    Ok(stage)
+}
+
+/// The one banner an arrival sends.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Banner {
+    Renotify(Vec<Candidate>),
+    QuickClear(crate::quick_clear::QuickClear),
+}
+
+/// THE SECOND HALF: at most ONE banner per arrival, in this order. Due-soon
+/// mail first (a bill due tomorrow outranks a tidy inbox), then a quick
+/// clear that met its floors, then plain "still waiting" mail. `quick` is
+/// [`crate::quick_clear::plan`]'s answer when the caller asked
+/// ([`Stage::wants_quick_clear`]), `None` when it did not or the plan held.
+pub fn finish(stage: Stage, quick: Option<crate::quick_clear::QuickClear>) -> Result<Banner, Hold> {
+    if stage.has_due_soon() {
+        return Ok(Banner::Renotify(stage.picks));
+    }
+    if stage.quick_allowed
+        && let Some(quick) = quick
+    {
+        return Ok(Banner::QuickClear(quick));
+    }
+    if !stage.picks.is_empty() {
+        return Ok(Banner::Renotify(stage.picks));
+    }
+    Err(stage.hold())
 }
 
 /// One trigger's (or one hour's) record, for the stats route.
@@ -532,27 +659,36 @@ impl Tally {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Summary {
     pub by_trigger: BTreeMap<&'static str, Tally>,
+    /// Keyed by [`BannerKind`].
+    pub by_kind: BTreeMap<&'static str, Tally>,
     /// Keyed by local hour, 0-23.
     pub by_hour: BTreeMap<u32, Tally>,
-    /// Triggers [`Habits`] has paused.
+    /// Triggers [`Habits`] has paused for re-notify banners.
     pub muted: Vec<&'static str>,
+    /// Triggers [`Habits`] has paused for quick-clear banners.
+    pub muted_quick_clear: Vec<&'static str>,
 }
 
 pub fn summarize(outcomes: &[Outcome], zone: Tz) -> Summary {
     let mut out = Summary::default();
     for o in outcomes {
         out.by_trigger.entry(o.trigger.as_str()).or_default().add(o);
+        out.by_kind.entry(o.kind.as_str()).or_default().add(o);
         out.by_hour
             .entry(o.fired_at.with_timezone(&zone).hour())
             .or_default()
             .add(o);
     }
     let habits = Habits::learn(outcomes);
-    out.muted = [Trigger::ClientOnline, Trigger::MeetingEnd]
-        .into_iter()
-        .filter(|t| habits.is_muted(*t))
-        .map(|t| t.as_str())
-        .collect();
+    let muted = |kind| {
+        [Trigger::ClientOnline, Trigger::MeetingEnd]
+            .into_iter()
+            .filter(|t| habits.is_muted(*t, kind))
+            .map(|t| t.as_str())
+            .collect()
+    };
+    out.muted = muted(BannerKind::Renotify);
+    out.muted_quick_clear = muted(BannerKind::QuickClear);
     out
 }
 
@@ -611,6 +747,7 @@ mod tests {
             busy,
             fired_today: 0,
             habits,
+            last_quick_clear: None,
         }
     }
 
@@ -686,6 +823,7 @@ mod tests {
 
         let ignored: Vec<Outcome> = (0..MUTE_AFTER_IGNORED as i64)
             .map(|i| Outcome {
+                kind: BannerKind::Renotify,
                 trigger: Trigger::ClientOnline,
                 fired_at: t(9, 0) - Duration::days(i + 1),
                 opened: false,
@@ -706,6 +844,7 @@ mod tests {
     fn one_response_in_the_run_keeps_a_trigger() {
         let mut outcomes: Vec<Outcome> = (0..MUTE_AFTER_IGNORED as i64)
             .map(|i| Outcome {
+                kind: BannerKind::Renotify,
                 trigger: Trigger::MeetingEnd,
                 fired_at: t(9, 0) - Duration::days(i + 1),
                 opened: false,
@@ -713,14 +852,14 @@ mod tests {
                 handled: 0,
             })
             .collect();
-        assert!(Habits::learn(&outcomes).is_muted(Trigger::MeetingEnd));
+        assert!(Habits::learn(&outcomes).is_muted(Trigger::MeetingEnd, BannerKind::Renotify));
         // A handled item in the newest batch counts as a response.
         outcomes[0].handled = 1;
-        assert!(!Habits::learn(&outcomes).is_muted(Trigger::MeetingEnd));
+        assert!(!Habits::learn(&outcomes).is_muted(Trigger::MeetingEnd, BannerKind::Renotify));
         // Fewer than the run never mutes.
         outcomes.truncate(MUTE_AFTER_IGNORED - 1);
         outcomes[0].handled = 0;
-        assert!(!Habits::learn(&outcomes).is_muted(Trigger::MeetingEnd));
+        assert!(!Habits::learn(&outcomes).is_muted(Trigger::MeetingEnd, BannerKind::Renotify));
     }
 
     #[test]
@@ -882,6 +1021,7 @@ mod tests {
     fn summary_tallies_by_trigger_and_local_hour() {
         let outcomes = [
             Outcome {
+                kind: BannerKind::Renotify,
                 trigger: Trigger::ClientOnline,
                 fired_at: t(16, 5),
                 opened: true,
@@ -889,6 +1029,7 @@ mod tests {
                 handled: 1,
             },
             Outcome {
+                kind: BannerKind::Renotify,
                 trigger: Trigger::MeetingEnd,
                 fired_at: t(18, 0),
                 opened: false,
@@ -998,5 +1139,134 @@ mod tests {
         // 2026-10-28 16:00 UTC is 09:00 PDT; that day began at 07:00 UTC.
         assert_eq!(local_day_start(la, t(16, 0)), t(7, 0));
         assert_eq!(local_day_start(Tz::UTC, t(16, 0)), t(0, 0));
+    }
+
+    fn quick(fit: usize) -> crate::quick_clear::QuickClear {
+        crate::quick_clear::QuickClear {
+            budget_secs: 300,
+            est_secs: 40,
+            fit_count: fit,
+            open_count: fit * 2,
+            smart_clear_count: 0,
+            items: Vec::new(),
+        }
+    }
+
+    fn ignored_run(trigger: Trigger, kind: BannerKind) -> Vec<Outcome> {
+        (0..MUTE_AFTER_IGNORED as i64)
+            .map(|i| Outcome {
+                trigger,
+                kind,
+                fired_at: t(9, 0) - Duration::days(i + 1),
+                opened: false,
+                items: 5,
+                handled: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_banner_per_arrival_due_soon_then_quick_clear_then_still_waiting() {
+        let p = Policy::default();
+        let h = Habits::default();
+        let m = moment(t(10, 0), &[], &h);
+        let waiting = cand(1, 70, t(8, 0));
+        let due = due_soon_cand(2, t(12, 0), t(1, 0));
+
+        // Due-soon mail beats a quick clear, and the backlog is not even read.
+        let s = stage(&p, &m, &[waiting.clone(), due.clone()]).unwrap();
+        assert!(!s.wants_quick_clear());
+        match finish(s, Some(quick(9))).unwrap() {
+            Banner::Renotify(picks) => assert_eq!(picks[0].message_id, 2),
+            other => panic!("expected due soon, got {other:?}"),
+        }
+
+        // A quick clear beats plain "still waiting".
+        let s = stage(&p, &m, std::slice::from_ref(&waiting)).unwrap();
+        assert!(s.wants_quick_clear());
+        assert_eq!(
+            finish(s.clone(), Some(quick(9))),
+            Ok(Banner::QuickClear(quick(9)))
+        );
+        // A quick clear that held leaves the waiting mail its banner.
+        match finish(s, None).unwrap() {
+            Banner::Renotify(picks) => assert_eq!(picks[0].message_id, 1),
+            other => panic!("expected still waiting, got {other:?}"),
+        }
+
+        // Nothing waiting and no quick clear: nothing due.
+        let s = stage(&p, &m, &[]).unwrap();
+        assert!(s.wants_quick_clear());
+        assert_eq!(finish(s, None), Err(Hold::NothingDue));
+    }
+
+    #[test]
+    fn a_quick_clear_passes_the_same_gate_as_every_banner() {
+        let p = Policy::default();
+        let h = Habits::default();
+        let busy = [span(t(9, 30), t(10, 30))];
+        assert_eq!(
+            stage(&p, &moment(t(10, 0), &busy, &h), &[]),
+            Err(Hold::InMeeting)
+        );
+        let mut m = moment(t(10, 0), &[], &h);
+        m.fired_today = p.daily_budget;
+        assert_eq!(stage(&p, &m, &[]), Err(Hold::BudgetSpent));
+        let night = moment(t(23, 0), &[], &h);
+        assert_eq!(stage(&p, &night, &[]), Err(Hold::OutsideHours));
+    }
+
+    #[test]
+    fn quick_clears_keep_their_gap() {
+        let p = Policy::default();
+        let h = Habits::default();
+        let mut m = moment(t(10, 0), &[], &h);
+        m.last_quick_clear =
+            Some(t(10, 0) - Duration::hours(crate::quick_clear::GAP_HOURS) + Duration::minutes(1));
+        // Too soon, and nothing else to send.
+        assert_eq!(stage(&p, &m, &[]), Err(Hold::NothingDue));
+        // Too soon, with waiting mail: it gets the banner, not a quick clear.
+        let s = stage(&p, &m, &[cand(1, 70, t(8, 0))]).unwrap();
+        assert!(!s.wants_quick_clear());
+        assert!(matches!(finish(s, Some(quick(9))), Ok(Banner::Renotify(_))));
+        m.last_quick_clear = Some(t(10, 0) - Duration::hours(crate::quick_clear::GAP_HOURS));
+        assert!(stage(&p, &m, &[]).unwrap().wants_quick_clear());
+    }
+
+    #[test]
+    fn habits_pause_each_kind_on_its_own() {
+        let p = Policy::default();
+        let quick_ignored =
+            Habits::learn(&ignored_run(Trigger::ClientOnline, BannerKind::QuickClear));
+        assert!(quick_ignored.is_muted(Trigger::ClientOnline, BannerKind::QuickClear));
+        assert!(!quick_ignored.is_muted(Trigger::ClientOnline, BannerKind::Renotify));
+        assert!(!quick_ignored.is_muted(Trigger::MeetingEnd, BannerKind::QuickClear));
+        let m = moment(t(10, 0), &[], &quick_ignored);
+        // Quick clear paused, re-notify not.
+        assert_eq!(stage(&p, &m, &[]), Err(Hold::NothingDue));
+        let s = stage(&p, &m, &[cand(1, 70, t(8, 0))]).unwrap();
+        assert!(!s.wants_quick_clear());
+        assert!(plan(&p, &m, &[cand(1, 70, t(8, 0))]).is_ok());
+
+        let renotify_ignored =
+            Habits::learn(&ignored_run(Trigger::ClientOnline, BannerKind::Renotify));
+        let m = moment(t(10, 0), &[], &renotify_ignored);
+        let s = stage(&p, &m, &[cand(1, 70, t(8, 0))]).unwrap();
+        assert!(s.picks.is_empty(), "re-notify is paused");
+        assert!(s.wants_quick_clear());
+        assert_eq!(finish(s.clone(), None), Err(Hold::Muted));
+        assert!(matches!(
+            finish(s, Some(quick(9))),
+            Ok(Banner::QuickClear(_))
+        ));
+
+        // A summary names each kind's paused triggers apart.
+        let mut both = ignored_run(Trigger::ClientOnline, BannerKind::QuickClear);
+        both.extend(ignored_run(Trigger::MeetingEnd, BannerKind::Renotify));
+        let s = summarize(&both, Tz::UTC);
+        assert_eq!(s.muted, vec!["meeting_end"]);
+        assert_eq!(s.muted_quick_clear, vec!["client_online"]);
+        assert_eq!(s.by_kind["quick_clear"].fired, MUTE_AFTER_IGNORED as u32);
+        assert_eq!(s.by_kind["renotify"].fired, MUTE_AFTER_IGNORED as u32);
     }
 }

@@ -30,6 +30,7 @@ struct SitrepPollerTests {
         expect(Badge.refreshes == 0, "stale response must not update badge")
         expect(store.lastRefresh == nil, "stale response must not mark a refresh")
         expect(store.statsEpoch == nil, "stale response must not claim the stats for any epoch")
+        expect(AccountManager.shared.named.isEmpty, "a stale answer names no account")
 
         let joined = Task { await poller.pull() }
         for _ in 0..<100 { await Task.yield() }
@@ -41,6 +42,8 @@ struct SitrepPollerTests {
                "a pull hands every band row to the thread cache: \(ThreadPrefetch.shared.retired)")
         api.feed = Feed()
         expect(store.statsEpoch == store.epoch, "the stats are stamped with the epoch they were asked under")
+        expect(AccountManager.shared.named.first == "practice@example.test",
+               "a live answer offers its mailbox as the account's name: \(AccountManager.shared.named)")
         expect(Badge.refreshes == 1, "only the current request has side effects")
 
         // stop() itself protects the store, even without an epoch bump.
@@ -430,6 +433,12 @@ struct RefreshError { var message: String; var kind: ErrorKind }
 @MainActor final class Prefs {
     static let shared = Prefs()
     func seedUserName(fromGivenName: String?, email: String?) {}
+}
+@MainActor final class AccountManager {
+    static let shared = AccountManager()
+    let activeId: UUID? = UUID()
+    var named: [String] = []
+    func nameAfterMailbox(_ id: UUID, email: String) { named.append(email) }
 }
 @MainActor final class AccountPhotos {
     static let shared = AccountPhotos()

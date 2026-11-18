@@ -1284,6 +1284,11 @@ CREATE TABLE IF NOT EXISTS renotify_items (
     -- (`quick_clear::Basis`), for calibration. NULL on re-notify items.
     est_secs   INTEGER,
     basis      TEXT,
+    -- The same estimate BEFORE the owner's multiplier: what calibration
+    -- learns against, so the multiplier settles instead of measuring its own
+    -- last correction. NULL on re-notify items and on rows written before it
+    -- (read as `est_secs`).
+    raw_secs   INTEGER,
     PRIMARY KEY(batch_id, position)
 );
 CREATE INDEX IF NOT EXISTS idx_renotify_items_message ON renotify_items(account_id, message_id);

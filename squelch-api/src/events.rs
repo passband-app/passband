@@ -68,6 +68,12 @@ pub struct EventsQuery {
     /// opt-in nobody understood should cost only the opt-in.
     #[serde(default)]
     opens: Option<String>,
+    /// `1` from a Mac app that can SHOW a quick-clear banner (on a stream
+    /// that also sent `opens=1`). Quick clear is sent only while one such
+    /// stream is open: an older app drops the frame, so it keeps getting the
+    /// "still waiting" banner it can show. A string, like `opens`.
+    #[serde(default)]
+    quick_clear: Option<String>,
 }
 
 /// Where a connection starts reading. WITH `after`: exactly there (exclusive);
@@ -335,6 +341,9 @@ pub async fn events_stream(
     // Both are inert with the feature off: no banner is ever sent, and no
     // session is written.
     let banners = mac.then(|| state.renotify.frames.subscribe());
+    // Counted for the life of the response body, like `listening` below.
+    let quick_capable = (mac && q.quick_clear.as_deref() == Some("1"))
+        .then(|| crate::renotify::QuickClearListener::start(&state));
     // Calendar reminders reach a Mac stream too, whatever `renotify` says.
     let reminders = mac.then(|| state.calendar_remind.frames.subscribe());
     let session = if mac {
@@ -369,6 +378,7 @@ pub async fn events_stream(
     let body = ReceiverStream::new(rx).map(move |frame| {
         let _listening = &listening;
         let _session = &session;
+        let _quick_capable = &quick_capable;
         frame
     });
     Ok(Sse::new(body).keep_alive(KeepAlive::new().interval(KEEPALIVE)))

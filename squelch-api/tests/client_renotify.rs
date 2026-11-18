@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use squelch_api::{ApiState, PassOutcome, router, run_renotify_pass};
 use squelch_core::config::RenotifyConfig;
 use squelch_core::features::{self, Features};
+use squelch_core::quick_clear;
 use squelch_core::renotify::{Hold, Trigger};
 use squelch_core::store::{NewEvent, SqliteStore, Store};
 use squelch_core::types::{EventKind, Tier};
@@ -582,7 +583,7 @@ async fn a_quick_clear_reaches_the_mac_with_its_queue_and_its_tap_is_counted() {
 
     let resp = app
         .clone()
-        .oneshot(authed("GET", "/client/events?opens=1"))
+        .oneshot(authed("GET", "/client/events?opens=1&quick_clear=1"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -608,7 +609,12 @@ async fn a_quick_clear_reaches_the_mac_with_its_queue_and_its_tap_is_counted() {
         .expect("a quick_clear frame on the Mac stream");
     assert_eq!(frame["quick_clear"], batch);
     assert_eq!(frame["trigger"], "client_online");
-    assert_eq!(frame["at"], now.timestamp());
+    // Stamped when it is sent, not when the pass began.
+    let at = frame["at"].as_i64().unwrap();
+    assert!(
+        (now.timestamp()..=now.timestamp() + 5).contains(&at),
+        "{at}"
+    );
     assert_eq!(frame["budget_secs"], 300);
     assert_eq!(frame["fit_count"], 5);
     assert_eq!(frame["open_count"], 8, "the replies count in the backlog");
@@ -673,13 +679,65 @@ async fn too_few_quick_items_send_no_quick_clear() {
     }
     let _stream = app
         .clone()
+        .oneshot(authed("GET", "/client/events?opens=1&quick_clear=1"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    assert_eq!(
+        run_renotify_pass(&state, Trigger::ClientOnline, now)
+            .await
+            .unwrap(),
+        PassOutcome::Held(Hold::Quick(quick_clear::QuickHold::TooFew))
+    );
+    // A held plan stands for the hour: the backlog is not read again, even
+    // once a fifth card arrives.
+    fye_card(&store, acct, "q5", None);
+    assert_eq!(
+        run_renotify_pass(
+            &state,
+            Trigger::ClientOnline,
+            now + chrono::Duration::minutes(30)
+        )
+        .await
+        .unwrap(),
+        PassOutcome::Held(Hold::NothingDue)
+    );
+    let after = now + chrono::Duration::minutes(quick_clear::HELD_RECHECK_MINS);
+    assert!(matches!(
+        run_renotify_pass(&state, Trigger::ClientOnline, after)
+            .await
+            .unwrap(),
+        PassOutcome::QuickClear { .. }
+    ));
+}
+
+/// A Mac that cannot show a quick clear (an older app: `opens=1` with no
+/// `quick_clear=1`) keeps getting the "still waiting" banner it can show,
+/// with a backlog that would otherwise have won a quick clear.
+#[tokio::test]
+async fn an_older_mac_keeps_its_still_waiting_banner() {
+    let (state, app, store, acct) = setup(true);
+    for n in 1..=6 {
+        fye_card(&store, acct, &format!("q{n}"), None);
+    }
+    let waiting = notified(&store, acct, 1);
+    let resp = app
+        .clone()
         .oneshot(authed("GET", "/client/events?opens=1"))
         .await
         .unwrap();
-    assert_eq!(
-        run_renotify_pass(&state, Trigger::ClientOnline, Utc::now())
-            .await
-            .unwrap(),
-        PassOutcome::Held(Hold::NothingDue)
-    );
+    let mut body = resp.into_body();
+    let mut buf = String::new();
+    let later = Utc::now() + chrono::Duration::hours(1);
+    let outcome = run_renotify_pass(&state, Trigger::ClientOnline, later)
+        .await
+        .unwrap();
+    let PassOutcome::Fired { message_ids, .. } = outcome else {
+        panic!("expected the still-waiting banner, got {outcome:?}");
+    };
+    assert!(message_ids.contains(&waiting));
+    let frame = next_renotify(&mut body, &mut buf)
+        .await
+        .expect("a renotify frame");
+    assert!(frame.get("renotify").is_some());
 }

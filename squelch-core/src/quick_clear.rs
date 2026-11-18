@@ -32,7 +32,7 @@
 //!    [`GLANCE_SECS`].
 //! 5. A sender the owner protects (a known contact, a `surface` rule, kept)
 //!    is quick only as a plain glance with no open action.
-//! 6. The model's own estimate (`decision.effort`, agent-triage-v18) replaces
+//! 6. The model's own estimate (`decision.effort`, agent-triage-v26) replaces
 //!    the heuristic's number. A `reply` or `involved` task is never quick.
 //! 7. The owner's own dwell on this sender's mail, once there are
 //!    [`MIN_DWELL_SAMPLES`] reported looks, replaces both.
@@ -90,6 +90,14 @@ pub const CALIBRATION_MIN: f64 = 0.5;
 pub const CALIBRATION_MAX: f64 = 2.0;
 /// Quick-clear banners are at least this far apart.
 pub const GAP_HOURS: i64 = 4;
+/// At most this many quick-clear banners a day (owner's local day). Their
+/// own budget: they never spend the re-notify `daily_budget` a bill coming
+/// due later in the day needs.
+pub const DAILY_CAP: u32 = 2;
+/// After a pass whose plan held (too few, too small a share), the backlog
+/// is not read again for this long: a held plan rarely changes in minutes,
+/// and the read is the smart-clear scan.
+pub const HELD_RECHECK_MINS: i64 = 60;
 /// A gap from open to done longer than this is not one sitting.
 pub const MAX_OPEN_TO_DONE_SECS: i64 = 600;
 
@@ -284,7 +292,13 @@ fn calibrated(e: Estimate, multiplier: f64) -> Estimate {
 pub struct Planned {
     pub message_id: i64,
     pub thread_id: String,
+    /// What the queue promises: the estimate after the owner's multiplier.
     pub est_secs: u32,
+    /// The same estimate BEFORE the multiplier. Stored, never sent: the
+    /// multiplier is learned against this, so it settles on the owner's
+    /// real pace instead of measuring its own last correction.
+    #[serde(skip)]
+    pub raw_secs: u32,
     pub basis: Basis,
     pub kind: ItemKind,
     pub sender: String,
@@ -329,16 +343,21 @@ pub fn plan(items: &[OpenItem], multiplier: f64) -> Result<QuickClear, QuickHold
     let mut seen = HashSet::new();
     let backlog: Vec<&OpenItem> = items.iter().filter(|i| seen.insert(i.message_id)).collect();
     let open_count = backlog.len();
-    let mut priced: Vec<(&OpenItem, Estimate)> = backlog
+    let mut priced: Vec<(&OpenItem, Estimate, u32)> = backlog
         .into_iter()
-        .filter_map(|i| Some((i, calibrated(estimate(i)?, multiplier))))
-        .filter(|(_, e)| e.secs <= MAX_ITEM_SECS)
+        .filter_map(|i| {
+            let raw = estimate(i)?;
+            Some((i, calibrated(raw, multiplier), raw.secs))
+        })
+        .filter(|(_, e, _)| e.secs <= MAX_ITEM_SECS)
         .collect();
-    priced.sort_by(|(a, ea), (b, eb)| ea.secs.cmp(&eb.secs).then(b.message_id.cmp(&a.message_id)));
+    priced.sort_by(|(a, ea, _), (b, eb, _)| {
+        ea.secs.cmp(&eb.secs).then(b.message_id.cmp(&a.message_id))
+    });
     let mut total = 0u32;
     let mut queue = Vec::new();
     let mut smart = 0usize;
-    for (item, e) in priced {
+    for (item, e, raw_secs) in priced {
         let cost = if e.basis == Basis::SmartClear {
             if smart == 0 {
                 SMART_CLEAR_PRESS_SECS
@@ -360,6 +379,7 @@ pub fn plan(items: &[OpenItem], multiplier: f64) -> Result<QuickClear, QuickHold
             message_id: item.message_id,
             thread_id: item.thread_id.clone(),
             est_secs: e.secs,
+            raw_secs,
             basis: e.basis,
             kind: e.kind,
             sender: item.sender.clone(),
@@ -782,6 +802,17 @@ mod tests {
         };
         assert_eq!(by_id(1), GLANCE_SECS * 2);
         assert_eq!(by_id(9), 10, "dwell is the owner's own clock");
+        // The raw estimate rides along untouched: the multiplier is learned
+        // against it, never against its own last correction.
+        let raw = |id: i64| {
+            q.items
+                .iter()
+                .find(|p| p.message_id == id)
+                .unwrap()
+                .raw_secs
+        };
+        assert_eq!(raw(1), GLANCE_SECS);
+        assert_eq!(raw(9), 10);
         // Out-of-range and nonsense multipliers are held to the range.
         let q = plan(&items, 50.0).unwrap();
         assert_eq!(

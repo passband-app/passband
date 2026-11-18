@@ -507,7 +507,7 @@ pub struct MessageDecision {
     pub done: Option<DoneRequest>,
     /// How long dealing with this message takes, the model's estimate
     /// (agent-triage-v26). Defaults for the reason `reading_kind` does:
-    /// every decision stored before v18 has none.
+    /// every decision stored before v26 has none.
     #[serde(default)]
     pub effort: Option<EffortEstimate>,
 }

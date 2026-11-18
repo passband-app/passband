@@ -28,15 +28,20 @@ use std::collections::HashMap;
 /// more is only a longer query.
 const DWELL_SAMPLE: i64 = 20;
 
-/// A message's own guards, by primary key: kept close (`sealed_mail_sql!`,
-/// the one definition) and a reminder pending or fired.
+/// A message's guards, over its WHOLE THREAD: any message in it kept close
+/// (`sealed_mail_sql!`, the one definition) or with a reminder pending or
+/// fired. A card is a thread, so a clean card message over a thread that also
+/// holds a login code or a restricted message is not quick either. Indexed
+/// (`idx_messages_thread`), and read once per backlog item. NULL (no
+/// message row) reads as kept close.
 const ROW_GUARDS_SQL: &str = concat!(
-    "SELECT ",
+    "SELECT MAX(",
     sealed_mail_sql!(),
-    ", COALESCE(t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL, 0)
+    "), MAX(COALESCE(t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL, 0))
      FROM messages m
      LEFT JOIN triage t ON t.account_id = m.account_id AND t.message_id = m.id
-     WHERE m.account_id = ?1 AND m.id = ?2"
+     WHERE m.account_id = ?1
+       AND m.thread_id = (SELECT thread_id FROM messages WHERE account_id = ?1 AND id = ?2)"
 );
 
 /// A sender's reported looks, newest first. Dwell zero is an open no client
@@ -73,12 +78,11 @@ impl SqliteStore {
         let mut senders: HashMap<String, (bool, Option<DwellHistory>)> = HashMap::new();
 
         let mut row_guards = |id: i64| -> Result<(bool, bool)> {
-            Ok(guards
-                .query_row(params![account_id, id], |r| Ok((r.get(0)?, r.get(1)?)))
-                .optional()?
-                // No message row: nothing can be said about it, so it is
-                // treated as kept close and never priced.
-                .unwrap_or((true, false)))
+            let (sealed, reminder): (Option<bool>, Option<bool>) =
+                guards.query_row(params![account_id, id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            // No message row: nothing can be said about it, so it is treated
+            // as kept close and never priced.
+            Ok((sealed.unwrap_or(true), reminder.unwrap_or(false)))
         };
 
         let mut out = Vec::with_capacity(fye.len());

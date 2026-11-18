@@ -314,12 +314,19 @@ pub struct Moment<'a> {
     pub zone: Tz,
     /// Busy intervals around `now`; order does not matter.
     pub busy: &'a [BusySpan],
-    /// Batches already fired since the owner's local midnight.
+    /// Re-notify banners already fired since the owner's local midnight.
+    /// Quick clears are not counted here: they have their own cap.
     pub fired_today: u32,
     pub habits: &'a Habits,
     /// When the last quick-clear banner fired, if ever: they are
     /// [`crate::quick_clear::GAP_HOURS`] apart.
     pub last_quick_clear: Option<DateTime<Utc>>,
+    /// Quick-clear banners fired since the owner's local midnight, against
+    /// [`crate::quick_clear::DAILY_CAP`].
+    pub quick_fired_today: u32,
+    /// A Mac stream that can SHOW a quick clear is open. An older app would
+    /// drop the frame, so without one the arrival keeps its re-notify.
+    pub quick_listener: bool,
 }
 
 /// Why [`plan`] fired nothing. Each is a metric label and a log word, so the
@@ -338,6 +345,10 @@ pub enum Hold {
     Muted,
     /// Nothing is due.
     NothingDue,
+    /// Nothing else was due, and the quick-clear plan this pass made held
+    /// (too few items, too small a share): its own word, so a log tells a
+    /// quick clear that was tried from one that never was.
+    Quick(crate::quick_clear::QuickHold),
 }
 
 impl Hold {
@@ -349,6 +360,7 @@ impl Hold {
             Self::BudgetSpent => "budget_spent",
             Self::Muted => "muted",
             Self::NothingDue => "nothing_due",
+            Self::Quick(hold) => hold.as_str(),
         }
     }
 }
@@ -495,6 +507,9 @@ pub fn plan(
     candidates: &[Candidate],
 ) -> Result<Vec<Candidate>, Hold> {
     gate(policy, moment)?;
+    if moment.fired_today >= policy.daily_budget {
+        return Err(Hold::BudgetSpent);
+    }
     if moment.habits.is_muted(moment.trigger, BannerKind::Renotify) {
         return Err(Hold::Muted);
     }
@@ -506,8 +521,8 @@ pub fn plan(
 }
 
 /// The owner's state, the half of [`plan`] that is about them and not the
-/// mail: busy, about to be, outside hours, or past the day's budget. Every
-/// kind of banner passes through it.
+/// mail: busy, about to be, or outside hours. Every kind of banner passes
+/// through it; each kind then has its own daily budget.
 pub fn gate(policy: &Policy, moment: &Moment<'_>) -> Result<(), Hold> {
     let now = moment.now;
     if in_meeting(moment.busy, now) {
@@ -518,9 +533,6 @@ pub fn gate(policy: &Policy, moment: &Moment<'_>) -> Result<(), Hold> {
     }
     if !in_working_hours(policy, moment.zone, now) {
         return Err(Hold::OutsideHours);
-    }
-    if moment.fired_today >= policy.daily_budget {
-        return Err(Hold::BudgetSpent);
     }
     Ok(())
 }
@@ -548,12 +560,16 @@ fn ranked(policy: &Policy, now: DateTime<Utc>, candidates: &[Candidate]) -> Vec<
 /// quick-clear banner could actually win.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stage {
-    /// What [`plan`] would pick (empty when it is muted or nothing is due).
+    /// What [`plan`] would pick (empty when it is muted, its budget is
+    /// spent, or nothing is due).
     pub picks: Vec<Candidate>,
+    /// The re-notify kind has fired its [`Policy::daily_budget`] today.
+    pub renotify_spent: bool,
     /// The re-notify kind is paused for this trigger.
     pub renotify_muted: bool,
-    /// Quick clear is not paused for this trigger, and the last one is at
-    /// least [`crate::quick_clear::GAP_HOURS`] ago.
+    /// A Mac that can show one is listening, quick clear is not paused for
+    /// this trigger, it is under [`crate::quick_clear::DAILY_CAP`] today,
+    /// and the last one is at least [`crate::quick_clear::GAP_HOURS`] ago.
     pub quick_allowed: bool,
 }
 
@@ -569,7 +585,9 @@ impl Stage {
     }
 
     fn hold(&self) -> Hold {
-        if self.renotify_muted {
+        if self.renotify_spent {
+            Hold::BudgetSpent
+        } else if self.renotify_muted {
             Hold::Muted
         } else {
             Hold::NothingDue
@@ -585,20 +603,24 @@ pub fn stage(
     candidates: &[Candidate],
 ) -> Result<Stage, Hold> {
     gate(policy, moment)?;
+    let renotify_spent = moment.fired_today >= policy.daily_budget;
     let renotify_muted = moment.habits.is_muted(moment.trigger, BannerKind::Renotify);
-    let picks = if renotify_muted {
+    let picks = if renotify_spent || renotify_muted {
         Vec::new()
     } else {
         ranked(policy, moment.now, candidates)
     };
-    let quick_allowed = !moment
-        .habits
-        .is_muted(moment.trigger, BannerKind::QuickClear)
+    let quick_allowed = moment.quick_listener
+        && moment.quick_fired_today < crate::quick_clear::DAILY_CAP
+        && !moment
+            .habits
+            .is_muted(moment.trigger, BannerKind::QuickClear)
         && moment
             .last_quick_clear
             .is_none_or(|last| moment.now - last >= Duration::hours(crate::quick_clear::GAP_HOURS));
     let stage = Stage {
         picks,
+        renotify_spent,
         renotify_muted,
         quick_allowed,
     };
@@ -748,6 +770,8 @@ mod tests {
             fired_today: 0,
             habits,
             last_quick_clear: None,
+            quick_fired_today: 0,
+            quick_listener: true,
         }
     }
 
@@ -1209,11 +1233,51 @@ mod tests {
             stage(&p, &moment(t(10, 0), &busy, &h), &[]),
             Err(Hold::InMeeting)
         );
-        let mut m = moment(t(10, 0), &[], &h);
-        m.fired_today = p.daily_budget;
-        assert_eq!(stage(&p, &m, &[]), Err(Hold::BudgetSpent));
         let night = moment(t(23, 0), &[], &h);
         assert_eq!(stage(&p, &night, &[]), Err(Hold::OutsideHours));
+    }
+
+    /// Each kind spends its own budget: quick clears never use up the
+    /// re-notify banners a bill coming due later in the day needs, and a
+    /// spent re-notify budget does not stop a quick clear.
+    #[test]
+    fn each_kind_has_its_own_daily_budget() {
+        let p = Policy::default();
+        let h = Habits::default();
+        let waiting = cand(1, 70, t(8, 0));
+        let mut m = moment(t(10, 0), &[], &h);
+        m.quick_fired_today = crate::quick_clear::DAILY_CAP;
+        let s = stage(&p, &m, std::slice::from_ref(&waiting)).unwrap();
+        assert!(!s.wants_quick_clear(), "the quick-clear cap is spent");
+        assert!(matches!(finish(s, Some(quick(9))), Ok(Banner::Renotify(_))));
+        assert_eq!(stage(&p, &m, &[]), Err(Hold::NothingDue));
+
+        let mut m = moment(t(10, 0), &[], &h);
+        m.fired_today = p.daily_budget;
+        let s = stage(&p, &m, std::slice::from_ref(&waiting)).unwrap();
+        assert!(s.picks.is_empty(), "the re-notify budget is spent");
+        assert!(s.wants_quick_clear(), "but a quick clear may still go");
+        assert_eq!(finish(s.clone(), None), Err(Hold::BudgetSpent));
+        assert!(matches!(
+            finish(s, Some(quick(9))),
+            Ok(Banner::QuickClear(_))
+        ));
+        m.quick_fired_today = crate::quick_clear::DAILY_CAP;
+        assert_eq!(stage(&p, &m, &[]), Err(Hold::BudgetSpent));
+    }
+
+    /// A Mac that cannot show a quick clear never gets one in place of the
+    /// re-notify it would have shown.
+    #[test]
+    fn no_quick_clear_without_a_mac_that_can_show_it() {
+        let p = Policy::default();
+        let h = Habits::default();
+        let mut m = moment(t(10, 0), &[], &h);
+        m.quick_listener = false;
+        let s = stage(&p, &m, &[cand(1, 70, t(8, 0))]).unwrap();
+        assert!(!s.wants_quick_clear());
+        assert!(matches!(finish(s, Some(quick(9))), Ok(Banner::Renotify(_))));
+        assert_eq!(stage(&p, &m, &[]), Err(Hold::NothingDue));
     }
 
     #[test]

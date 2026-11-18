@@ -15,8 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// [`UNDERSTANDING_SEGMENTS`]. A const because a const is what a stored string
 /// is compared against; what a run reports is [`prompt_version`].
 pub const PROMPT_VERSION: &str = "agent-triage-v27";
-/// The version of the prompt with the flag OFF: the prompt file alone, byte
-/// for byte main's (a test pins that), so it keeps main's version string.
+/// The version of the prompt with the flag OFF: the prompt file alone, with
+/// none of the flag's segments (a test pins that). Its own string: the file
+/// gained the effort paragraph in v26, so it is no longer v24's text.
 pub const PROMPT_VERSION_BASE: &str = "agent-triage-v26";
 
 /// The version a run reports, by the variant it ran: decisions and their
@@ -2502,7 +2503,7 @@ mod tests {
             effort["anyOf"][0]["properties"]["seconds"],
             json!({"type": "integer"})
         );
-        // A stored decision from before v18 still reads.
+        // A stored decision from before v26 still reads.
         let mut stored = serde_json::to_value(valid()).unwrap();
         stored.as_object_mut().unwrap().remove("effort");
         let old: MessageDecision = serde_json::from_value(stored).unwrap();

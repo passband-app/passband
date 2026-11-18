@@ -56,7 +56,8 @@ Checked in this order. The first one that fails is the hold reason.
    default 7 to 20; the zone is the one `owner_zone` already resolves). Every
    day of the week, weekends included on purpose: a weekend's busy calendar
    events hold it exactly as a weekday's do.
-4. Under `daily_budget` banners since local midnight (default 4).
+4. Under `daily_budget` re-notify banners since local midnight (default 4).
+   Quick clears are not counted here; they have their own cap (below).
 5. The trigger is not paused by the owner's habits (below).
 6. At least one candidate is due.
 
@@ -103,8 +104,8 @@ most `max_items` (default 3) go in one banner.
 
 The same pass can send a different banner: "5 minutes clears 14 of your 23
 emails". Tapping it opens a sprint queue holding exactly the items counted.
-Same triggers, same gate (meeting, guard, working hours, daily budget), same
-feature flag, same table and tap route.
+Same triggers, same gate (meeting, guard, working hours), same feature flag,
+same table and tap route. Its daily budget is its own.
 
 **One banner per arrival**, in this order (`renotify::stage` then
 `renotify::finish`):
@@ -114,9 +115,26 @@ feature flag, same table and tap route.
 2. A quick clear that met its floors.
 3. Plain "still waiting" mail.
 
-A quick clear is allowed only when its (trigger, `quick_clear`) pair is not
-paused by habits and the last one fired at least `quick_clear::GAP_HOURS`
-(4) ago. It counts against `daily_budget` like any banner.
+A quick clear is allowed only when all of these hold:
+
+- **A Mac that can show it is listening.** The app says so on its stream with
+  `GET /client/events?opens=1&quick_clear=1`, and the daemon counts those
+  streams (`RenotifyShared::quick_listeners`). An older app sends only
+  `opens=1` and would drop the frame, so while only older Macs listen the
+  arrival keeps its "still waiting" banner. This is what makes it safe to
+  roll the daemon before the Mac release.
+- Its (trigger, `quick_clear`) pair is not paused by habits.
+- The last one fired at least `quick_clear::GAP_HOURS` (4) ago.
+- Fewer than `quick_clear::DAILY_CAP` (2) fired since local midnight. This is
+  its own budget: quick clears never spend the re-notify `daily_budget`, so a
+  bill coming due in the evening still has its banner.
+
+**A held plan stands for an hour.** When the plan holds (too few, too small
+a share), the backlog is not read again for `quick_clear::HELD_RECHECK_MINS`
+(60): the read is smart clear's scan, and a held plan rarely changes in
+minutes. In memory only (`RenotifyShared::quick_held_until`); a restart
+forgets it. The pass reports the hold as `quick_too_few` or
+`quick_small_share` when nothing else was sent.
 
 **The backlog (the denominator).** Every card on the For your eyes board
 (`agent_triage::list_items("fye")`, the rows the Dock badge counts) plus the
@@ -131,7 +149,7 @@ best evidence for the number:
 
 | Item | Cost | `kind` |
 |---|---|---|
-| Sealed, auth or restricted mail; a reminder pending or fired | never | |
+| Sealed, auth or restricted mail, or a reminder pending or fired, on ANY message of the item's thread (a card is a thread) | never | |
 | A Reading row smart clear takes on stored facts (`event_passed`, `offer_ended`, `ignored_sender`, `skimmed_sender`, `stale_promo`; never the model-judged `expired`) | 0 each; the one press is 5s | `smart_clear` |
 | An open `reply`, `pay`, `decide` or `other` action on the thread | never | |
 | An open `review` / `attend` action | 40s / 25s, summed | `review` / `attend` |
@@ -155,14 +173,20 @@ ever add to what fits, and the press the client turns them into runs the same
 judgement, so it clears at least what was promised (more, if its model pass
 finds expired rows).
 
-**The model's estimate.** agent-triage-v18 added an optional `effort` to
+**The model's estimate.** agent-triage-v26 added an optional `effort` to
 every decision: `{"seconds": n, "task": "glance|skim|quick_action|reply|long_read|involved"}`.
 Nullable in the strict schema, absent on every older stored decision (it
 defaults), clamped to an hour on write and on read, and dropped when it
 claims zero or fewer seconds. It is never a reason to fail a turn.
 
 **Calibration.** Each quick-clear item is stored with its predicted seconds
-and basis (`renotify_items.est_secs`, `basis`). What it really took is read
+(`renotify_items.est_secs`, what the queue promised), its estimate before the
+owner's multiplier (`raw_secs`), and its basis (`basis`). The multiplier is
+learned against `raw_secs`: learned against the promise, which already has
+the last multiplier in it, it would measure its own correction and swing
+back toward 1 instead of settling. Handled means opened, done, or replied to
+SINCE the banner: a card waiting on others usually carries the owner's own
+earlier reply, which is no response to a quick clear. What it really took is read
 later from the message's own state: the dwell the client reported after the
 banner, else open-to-done when that was one sitting (10 minutes or less). A
 smart-clear row is handled when a smart-clear press took it after the banner.
@@ -187,6 +211,9 @@ payload no `Event` decoder accepts.
 
 - `quick_clear` is the `renotify_batches` id; the tap is
   `POST /client/renotify/{id}/opened`, as for a re-notify.
+- `at` is stamped when the frame is sent, not when the pass began: the
+  backlog read sits between the two, and a Mac drops a frame more than a
+  minute old.
 - `items` are in queue order: smart-clear rows first (`est_secs` 0, basis
   `smart_clear`, kind `smart_clear`), then cheapest first. The client turns
   the smart-clear rows into one smart-clear press.
@@ -291,7 +318,7 @@ the other way round. Beyond that, only quick clear's multiplier adapts.
 ## Not built yet
 
 - **Scoring `effort` in the eval.** `squelch-eval` marks it unscored: gold
-  from before agent-triage-v18 has none, and the real check is the
+  from before agent-triage-v26 has none, and the real check is the
   calibration against the owner's dwell.
 - **A quick clear between arrivals.** Like a re-notify, a quick clear only
   goes out on a trigger.
@@ -357,8 +384,12 @@ sender tile, no dashes.
 **Identity and tap.** The request id is `passband.quickclear.<account>.<batch>`,
 with no event or message id in the userInfo. The userInfo carries the frame
 itself as JSON (`passband.quickclear.frame`, each line capped), so a tap after
-a relaunch opens the queue the banner promised. The tap switches to the
-banner's account if needed, opens the sprint, and posts
+a relaunch opens the queue the banner promised. The `smart_clear` rows are
+left out of it, and the 60-item cap counts only the rest: they can number in
+the hundreds and the one press clears them anyway, so the payload carries
+them as `smart_clear_count`. The tap switches to the banner's account if
+needed, closes the reader if one is up (the card is drawn only with no reader
+over it), opens the sprint, and posts
 `POST /client/renotify/{quick_clear}/opened` with an empty body (no
 `message_id`: it opened the queue, not an email). Errors are ignored.
 

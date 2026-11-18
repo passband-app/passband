@@ -133,6 +133,7 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     )?;
     add_column_if_missing(conn, "renotify_items", "est_secs", "INTEGER")?;
     add_column_if_missing(conn, "renotify_items", "basis", "TEXT")?;
+    add_column_if_missing(conn, "renotify_items", "raw_secs", "INTEGER")?;
     relabel_scanner_opens(conn)?;
     retire_preference_retriage(conn)?;
     rebuild_calendar_reminder_fires(conn)?;

@@ -28,6 +28,7 @@
 //! OFF IS AS IF IT DID NOT EXIST. With the `renotify` feature off, no session
 //! is written, no pass runs, and both routes 404.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -79,6 +80,12 @@ pub(crate) struct RenotifyShared {
     /// The session that poke was for: the worker checks it is still open
     /// once the settle time has passed.
     pub(crate) arrived: Arc<Mutex<Option<i64>>>,
+    /// Open Mac streams that can show a quick clear (`quick_clear=1`).
+    pub(crate) quick_listeners: Arc<AtomicUsize>,
+    /// Until when a held quick-clear plan stands: the backlog is not read
+    /// again before then ([`quick_clear::HELD_RECHECK_MINS`]). This daemon
+    /// is one account's, so one slot is the per-account cache.
+    pub(crate) quick_held_until: Arc<Mutex<Option<DateTime<Utc>>>>,
 }
 
 impl RenotifyShared {
@@ -88,6 +95,8 @@ impl RenotifyShared {
             frames: broadcast::channel(FRAME_BUFFER).0,
             arrival: Arc::new(Notify::new()),
             arrived: Arc::new(Mutex::new(None)),
+            quick_listeners: Arc::new(AtomicUsize::new(0)),
+            quick_held_until: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -96,6 +105,51 @@ impl Default for RenotifyShared {
     fn default() -> Self {
         Self::new(RenotifyConfig::default())
     }
+}
+
+/// One open Mac stream that can show a quick clear, counted while it lives.
+pub(crate) struct QuickClearListener(Arc<AtomicUsize>);
+
+impl QuickClearListener {
+    pub(crate) fn start(state: &ApiState) -> Self {
+        let counter = state.renotify.quick_listeners.clone();
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for QuickClearListener {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn quick_listening(state: &ApiState) -> bool {
+    state.renotify.quick_listeners.load(Ordering::SeqCst) > 0
+}
+
+/// A held quick-clear plan still stands at `now`.
+fn quick_held(state: &ApiState, now: DateTime<Utc>) -> bool {
+    state
+        .renotify
+        .quick_held_until
+        .lock()
+        .ok()
+        .and_then(|until| *until)
+        .is_some_and(|until| now < until)
+}
+
+fn hold_quick(state: &ApiState, until: Option<DateTime<Utc>>) {
+    if let Ok(mut slot) = state.renotify.quick_held_until.lock() {
+        *slot = until;
+    }
+}
+
+/// The frame's `at`: when the banner was decided, moved on by the time the
+/// pass took. `now` is when the pass began; the backlog read sits between
+/// that and the send, and a Mac drops a frame more than a minute old.
+fn sent_at(now: DateTime<Utc>, began: std::time::Instant) -> DateTime<Utc> {
+    now + chrono::Duration::from_std(began.elapsed()).unwrap_or_default()
 }
 
 fn enabled(state: &ApiState) -> bool {
@@ -248,11 +302,12 @@ pub async fn run_renotify_pass(
     if state.renotify.frames.receiver_count() == 0 {
         return Ok(PassOutcome::NoListener);
     }
+    let began = std::time::Instant::now();
     let policy = Policy::from_config(&state.renotify.config);
     let store = state.store.clone();
     let account_id = state.account_id;
     let due_policy = policy.clone();
-    let (zone, busy, candidates, fired_today, outcomes, last_quick_clear) =
+    let (zone, busy, candidates, fired_today, quick_fired_today, outcomes, last_quick_clear) =
         blocking(state, move || {
             let zone = store.owner_zone(account_id)?.zone;
             let horizon = chrono::Duration::hours(BUSY_HORIZON_HOURS);
@@ -261,8 +316,9 @@ pub async fn run_renotify_pass(
             // The planner keeps one entry per message.
             let mut candidates = store.renotify_candidates(account_id)?;
             candidates.extend(store.renotify_due_candidates(account_id, &due_policy, zone, now)?);
-            let fired_today =
-                store.renotify_fired_since(account_id, renotify::local_day_start(zone, now))?;
+            let day_start = renotify::local_day_start(zone, now);
+            let fired_today = store.renotify_fired_since(account_id, day_start)?;
+            let quick_fired_today = store.quick_clear_fired_since(account_id, day_start)?;
             let outcomes =
                 store.renotify_outcomes(account_id, now - chrono::Duration::days(HABIT_DAYS))?;
             let last_quick_clear = store.last_quick_clear_at(account_id)?;
@@ -271,6 +327,7 @@ pub async fn run_renotify_pass(
                 busy,
                 candidates,
                 fired_today,
+                quick_fired_today,
                 outcomes,
                 last_quick_clear,
             ))
@@ -285,14 +342,18 @@ pub async fn run_renotify_pass(
         fired_today,
         habits: &habits,
         last_quick_clear,
+        quick_fired_today,
+        quick_listener: quick_listening(state),
     };
     let stage = match renotify::stage(&policy, &moment, &candidates) {
         Ok(stage) => stage,
         Err(hold) => return Ok(PassOutcome::Held(hold)),
     };
     // The backlog is read only when a quick clear could win: not when
-    // due-soon mail will, and not when habits or the gap rule it out.
-    let quick = if stage.wants_quick_clear() {
+    // due-soon mail will, not when habits, the gap or the cap rule it out,
+    // and not again within the hour after a plan held.
+    let mut quick_hold = None;
+    let quick = if stage.wants_quick_clear() && !quick_held(state, now) {
         let store = state.store.clone();
         let inventory = squelch_core::store::agent_triage::AgentListQuery {
             since: Some(crate::triage::default_feed_since(now)),
@@ -312,8 +373,16 @@ pub async fn run_renotify_pass(
         })
         .await?;
         match quick_clear::plan(&backlog, quick_clear::multiplier(&samples)) {
-            Ok(quick) => Some(quick),
+            Ok(quick) => {
+                hold_quick(state, None);
+                Some(quick)
+            }
             Err(hold) => {
+                hold_quick(
+                    state,
+                    Some(now + chrono::Duration::minutes(quick_clear::HELD_RECHECK_MINS)),
+                );
+                quick_hold = Some(hold);
                 eprintln!(
                     "squelchd: renotify {} quick clear held: {}",
                     trigger.as_str(),
@@ -327,8 +396,18 @@ pub async fn run_renotify_pass(
     };
     let picks = match renotify::finish(stage, quick) {
         Ok(Banner::Renotify(picks)) => picks,
-        Ok(Banner::QuickClear(quick)) => return fire_quick_clear(state, trigger, now, quick).await,
-        Err(hold) => return Ok(PassOutcome::Held(hold)),
+        Ok(Banner::QuickClear(quick)) => {
+            return fire_quick_clear(state, trigger, now, began, quick).await;
+        }
+        Err(hold) => {
+            // Nothing else to send, and a quick clear was tried: say why it
+            // held rather than "nothing due".
+            let hold = match (hold, quick_hold) {
+                (Hold::NothingDue, Some(quick)) => Hold::Quick(quick),
+                (hold, _) => hold,
+            };
+            return Ok(PassOutcome::Held(hold));
+        }
     };
     // Counted again at the last moment: the Mac may have gone while the
     // store was being read, and a banner nobody received is not a banner.
@@ -344,7 +423,7 @@ pub async fn run_renotify_pass(
         store.record_renotify(account_id, trigger, now, listeners, &ids)
     })
     .await?;
-    if let Some(payload) = frame_payload(batch, trigger, now, &picks) {
+    if let Some(payload) = frame_payload(batch, trigger, sent_at(now, began), &picks) {
         let _ = state.renotify.frames.send(payload);
     }
     Ok(PassOutcome::Fired { batch, message_ids })
@@ -355,10 +434,12 @@ async fn fire_quick_clear(
     state: &ApiState,
     trigger: Trigger,
     now: DateTime<Utc>,
+    began: std::time::Instant,
     quick: quick_clear::QuickClear,
 ) -> Result<PassOutcome, ApiError> {
-    let listeners = state.renotify.frames.receiver_count();
-    if listeners == 0 {
+    // Only the Macs that can show it count: one that cannot would drop it.
+    let listeners = state.renotify.quick_listeners.load(Ordering::SeqCst);
+    if listeners == 0 || state.renotify.frames.receiver_count() == 0 {
         return Ok(PassOutcome::NoListener);
     }
     let message_ids: Vec<i64> = quick.items.iter().map(|p| p.message_id).collect();
@@ -369,7 +450,7 @@ async fn fire_quick_clear(
         store.record_quick_clear(account_id, trigger, now, listeners, &items)
     })
     .await?;
-    if let Some(frame) = quick_clear_payload(batch, trigger, now, &quick) {
+    if let Some(frame) = quick_clear_payload(batch, trigger, sent_at(now, began), &quick) {
         let _ = state.renotify.frames.send(frame);
     }
     Ok(PassOutcome::QuickClear { batch, message_ids })
@@ -608,6 +689,7 @@ mod tests {
                     message_id: 3,
                     thread_id: "t3".into(),
                     est_secs: 0,
+                    raw_secs: 0,
                     basis: Basis::SmartClear,
                     kind: ItemKind::SmartClear,
                     sender: "deals@shop.example".into(),
@@ -617,6 +699,7 @@ mod tests {
                     message_id: 4,
                     thread_id: "t4".into(),
                     est_secs: 8,
+                    raw_secs: 8,
                     basis: Basis::Heuristic,
                     kind: ItemKind::Receipt,
                     sender: "alice@example.com".into(),

@@ -1,0 +1,38 @@
+{
+ "account_email": "me@example.com",
+ "account_given_name": "Sam",
+ "account_name": "Sam Example",
+ "assistant_relay": false,
+ "bands": {
+  "new": 39,
+  "open": 0,
+  "standing": 0
+ },
+ "compose_attachments": true,
+ "drafts_v2": true,
+ "features": [],
+ "forwarding": true,
+ "invite_sharing": false,
+ "ios_connected": false,
+ "last_history_id": null,
+ "last_surfaced_at": null,
+ "scheduled_send": true,
+ "sealed": 0,
+ "search_plain_order": true,
+ "spam": 0,
+ "spam_synced_at": null,
+ "stage2": {
+  "cache_creation_tokens_today": 0,
+  "cache_read_tokens_today": 0,
+  "calls_today": 0,
+  "est_cost_usd_today": 0.0,
+  "input_tokens_today": 0,
+  "output_tokens_today": 0
+ },
+ "tier_counts": {
+  "noise": 34,
+  "signal": 5
+ },
+ "timeline": false,
+ "total": 39
+}

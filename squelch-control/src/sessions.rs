@@ -132,7 +132,14 @@ pub enum SessionKind {
     /// label on a session of this kind is EMPTY and stays empty, because the
     /// mailbox Google names on the way back is what decides which tenant this
     /// was for.
-    App,
+    ///
+    /// `web_state` is set only when the sign-in was started by the web client
+    /// (`?return=web&state=`) on a deployment with a web app origin configured.
+    /// It is the web client's own one-shot value, handed back to it beside the
+    /// pairing code so it can tell a sign-in it started from one it did not.
+    /// SERVER-SIDE ONLY, like the agent's handle: the browser cannot change
+    /// where a session started as a native login ends up.
+    App { web_state: Option<String> },
     /// A RECONNECT: a fresh Gmail grant for a mailbox that already has a
     /// tenant, replacing a refresh token that stopped working.
     ///
@@ -244,7 +251,10 @@ impl std::fmt::Debug for SessionKind {
                 .field("invite_id", invite_id)
                 .finish(),
             SessionKind::Console => f.write_str("Console"),
-            SessionKind::App => f.write_str("App"),
+            SessionKind::App { web_state } => f
+                .debug_struct("App")
+                .field("web", &web_state.is_some())
+                .finish(),
             SessionKind::Reconnect { purpose } => f
                 .debug_struct("Reconnect")
                 .field("purpose", purpose)
@@ -277,7 +287,7 @@ impl SessionKind {
             // for by an invite once already, and re-consenting must not cost a
             // second one. Nor does an agent login, which provisions nothing.
             SessionKind::Console
-            | SessionKind::App
+            | SessionKind::App { .. }
             | SessionKind::Reconnect { .. }
             | SessionKind::Agent { .. }
             | SessionKind::AgentConfirm { .. }
@@ -331,7 +341,7 @@ impl SessionKind {
         matches!(
             self,
             SessionKind::Console
-                | SessionKind::App
+                | SessionKind::App { .. }
                 | SessionKind::Reconnect { .. }
                 | SessionKind::Agent { .. }
         )
@@ -640,7 +650,7 @@ mod tests {
         // Google says which mailbox this is.
         s.insert(
             "app".into(),
-            SessionKind::App,
+            SessionKind::App { web_state: None },
             "state".into(),
             "verifier".into(),
             String::new(),
@@ -655,7 +665,7 @@ mod tests {
         assert_eq!(console.label, "ada");
 
         let app = s.take("app", now).expect("live");
-        assert_eq!(app.kind, SessionKind::App);
+        assert_eq!(app.kind, SessionKind::App { web_state: None });
         assert_eq!(app.kind.invite_id(), None);
         assert_eq!(app.label, "");
 
@@ -809,7 +819,12 @@ mod tests {
             .unwrap();
         }
         assert_eq!(
-            insert_login(&mut s, SessionKind::App, "one-more", now),
+            insert_login(
+                &mut s,
+                SessionKind::App { web_state: None },
+                "one-more",
+                now
+            ),
             Err(InsertError::Full),
             "the pool is full"
         );
@@ -995,13 +1010,17 @@ mod tests {
             // kind's own.
             let kind = match i % 3 {
                 0 => SessionKind::Console,
-                1 => SessionKind::App,
+                1 => SessionKind::App { web_state: None },
                 _ => agent(),
             };
             insert_login(&mut s, kind, &format!("login{i}"), now).unwrap();
         }
         assert_eq!(s.identity_len(), MAX_IDENTITY_SESSIONS);
-        for kind in [SessionKind::Console, SessionKind::App, agent()] {
+        for kind in [
+            SessionKind::Console,
+            SessionKind::App { web_state: None },
+            agent(),
+        ] {
             assert_eq!(
                 insert_login(&mut s, kind.clone(), "one-login-too-many", now),
                 Err(InsertError::Full),

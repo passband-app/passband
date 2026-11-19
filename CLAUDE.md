@@ -18,6 +18,7 @@ push touched:
 | `bifrost` | ECS Fargate | `bifrost.passband.app` (source-restricted) | `deploy/aws/docker/Dockerfile.bifrost` |
 | `monitor` (prometheus, grafana, blackbox) | one EC2 box, docker compose | Grafana over the tailnet (`passband-monitor`:8443); `metrics.passband.app` admits carrier only | `deploy/aws/monitor/` + `deploy/monitoring/` |
 | `site` | S3 + CloudFront | `passband.app` | `passband-site/` + `deploy/aws/site/` |
+| `app` | S3 + CloudFront (its own bucket and deploy role) | `app.passband.app` | `passband-web/app/` |
 
 Control's Postgres is RDS. Redeploy one service by hand with
 `gh workflow run deploy-aws.yml -f service=<name>` (or `all`).

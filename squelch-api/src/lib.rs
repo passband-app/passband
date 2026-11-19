@@ -40,6 +40,9 @@ mod triage;
 mod unsub_browser;
 mod unsub_cdp;
 mod unsub_fetch;
+// SPIKE (web client): remote mail images fetched on the reader's behalf.
+mod favicon;
+mod image_proxy;
 mod unsub_html;
 mod unsub_job;
 pub mod unsubscribe;
@@ -84,9 +87,23 @@ pub use state::{AgentDoorStatus, ApiState, StateError, attach_event_channel};
 pub use transport::transport_security;
 
 use axum::{
-    Router, middleware,
+    Router,
+    http::{HeaderName, header},
+    middleware,
     routing::{delete, get, patch, post, put},
 };
+
+/// Every request header a Passband client sends to `/client/*`, for the CORS
+/// preflight. A header missing here is one a browser client cannot send.
+fn client_request_headers() -> [HeaderName; 5] {
+    [
+        header::AUTHORIZATION,
+        header::CONTENT_TYPE,
+        header::CACHE_CONTROL,
+        HeaderName::from_static("x-passband-client"),
+        HeaderName::from_static("x-passband-timezone"),
+    ]
+}
 
 /// Build this crate's router: the bearer-authed `/client/*` tree, plus the TWO
 /// unauthenticated routes, each in its own single-route router so the auth
@@ -210,6 +227,9 @@ fn client_router(state: ApiState) -> Router {
             get(handlers::get_translate_config).post(handlers::set_translate_config),
         )
         .route("/client/attachments/{id}", get(handlers::get_attachment))
+        .route("/client/image", get(image_proxy::get_image))
+        .route("/client/favicon", get(favicon::get_favicon))
+        .route("/client/session", delete(auth::revoke_self))
         // FILES ON THEIR WAY OUT (see the handlers' header). The upload carries
         // its own body limit: the router's default is 2 MB, sized for JSON, and
         // this is the one route whose body is a file. Sized for the cap plus a
@@ -469,11 +489,20 @@ fn client_router(state: ApiState) -> Router {
         // CORS wraps both (outermost) so credential-less OPTIONS preflights are
         // answered instead of 401ing. Permissive by design: bearer auth is the
         // security boundary and no cookies are involved.
+        //
+        // Request headers are NAMED, not `*`: the Fetch spec excludes
+        // `Authorization` from the wildcard, so a `*` here lets a browser
+        // refuse every authenticated preflight. `Content-Disposition` is
+        // exposed because a browser hides it from cross-origin script otherwise,
+        // and an attachment download reads its filename there. The max-age
+        // spares every request its own preflight.
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
                 .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
+                .allow_headers(client_request_headers())
+                .expose_headers([header::CONTENT_DISPOSITION])
+                .max_age(std::time::Duration::from_secs(600)),
         )
         .with_state(state)
 }

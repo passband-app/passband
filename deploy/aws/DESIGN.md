@@ -1,6 +1,7 @@
 # AWS: the production design
 
-Production (control, relay, bifrost, monitoring, the landing site) runs on AWS
+Production (control, relay, bifrost, monitoring, the landing site, the web
+client) runs on AWS
 as described here.
 Tenants (the k3s box `carrier` on Hetzner) stay put for now; they move later as
 k3s on EC2, and EKS only when a second node is needed.
@@ -46,6 +47,7 @@ Hostnames (ALB host-based routing, one ACM cert with all SANs):
 | `grafana.passband.app` | monitor :3000 | `GET /api/health` |
 | `metrics.passband.app` | monitor :9090 (remote-write receiver, basic auth on every route) | `GET /-/healthy`, matcher `200,401` |
 | `passband.app` (+ `www`) | CloudFront | n/a |
+| `app.passband.app` | CloudFront (web client) | n/a |
 
 Blackbox has NO public route, ever.
 
@@ -118,6 +120,21 @@ Blackbox has NO public route, ever.
 - Must produce the same status codes and Location headers as `server.ts` for
   every route; a test asserts that table.
 
+### web client
+- `passband-web/app`, a static single-page app: S3 (private, OAC) +
+  CloudFront, in `tofu/main/app.tf`, separate from the landing site in every
+  resource: bucket, distribution, certificate, and deploy role.
+- The Content-Security-Policy (with Trusted Types) is a CloudFront response
+  header, kept identical to the one the build writes as a `<meta>`, plus
+  `frame-ancestors`.
+- A tofu-owned CloudFront Function serves `/index.html` for extensionless
+  paths (app routes); a missing file with an extension stays a 404.
+- Deploy order: hashed assets (immutable) first, `index.html` (`no-cache`)
+  last, then an invalidation of `/index.html`, then prune assets that neither
+  this build nor the previous one references.
+- Its deploy job assumes `passband-github-deploy-app`, whose only permissions
+  are that bucket and that distribution's invalidations.
+
 ## Deploys
 
 - `.github/workflows/deploy-aws.yml`: on push to `main` (path-filtered per
@@ -128,7 +145,9 @@ Blackbox has NO public route, ever.
   the customized immutable sub (`repo:passband-app@<id>/passband@<id>:environment:aws-production:job_workflow_ref:...deploy-aws.yml@refs/heads/main`) (and the `workflow_dispatch`
   environment). Permissions: push to these ECR repos, update these ECS
   services, SSM SendCommand to the monitor instance, S3 sync + CloudFront
-  invalidation for the site. Nothing else.
+  invalidation for the site. Nothing else. The web client has a second role
+  with the same trust and only its own bucket and invalidation (see "web
+  client").
 - Rust images reuse the cargo-chef + registry build-cache pattern in
   `release-daemon.yml` (PR #534), with the cache in ECR.
 - ECS services deploy by registering a task definition with the new image digest

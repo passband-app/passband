@@ -294,6 +294,12 @@ pub struct Config {
     /// A LINK TARGET and nothing more. No trust flows from it: what comes back
     /// from that hop is a pairing code the tenant's own store adjudicates.
     pub console_sso_url: Option<String>,
+    /// The hosted web client's origin, injected into every tenant daemon as
+    /// `SQUELCH_PAIR_ORIGINS`: the one browser origin allowed to claim a
+    /// pairing code cross-origin. Unset, the variable is absent and the
+    /// tenant's pairing route answers no browser on another origin, as a
+    /// self-host's does.
+    pub web_app_origin: Option<String>,
     pub storage_class: String,
     pub storage_size: String,
     /// Bounds on the tenant daemon container.
@@ -507,6 +513,7 @@ impl std::fmt::Debug for Config {
             .field("tls_secret", &self.tls_secret)
             .field("oauth_secret_name", &self.oauth_secret_name)
             .field("console_sso_url", &self.console_sso_url)
+            .field("web_app_origin", &self.web_app_origin)
             .field("storage_class", &self.storage_class)
             .field("storage_size", &self.storage_size)
             .field("daemon_resources", &self.daemon_resources)
@@ -797,6 +804,11 @@ impl Config {
             Some(raw) => Some(canonical_origin(&raw)?),
         };
 
+        let web_app_origin = match var(get, "SQUELCH_WARDEN_WEB_APP_ORIGIN") {
+            None => None,
+            Some(raw) => Some(web_app_origin(&raw)?),
+        };
+
         let llm_base_url = match var(get, "SQUELCH_WARDEN_LLM_BASE_URL") {
             None => None,
             Some(raw) => Some(canonical_https_url(
@@ -959,6 +971,7 @@ impl Config {
                 DEFAULT_OAUTH_SECRET_NAME,
             )?,
             console_sso_url,
+            web_app_origin,
             storage_class: name_var(get, "SQUELCH_WARDEN_STORAGE_CLASS", DEFAULT_STORAGE_CLASS)?,
             storage_size: quantity_var(get, "SQUELCH_WARDEN_STORAGE_SIZE", DEFAULT_STORAGE_SIZE)?,
             daemon_resources: Resources {
@@ -1143,6 +1156,33 @@ fn canonical_origin(raw: &str) -> Result<String, ConfigError> {
         ));
     }
     Ok(url.to_string())
+}
+
+/// Validate the web client's origin: https, a host, and nothing after it.
+///
+/// It reaches every tenant pod as `SQUELCH_PAIR_ORIGINS`, where the daemon
+/// compares it byte for byte against a browser's `Origin`. A path or a trailing
+/// slash would match nothing; a plain-http origin is a page anybody on the path
+/// could stand in for. Either is a refusal to boot rather than a pairing route
+/// that silently never answers.
+fn web_app_origin(raw: &str) -> Result<String, ConfigError> {
+    let url = raw.trim().trim_end_matches('/').to_ascii_lowercase();
+    let Some(host) = url.strip_prefix("https://") else {
+        return Err(ConfigError::invalid(
+            "SQUELCH_WARDEN_WEB_APP_ORIGIN must start with https:// (e.g. https://app.passband.app)",
+        ));
+    };
+    if host.is_empty()
+        || host.len() > 253
+        || host
+            .chars()
+            .any(|c| matches!(c, '/' | '?' | '#' | '@' | '*' | ',') || c.is_whitespace())
+    {
+        return Err(ConfigError::invalid(
+            "SQUELCH_WARDEN_WEB_APP_ORIGIN must be one origin with no path, query or fragment (e.g. https://app.passband.app)",
+        ));
+    }
+    Ok(url)
 }
 
 /// Validate the node CIDR: an address and a prefix length, both parsed.
@@ -1627,6 +1667,19 @@ mod tests {
                 "https://signup passband.app",
             ),
             ("SQUELCH_WARDEN_CONSOLE_SSO_URL", "javascript:alert(1)"),
+            // The web client's origin, compared byte for byte by the daemon.
+            ("SQUELCH_WARDEN_WEB_APP_ORIGIN", "http://app.passband.app"),
+            ("SQUELCH_WARDEN_WEB_APP_ORIGIN", "app.passband.app"),
+            (
+                "SQUELCH_WARDEN_WEB_APP_ORIGIN",
+                "https://app.passband.app/connect",
+            ),
+            ("SQUELCH_WARDEN_WEB_APP_ORIGIN", "https://*.passband.app"),
+            (
+                "SQUELCH_WARDEN_WEB_APP_ORIGIN",
+                "https://app.passband.app,https://evil.example",
+            ),
+            ("SQUELCH_WARDEN_WEB_APP_ORIGIN", "https://"),
             // The gateway URL: https or nothing, and always with a host.
             ("SQUELCH_WARDEN_LLM_BASE_URL", "http://llm.internal"),
             ("SQUELCH_WARDEN_LLM_BASE_URL", "llm.internal"),

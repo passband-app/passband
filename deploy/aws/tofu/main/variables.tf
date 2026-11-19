@@ -185,6 +185,12 @@ variable "site_hosts" {
   default     = ["passband.app", "www.passband.app"]
 }
 
+variable "app_hosts" {
+  description = "CloudFront aliases for the web client (app.tf). The first is the certificate's primary name."
+  type        = list(string)
+  default     = ["app.passband.app"]
+}
+
 # --- Rollout switch -----------------------------------------------------------
 
 variable "services_running" {

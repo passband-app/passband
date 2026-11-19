@@ -128,6 +128,33 @@ pub fn deep_link(tenant_url: &str, pair_code: &str, analytics_id: Option<&str>) 
     }
 }
 
+/// Where a web sign-in lands: the web client's `/connect`, with the tenant URL,
+/// the pairing code and the web client's own `state` in the FRAGMENT.
+///
+/// The fragment is the point. A browser never sends it to a server and never
+/// puts it in a `Referer`, so the code reaches the web client's page and
+/// nothing on the way. Built from this deployment's configured web origin, its
+/// own tenant URL and the warden's code; `state` is the only value that came in
+/// with the request, and the handler shape-checked it before it got here.
+pub fn web_handoff(
+    web_origin: &str,
+    tenant_url: &str,
+    pair_code: &str,
+    state: &str,
+    analytics_id: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "{web_origin}/connect#url={}&code={}&state={}",
+        percent_encode(tenant_url),
+        percent_encode(pair_code),
+        percent_encode(state)
+    );
+    if let Some(aid) = analytics_id {
+        out.push_str(&format!("&aid={}", percent_encode(aid)));
+    }
+    out
+}
+
 /// Where the client is downloaded from.
 ///
 /// THIS IS WHERE THE DOWNLOAD LIVES NOW. The landing page used to lead with it

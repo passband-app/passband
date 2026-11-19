@@ -258,6 +258,11 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
+        Self::with_web_app(None).await
+    }
+
+    /// The same control plane, with a web client origin configured (or not).
+    async fn with_web_app(web_app_origin: Option<&str>) -> Self {
         let rec = recorder();
         let google = spawn_google(rec.clone()).await;
         let warden_url = spawn_warden(rec.clone()).await;
@@ -283,6 +288,7 @@ impl Harness {
             posthog_url: None,
             // No agent door: `/agent/auth` is not mounted.
             workos: None,
+            web_app_origin: web_app_origin.map(str::to_string),
             // Console auth never touches the LLM gateway; feature off.
             bifrost: None,
             // Nor the waitlist: with it off, those routes are not mounted.
@@ -1035,6 +1041,79 @@ async fn the_console_hop_has_its_own_budget() {
         .await;
     assert_eq!(status, StatusCode::OK, "signup paid for the console flood");
     assert!(body.contains("invite code"), "{body}");
+}
+
+// ---- the web client's return ----------------------------------------------
+
+const WEB_APP: &str = "https://app.passband.test";
+const WEB_STATE: &str = "Zq3-xY_0123456789abcdefghijklmnopqrstuvwx";
+
+/// Walk an app login started with `uri` and return the callback's answer.
+async fn run_app_login_from(h: &Harness, uri: &str) -> (StatusCode, HeaderMap, String) {
+    let (status, headers, body) = h.get(uri, None).await;
+    assert_eq!(status, StatusCode::FOUND, "{body}");
+    let consent = headers[header::LOCATION].to_str().unwrap().to_string();
+    let cookie = headers[header::SET_COOKIE].to_str().unwrap();
+    let cookie = cookie.split(';').next().unwrap().to_string();
+    h.finish_login(&consent, &cookie).await
+}
+
+/// A web sign-in ends at the configured web origin's `/connect`, with the
+/// tenant URL, the code and the web client's own state in the FRAGMENT and
+/// nowhere else: not in a query string, not in a page body.
+#[tokio::test]
+async fn a_web_sign_in_hands_the_code_back_in_the_fragment_only() {
+    let h = Harness::with_web_app(Some(WEB_APP)).await;
+    let (status, headers, body) =
+        run_app_login_from(&h, &format!("/app/auth?return=web&state={WEB_STATE}")).await;
+
+    assert_eq!(status, StatusCode::FOUND, "{body}");
+    let location = headers[header::LOCATION].to_str().unwrap();
+    assert_eq!(
+        location,
+        format!(
+            "{WEB_APP}/connect#url=https%3A%2F%2F{LABEL}.passband.test&code={PAIR_CODE}&state={WEB_STATE}"
+        )
+    );
+    let (before_fragment, _) = location.split_once('#').unwrap();
+    assert!(!before_fragment.contains(PAIR_CODE), "{location}");
+    assert!(!body.contains(PAIR_CODE), "{body}");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store, no-cache");
+    assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+    assert_eq!(h.rec.lock().unwrap().pair_calls, vec![LABEL.to_string()]);
+}
+
+/// The state has to be the web client's shape. Missing, short, long or with a
+/// character outside base64url, and the sign-in is an ordinary native one: the
+/// deep-link page, never a redirect carrying something a caller made up.
+#[tokio::test]
+async fn a_web_sign_in_without_a_good_state_ends_on_the_native_page() {
+    let h = Harness::with_web_app(Some(WEB_APP)).await;
+    for uri in [
+        "/app/auth?return=web".to_string(),
+        "/app/auth?return=web&state=short".to_string(),
+        format!("/app/auth?return=web&state={}", "a".repeat(129)),
+        format!("/app/auth?return=web&state={}%2Fx", &WEB_STATE[..40]),
+        format!("/app/auth?return=elsewhere&state={WEB_STATE}"),
+        format!("/app/auth?state={WEB_STATE}"),
+    ] {
+        let (status, headers, body) = run_app_login_from(&h, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert!(headers.get(header::LOCATION).is_none(), "{uri}");
+        assert!(body.contains("passband://pair?url="), "{uri}");
+    }
+}
+
+/// With no web origin configured there is nowhere a web sign-in may go, so
+/// `return=web` changes nothing.
+#[tokio::test]
+async fn without_a_web_origin_a_web_sign_in_is_a_native_one() {
+    let h = Harness::new().await;
+    let (status, headers, body) =
+        run_app_login_from(&h, &format!("/app/auth?return=web&state={WEB_STATE}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(headers.get(header::LOCATION).is_none());
+    assert!(body.contains("passband://pair?url="), "{body}");
 }
 
 // ---- the app hop ----------------------------------------------------------

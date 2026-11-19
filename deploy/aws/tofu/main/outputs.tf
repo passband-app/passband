@@ -2,11 +2,12 @@
 # bootstrap) need. `tofu output -json` for the lot.
 
 output "acm_validation_records" {
-  description = "CNAMEs to create at the DNS provider BEFORE the full apply can finish (both certificates)."
+  description = "CNAMEs to create at the DNS provider BEFORE the full apply can finish (every certificate)."
   value = {
     for o in concat(
       tolist(aws_acm_certificate.alb.domain_validation_options),
       tolist(aws_acm_certificate.site.domain_validation_options),
+      tolist(aws_acm_certificate.app.domain_validation_options),
       ) : o.domain_name => {
       type  = o.resource_record_type
       name  = o.resource_record_name
@@ -28,6 +29,12 @@ output "service_dns_records" {
       for h in var.site_hosts : h => {
         type  = h == var.site_hosts[0] ? "ALIAS (CNAME flattening) - apex cannot hold a plain CNAME" : "CNAME"
         value = aws_cloudfront_distribution.site.domain_name
+      }
+    },
+    {
+      for h in var.app_hosts : h => {
+        type  = "CNAME"
+        value = aws_cloudfront_distribution.app.domain_name
       }
     },
   )
@@ -68,6 +75,8 @@ output "github_repo_variables" {
     AWS_SITE_BUCKET          = aws_s3_bucket.site.bucket
     AWS_SITE_DISTRIBUTION_ID = aws_cloudfront_distribution.site.id
     AWS_SITE_FUNCTION_NAME   = aws_cloudfront_function.site.name
+    AWS_APP_BUCKET           = aws_s3_bucket.app.bucket
+    AWS_APP_DISTRIBUTION_ID  = aws_cloudfront_distribution.app.id
     AWS_MONITOR_INSTANCE_ID  = aws_instance.monitor.id
   }
 }
@@ -108,6 +117,19 @@ output "site_distribution_id" {
 
 output "site_function_name" {
   value = aws_cloudfront_function.site.name
+}
+
+output "app_bucket" {
+  value = aws_s3_bucket.app.bucket
+}
+
+output "app_distribution_id" {
+  value = aws_cloudfront_distribution.app.id
+}
+
+output "github_deploy_app_role_arn" {
+  description = "For reference only: the workflow derives this from AWS_ACCOUNT_ID (arn:aws:iam::<id>:role/passband-github-deploy-app)."
+  value       = aws_iam_role.github_deploy_app.arn
 }
 
 output "rds_endpoint" {

@@ -45,6 +45,18 @@ use crate::state::ApiState;
 /// secret the bare 401 was keeping: a caller can time it.
 pub const DEVICE_AUTH_CONCURRENCY: usize = 4;
 
+/// Which credential authenticated a request, attached to it as an extension
+/// by [`require_bearer`] for the one handler that needs to know:
+/// [`revoke_self`]. It names a token by its row id, never by its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Credential {
+    /// The self-host master token, which has no row and cannot be revoked
+    /// from a request.
+    Master,
+    /// An issued device token, by id.
+    Device(i64),
+}
+
 /// Whether a presented token authenticates, master first then device tokens.
 ///
 /// `Err` is reserved for the store failing to answer, which is an operator
@@ -59,13 +71,13 @@ async fn authenticates(
     state: &ApiState,
     presented: String,
     client: Option<ClientTag>,
-) -> Result<bool, StatusCode> {
+) -> Result<Option<Credential>, StatusCode> {
     // The master token is a process-local string compare: no store round trip,
     // so the operator's way in survives a store that is misbehaving.
     if let Some(master) = state.master_token()
         && ct_eq(presented.as_bytes(), master.as_bytes())
     {
-        return Ok(true);
+        return Ok(Some(Credential::Master));
     }
 
     // Past this point an unauthenticated guess reaches the store, so the branch
@@ -86,13 +98,13 @@ async fn authenticates(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(verified.is_some())
+    Ok(verified.map(|token| Credential::Device(token.id)))
 }
 
 /// Middleware: require a valid bearer token or return 401.
 pub async fn require_bearer(
     State(state): State<ApiState>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let presented = req
@@ -124,9 +136,10 @@ pub async fn require_bearer(
         .filter(|_| is_client_action(req.method(), req.uri().path()))
         .map(|c| (presented.clone(), c.platform));
 
-    if !authenticates(&state, presented, client).await? {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    let credential = authenticates(&state, presented, client)
+        .await?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    req.extensions_mut().insert(credential);
     let resp = next.run(req).await;
     if let Some((presented, platform)) = acting
         && resp.status().is_success()
@@ -152,6 +165,31 @@ pub async fn require_bearer(
         });
     }
     Ok(resp)
+}
+
+/// `DELETE /client/session` — the device that sent this request signs itself
+/// out: the device token it authenticated with is revoked, and that token gets
+/// a 401 from the next request on. 204 on success.
+///
+/// ONLY ITS OWN TOKEN. The id comes from [`require_bearer`], never from the
+/// request, so there is nothing to name and no other device to reach. The
+/// master token has no row and is not something a request may revoke; it is
+/// refused with 409 and nothing changes.
+pub async fn revoke_self(
+    State(state): State<ApiState>,
+    axum::Extension(credential): axum::Extension<Credential>,
+) -> Result<StatusCode, crate::error::ApiError> {
+    let Credential::Device(id) = credential else {
+        return Err(crate::error::ApiError::new(
+            StatusCode::CONFLICT,
+            "the master token cannot sign itself out",
+        ));
+    };
+    crate::handlers::store_call(&state, move |store, account_id| {
+        store.revoke_own_device_token(account_id, id)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Is this request a person doing something in an app, as far as its method

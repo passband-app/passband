@@ -160,7 +160,7 @@ async fn no_store_layer(mut resp: Response) -> Response {
 /// live finding, and an id that survives is found by the cheap search and
 /// skips the scan. Rows minted as `@passband` keep working: the token is the
 /// local part whatever the host.
-fn mint_message_id() -> Result<String, ApiError> {
+pub(crate) fn mint_message_id() -> Result<String, ApiError> {
     let token = squelch_core::tracking::mint_token()
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
     let bytes = URL_SAFE_NO_PAD

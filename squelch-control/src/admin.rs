@@ -805,6 +805,12 @@ async fn mint_and_send(
         .await
     {
         Ok(()) => {
+            // The personal note rides on the first invite that lands and on no
+            // later one: a re-send is an operator repairing delivery, and a
+            // second "glad you're here" is how the first stops sounding meant.
+            if row.notified_at.is_none() {
+                schedule_note(state, id, &row, &minted.code).await;
+            }
             match state
                 .store()
                 .mark_user_notified(id, invite_id, Utc::now())
@@ -837,6 +843,38 @@ async fn mint_and_send(
             tracing::warn!(id, error = %e, "sending the invite failed");
             Ok(false)
         }
+    }
+}
+
+/// Schedule the personal note for a row whose invite was just accepted, when
+/// this deployment has a note sender. BEST EFFORT: the invite is what lets
+/// somebody in, and a note that does not go out changes nothing about the row,
+/// so a failure here is a log line and never a banner.
+///
+/// PRIVACY: same as [`mint_and_send`]. The id and the error, nothing else.
+async fn schedule_note(state: &ControlState, id: i64, row: &crate::store::UserRow, code: &str) {
+    let Some((resend, waitlist)) = state.waitlist() else {
+        return;
+    };
+    let Some(from) = waitlist.note_from.as_deref() else {
+        return;
+    };
+    let send_at = Utc::now()
+        + chrono::Duration::from_std(crate::config::NOTE_DELAY)
+            .unwrap_or_else(|_| chrono::Duration::minutes(5));
+    match resend
+        .send_note(
+            from,
+            &row.email,
+            row.name.as_deref(),
+            code,
+            &state.config().public_url,
+            send_at,
+        )
+        .await
+    {
+        Ok(()) => tracing::info!(id, "personal note scheduled"),
+        Err(e) => tracing::warn!(id, error = %e, "scheduling the personal note failed"),
     }
 }
 

@@ -261,6 +261,9 @@ fn gmail_method_cost(profile: GmailQuotaProfile, method: &str, path: &str) -> u3
     };
     match (method, path) {
         ("POST", "/messages/send") => 100,
+        // messages.insert: a message filed straight into the mailbox, never
+        // sent (the lapsed-user note).
+        ("POST", "/messages") => 25,
         ("POST", p) if p.ends_with("/trash") => 20,
         // messages.modify, the write door's other verb.
         ("POST", _) => 5,
@@ -289,6 +292,7 @@ mod tests {
             assert_eq!(b.cost("GET", "/labels/INBOX"), 1);
             assert_eq!(b.cost("GET", "/profile"), 1);
             assert_eq!(b.cost("POST", "/messages/send"), 100);
+            assert_eq!(b.cost("POST", "/messages"), 25);
             assert_eq!(b.cost("POST", "/messages/a/modify"), 5);
             assert_eq!(b.cost("POST", "/messages/a/trash"), 20);
         }

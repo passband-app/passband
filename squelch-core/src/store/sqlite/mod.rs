@@ -604,12 +604,14 @@ mod feedback;
 mod ghosts;
 pub mod groups;
 mod imap_locations;
+pub mod lapsed_note;
 pub mod memory;
 mod messages;
 mod migrate;
 mod notify;
 mod outbound;
 pub mod people;
+mod quick_clear;
 pub mod reading_senders;
 pub mod relationships;
 mod renotify;
@@ -658,8 +660,8 @@ use crate::store::{
     MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, PersonNamed,
     PlatformActivity, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics,
     SearchFilter, SearchSort, SenderDigestRow, SenderDomainEntry, SenderEntry, SentMessage,
-    Stage1Applied, Stage2CapOverrides, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf,
-    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    SignInHold, Stage1Applied, Stage2CapOverrides, Stage2Usage, Stage2UsageDay, Store, SyncState,
+    TermDf, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
@@ -1952,6 +1954,10 @@ impl Store for SqliteStore {
 
     fn sealed_messages(&self, account_id: AccountId) -> Result<Vec<SealedMessage>> {
         self.sealed_messages(account_id)
+    }
+
+    fn sign_in_hold(&self, account_id: AccountId, message_id: i64) -> Result<SignInHold> {
+        self.sign_in_hold(account_id, message_id)
     }
 
     fn search(

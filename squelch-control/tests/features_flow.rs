@@ -75,6 +75,7 @@ impl Harness {
                 admin_token: ADMIN_TOKEN.into(),
                 resend_api_key: "re_test_0123456789".into(),
                 invite_from: "Passband <invites@passband.test>".into(),
+                note_from: None,
                 allowed_origin: "https://passband.test".into(),
                 resend_url: "http://127.0.0.1:1".into(),
             }),

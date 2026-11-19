@@ -422,17 +422,27 @@ fn log(outcome: &Result<BriefOutcome, ApiError>) {
 }
 
 /// THE WORKER: a pass at start and every tick, each raced against shutdown.
+///
+/// It also keeps the clock for the lapsed-user note
+/// ([`crate::lapsed_note`]), another once-in-a-while, owner-time piece of
+/// work that needs no loop of its own: the check runs at most every few
+/// hours, whatever the tick.
 pub async fn morning_brief_worker(
     state: ApiState,
     mut shutdown: watch::Receiver<bool>,
     timing: MorningBriefTiming,
 ) {
+    let mut lapsed = crate::lapsed_note::LapsedCheck::default();
     loop {
         if *shutdown.borrow() {
             return;
         }
         tokio::select! {
             outcome = run_brief_pass(&state, Utc::now()) => log(&outcome),
+            _ = shutdown.changed() => return,
+        }
+        tokio::select! {
+            _ = lapsed.tick(&state) => {}
             _ = shutdown.changed() => return,
         }
         tokio::select! {

@@ -581,6 +581,8 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 /* A code that came filled in from the emailed link: out of the way until the
    link under the form targets it. The link goes when the field comes back. */
 .auth .slot.folded:not(:target) {{ display: none; }}
+/* With no username to pick, a folded code leaves the rig empty: no box. */
+.auth .rig:has(> .slot.folded:only-child:not(:target)) {{ display: none; }}
 .auth .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip-path: inset(50%); white-space: nowrap; }}
 .auth main:has(.slot.folded:target) .swap {{ display: none; }}
@@ -755,35 +757,61 @@ pub fn signup_form(
     invite: &str,
     error: Option<&str>,
 ) -> Response {
+    let label = (!label.is_empty()).then_some(label);
     signup_form_with(base_domain, waitlist_url, label, invite, error, false)
 }
 
 /// [`signup_form`], with the Outlook button when this deployment has the
 /// Microsoft app (`outlook`). The two buttons submit the same form; the one
 /// pressed names the company in `provider`.
+///
+/// `label` is `None` on the ordinary form, which asks for no username: one is
+/// made from the mailbox address once the provider says what it is. `Some`
+/// (even empty) shows the field, which only happens after a conflict: a typed
+/// name that was taken, or an address every made-up name was taken for.
 pub fn signup_form_with(
     base_domain: &str,
     waitlist_url: Option<&str>,
-    label: &str,
+    label: Option<&str>,
     invite: &str,
     error: Option<&str>,
     outlook: bool,
 ) -> Response {
     let error_html = stop_note(error);
+    let mailboxes = if outlook { "Gmail or Outlook" } else { "Gmail" };
     // Folded only on the first render of an emailed link: a filled-in code
     // and nothing refused yet. Any re-render after a submit shows the code, so
     // a code somebody typed (or just changed) is never hidden behind an error
     // about something else.
     let folded = !invite.trim().is_empty() && error.is_none();
-    let (invite_class, invite_focus, label_focus) = if folded {
-        ("slot folded", "", " autofocus")
+    let invite_class = if folded { "slot folded" } else { "slot" };
+    let (invite_focus, label_focus) = if folded {
+        ("", " autofocus")
     } else {
-        ("slot", " autofocus", "")
+        (" autofocus", "")
     };
     // The quiet row under the form: the way out for somebody with no code, and
     // the way back to a folded one. The waitlist half is built from the
     // configured origin, which this crate owns, and escaped anyway, because the
     // rule is that nothing is interpolated raw.
+    // THE USERNAME, ONLY AFTER A CONFLICT. Everybody else gets one made from
+    // their address. Password managers read any text field near "username" as
+    // a login form and offer to fill it, so the field opts out of every one.
+    let label_html = label.map_or_else(String::new, |label| {
+        format!(
+            r#"<div class="slot">
+<label for="label">Your Passband username</label>
+<label class="affix"><input type="text" id="label" name="label" value="{label}" placeholder="yourname"
+  aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{NO_PASSWORD_MANAGER}{label_focus} required><span class="domain">.{domain}</span></label>
+<span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
+</div>
+"#,
+            label = escape_html(label),
+            domain = escape_html(base_domain),
+            min = crate::labels::MIN_LABEL_LEN,
+            max = crate::labels::MAX_LABEL_LEN,
+        )
+    });
     let waitlist = waitlist_url.map(|url| {
         format!(
             r#"No invite code? <a href="{url}">Join the waitlist</a>"#,
@@ -808,22 +836,16 @@ pub fn signup_form_with(
         "Set up Passband",
         &format!(
             r#"<h1>Set up Passband</h1>
-<p class="lead">Pick a username, then connect {mailboxes}.</p>
+<p class="lead">{lead}</p>
 {error_html}
 <form class="signup" method="post" action="/signup">
 <div class="rig">
 <div class="{invite_class}" id="code">
 <label for="invite">Invite code</label>
 <input type="text" id="invite" name="invite" value="{invite}" placeholder="XXXX-XXXX-XXXX-XXXX"
-  autocomplete="off" autocapitalize="off" spellcheck="false"{invite_focus} required>
+  autocomplete="off" autocapitalize="off" spellcheck="false"{NO_PASSWORD_MANAGER}{invite_focus} required>
 </div>
-<div class="slot">
-<label for="label">Your Passband username</label>
-<label class="affix"><input type="text" id="label" name="label" value="{label}" placeholder="yourname"
-  aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
-<span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
-</div>
-</div>
+{label_html}</div>
 <div class="rig providers" role="group" aria-labelledby="providers-label">
 <span class="rig-label" id="providers-label">Connect your mail</span>
 <div class="provider-grid">
@@ -843,7 +865,6 @@ pub fn signup_form_with(
 {links_html}"#,
             error_html = error_html,
             links_html = links_html,
-            mailboxes = if outlook { "Gmail or Outlook" } else { "Gmail" },
             gmail_mark = GMAIL_MARK,
             consent_summary = if outlook {
                 "Google or Microsoft will ask to read, change, and send your mail, and for your calendar."
@@ -866,22 +887,36 @@ pub fn signup_form_with(
             },
             invite_class = invite_class,
             invite_focus = invite_focus,
-            label_focus = label_focus,
             invite = escape_html(invite),
-            label = escape_html(label),
-            domain = escape_html(base_domain),
-            min = crate::labels::MIN_LABEL_LEN,
-            max = crate::labels::MAX_LABEL_LEN,
+            label_html = label_html,
+            lead = if label.is_some() {
+                format!("Pick a username, then connect {mailboxes}.")
+            } else {
+                format!("Connect {mailboxes} to set up your inbox.")
+            },
         ),
     )
 }
 
+/// The attributes 1Password, LastPass, Bitwarden and Dashlane each honour to
+/// leave a field alone. `autocomplete="off"` alone is ignored by all of them.
+const NO_PASSWORD_MANAGER: &str =
+    r#" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other""#;
+
 /// The end of the signup flow: the tenant exists and the daemon is running.
 ///
 /// ONE BUTTON, THE DOWNLOAD. Somebody arriving from an invite email has no app
-/// yet, and the app's own onboarding signs in with Gmail and pairs itself
-/// through [`app_signed_in`], so this page carries no deep link and no pairing
-/// code: a second connect path here was a step the app already does.
+/// yet, and the app pairs itself through [`app_signed_in`], so this page
+/// carries no deep link and no pairing code: a second connect path here was a
+/// step the app already does.
+///
+/// "PRESS SIGN IN" IS TRUE EITHER WAY. The handler sets a one-shot handoff
+/// cookie beside this response, and the app's first sign-in from this browser
+/// within two hours offers to continue as this mailbox instead of going back
+/// to Google (see [`crate::cookie::HandoffClaim`]). From another browser, or
+/// later, it is one ordinary Google sign-in, which is what everybody got
+/// before. The copy names the button the app shows and promises nothing about
+/// which of the two follows.
 ///
 /// THE IPHONE IS THE SECOND THING, NOT A SECOND BUTTON. Under the download sits
 /// a quiet block with a QR code for the TestFlight alpha: this page is almost
@@ -897,7 +932,7 @@ pub fn success(tenant_url: &str) -> Response {
         "Your mailbox is ready",
         &format!(
             r#"<h1>Your mailbox is ready</h1>
-<p class="lead">{host} is live. Get the app, then sign in to finish.</p>
+<p class="lead">{host} is live. Get the app and press Sign in.</p>
 <a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>
 <section class="phone" aria-labelledby="phone-label">
 {qr}<div>
@@ -979,6 +1014,32 @@ pub fn app_signed_in(
         response.headers_mut().insert(header::REFRESH, refresh);
     }
     response
+}
+
+/// Where an app login lands right after a signup in the same browser: one
+/// question, "continue as this mailbox?", before anything is minted.
+///
+/// THE PERSON CHOOSES, as Google's account chooser would have had them do. The
+/// mailbox is named (escaped) so somebody who meant another account sees it,
+/// and the quiet link under the button is the ordinary Google sign-in. The
+/// button is a same-origin POST carrying `csrf`, so a page elsewhere can show
+/// this but cannot press it.
+pub fn app_handoff_confirm(mailbox: &str, csrf: &str, other_account_href: &str) -> Response {
+    page(
+        StatusCode::OK,
+        "Continue to Passband",
+        &format!(
+            r#"<h1>Continue as {mailbox}?</h1>
+<p class="lead">You just set up this mailbox in this browser. Continue to connect it to Passband.</p>
+<form method="post" action="/app/handoff"><input type="hidden" name="csrf" value="{csrf}">
+<button type="submit">Continue <span class="arrow" aria-hidden="true">→</span></button>
+</form>
+<p class="alt"><a href="{other}">Use a different account</a></p>"#,
+            mailbox = escape_html(mailbox),
+            csrf = escape_html(csrf),
+            other = escape_html(other_account_href),
+        ),
+    )
 }
 
 /// The reconnect status page, one arm per [`ReconnectView`]. The states the
@@ -1444,7 +1505,7 @@ mod tests {
     /// are named and each says what it is for.
     #[tokio::test]
     async fn the_form_states_all_three_grants_and_the_base_domain() {
-        let html = body_of(signup_form("passband.email", None, "", "", None)).await;
+        let html = body_of(signup_form("passband.email", None, "ada", "", None)).await;
         // One Google permission covers all three, and it is named.
         assert!(html.contains("gmail.modify"));
         assert!(!html.contains("gmail.readonly"), "never asked for any more");
@@ -1483,6 +1544,47 @@ mod tests {
         assert!(!html.contains("<script"), "{html}");
     }
 
+    /// THE ORDINARY FORM ASKS FOR NO USERNAME: one is made from the mailbox
+    /// address. With an emailed code folded away, the form is the buttons, and
+    /// the rig that would only hold the hidden code draws no empty box.
+    #[tokio::test]
+    async fn the_ordinary_form_asks_for_no_username() {
+        let html = document_of(signup_form("passband.email", None, "", "", None)).await;
+        assert!(!html.contains(r#"id="label""#), "{html}");
+        assert!(!html.contains("Pick a username"), "{html}");
+        assert!(
+            html.contains("Connect Gmail to set up your inbox."),
+            "{html}"
+        );
+        let folded = body_of(signup_form(
+            "passband.email",
+            None,
+            "",
+            "ABCD-EFGH-JKMN-PQRS",
+            None,
+        ))
+        .await;
+        assert!(folded.contains(".slot.folded:only-child"), "{folded}");
+        let (_, rig) = folded.split_once(r#"<div class="rig">"#).unwrap();
+        let (rig, _) = rig.split_once("</div>\n</div>").unwrap();
+        assert!(rig.contains(r#"class="slot folded""#), "{rig}");
+        assert!(!rig.contains(r#"id="label""#), "{rig}");
+    }
+
+    /// When the field IS shown (a conflict), password managers are told it is
+    /// not a login: `autocomplete="off"` alone is ignored by every one of them.
+    #[tokio::test]
+    async fn the_username_field_opts_out_of_password_managers() {
+        let html = document_of(signup_form("passband.email", None, "ada", "", None)).await;
+        for field in [r#"id="label""#, r#"id="invite""#] {
+            let (_, tag) = html.split_once(field).expect("{html}");
+            let (tag, _) = tag.split_once('>').unwrap();
+            assert!(tag.contains("data-1p-ignore"), "{tag}");
+            assert!(tag.contains(r#"data-lpignore="true""#), "{tag}");
+            assert!(tag.contains("data-bwignore"), "{tag}");
+        }
+    }
+
     /// The username field carries its domain inside the same box, right after
     /// the input, so the suffix trails what is typed rather than sitting in a
     /// hint underneath it.
@@ -1506,7 +1608,7 @@ mod tests {
     #[tokio::test]
     async fn a_prefilled_invite_is_folded_only_on_arrival() {
         let code = "ABCD-EFGH-JKMN-PQRS";
-        let folded = document_of(signup_form("passband.email", None, "", code, None)).await;
+        let folded = document_of(signup_form("passband.email", None, "ada", code, None)).await;
         assert!(
             folded.contains(r#"class="slot folded" id="code""#),
             "{folded}"
@@ -1598,12 +1700,15 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"));
     }
 
-    /// The signup's last page is the download and nothing else: the app's own
-    /// onboarding signs in and pairs, so no code and no deep link ride here.
+    /// The signup's last page is the download and nothing else: the app pairs
+    /// on the handoff this signup leaves, so no code and no deep link ride
+    /// here, and the page no longer tells anybody a sign-in is still owed.
     #[tokio::test]
     async fn the_success_page_is_the_download_and_nothing_else() {
         let html = document_of(success("https://ada.passband.email")).await;
         assert!(html.contains("ada.passband.email"), "{html}");
+        assert!(html.contains("Get the app and press Sign in."), "{html}");
+        assert!(!html.contains("sign in to finish"), "{html}");
         assert!(
             html.contains(&format!(r#"href="{DOWNLOAD_URL}""#)),
             "{html}"

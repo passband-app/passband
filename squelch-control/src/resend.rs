@@ -42,7 +42,7 @@ const MAX_RECIPIENT_LEN: usize = 254;
 /// What the invite email says in its subject line. Not configurable: it is
 /// product copy, and an operator retyping it per deployment is how a phishing
 /// filter learns two different Passbands.
-const SUBJECT: &str = "Your Passband invite";
+const SUBJECT: &str = "You're off the Passband waitlist";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResendError {
@@ -71,12 +71,28 @@ struct SendRequest<'a> {
     /// An array even for one recipient: that is the shape the API takes.
     to: [&'a str; 1],
     subject: &'a str,
-    /// Both parts are sent. A text part is what a client with no HTML shows,
-    /// and it is also what keeps the message out of the folder a lone HTML part
-    /// tends to land in.
+    /// The invite sends both parts. A text part is what a client with no HTML
+    /// shows, and it is also what keeps the message out of the folder a lone
+    /// HTML part tends to land in. The personal note sends text ALONE, because
+    /// a note from a person that arrives as a branded template reads as a
+    /// newsletter wearing a name.
     text: String,
-    html: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html: Option<String>,
+    /// When Resend should send it, RFC 3339. Unset is now. The delay is held
+    /// by the provider rather than by a timer in this process, so a deploy or
+    /// a restart in the gap cannot drop it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduled_at: Option<String>,
 }
+
+/// What the personal note says in its subject line.
+const NOTE_SUBJECT: &str = "Welcome to Passband!";
+
+/// Ceiling on the first name the note greets. A name is a public form's
+/// field, and this one goes out under a person's own address, so anything that
+/// is not plainly a name is dropped for a bare "Hi,".
+const MAX_GREETING_NAME: usize = 32;
 
 /// The client: one reqwest client, one API key, one sender, one base URL.
 ///
@@ -138,17 +154,55 @@ impl ResendClient {
         if !is_recipient(to) {
             return Err(ResendError::Refused);
         }
+        self.post(&SendRequest {
+            from: &self.from,
+            to: [to],
+            subject: SUBJECT,
+            text: text_body(code, signup_url),
+            html: Some(html_body(code, signup_url)),
+            scheduled_at: None,
+        })
+        .await
+    }
+
+    /// Schedule the personal note: the same one-click link, from a person
+    /// rather than from `invites@`, sent at `send_at` and replied to by a
+    /// human. `from` is the configured note sender, e.g. `Name
+    /// <name@example.com>`.
+    ///
+    /// Same guarantees as [`Self::send_invite`]: `Ok(())` is the provider
+    /// accepting the message (here, accepting it for later), and nothing in
+    /// here logs.
+    pub async fn send_note(
+        &self,
+        from: &str,
+        to: &str,
+        name: Option<&str>,
+        code: &str,
+        signup_url: &str,
+        send_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ResendError> {
+        if !is_recipient(to) {
+            return Err(ResendError::Refused);
+        }
+        self.post(&SendRequest {
+            from,
+            to: [to],
+            subject: NOTE_SUBJECT,
+            text: note_body(name, code, signup_url),
+            html: None,
+            scheduled_at: Some(send_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        })
+        .await
+    }
+
+    /// The one route: `POST /emails`, and the four outcomes it maps onto.
+    async fn post(&self, req: &SendRequest<'_>) -> Result<(), ResendError> {
         let resp = self
             .http
             .post(format!("{}/emails", self.base_url))
             .header(reqwest::header::AUTHORIZATION, &self.auth_header)
-            .json(&SendRequest {
-                from: &self.from,
-                to: [to],
-                subject: SUBJECT,
-                text: text_body(code, signup_url),
-                html: html_body(code, signup_url),
-            })
+            .json(req)
             .send()
             .await
             .map_err(|_| ResendError::Unreachable)?;
@@ -200,17 +254,58 @@ fn invite_link(code: &str, signup_url: &str) -> String {
     )
 }
 
-/// The plain-text part. The code sits on its own line so that every mail client
-/// in the world lets someone select it, because the link above it is the fast
-/// path and not the only one: a client that mangles long URLs, a forwarded
-/// message, and a code typed on a different device all land on the same field.
-fn text_body(code: &str, signup_url: &str) -> String {
+/// The personal note. Text only, short, and in the first person: it is the
+/// one email that is meant to be answered.
+fn note_body(name: Option<&str>, code: &str, signup_url: &str) -> String {
+    let greeting = match name.and_then(greeting_name) {
+        Some(n) => format!("Hi {n},"),
+        None => "Hi,".to_string(),
+    };
     format!(
-        "You're invited to Passband.
+        "{greeting}
 
-Set up your mailbox (your code is already filled in):
+Thanks for joining Passband! I hope you find it as magical as I do.
+
+Here's your invite link again, in case the first email got buried:
 {link}
 
+If anything feels off, confusing, or great, just reply to this email. Would love to hear what you think!
+",
+        link = invite_link(code, signup_url),
+    )
+}
+
+/// The first word of what someone called themselves, if it is plainly a name:
+/// letters, apostrophes and hyphens, bounded. Anything else (a URL, a sentence,
+/// an emoji parade) gets a bare greeting rather than going out under a person's
+/// own address.
+fn greeting_name(name: &str) -> Option<&str> {
+    let first = name.split_whitespace().next()?;
+    let ok = first.chars().count() <= MAX_GREETING_NAME
+        && first.chars().any(char::is_alphabetic)
+        && first
+            .chars()
+            .all(|c| c.is_alphabetic() || c == '\'' || c == '-');
+    ok.then_some(first)
+}
+
+/// The plain-text part. Same order as the HTML: the hook, the link, the
+/// teaser, and the code last as the fallback. The code still sits on its own
+/// line so every mail client in the world lets someone select it: a client that
+/// mangles long URLs, a forwarded message, and a code typed on a different
+/// device all land on the same field.
+fn text_body(code: &str, signup_url: &str) -> String {
+    let teaser: String = TEASER
+        .iter()
+        .map(|(_, line)| format!("- {line}\n"))
+        .collect();
+    format!(
+        "You're off the Passband waitlist. Your inbox is about to get a lot quieter.
+
+Set up your mailbox:
+{link}
+
+{teaser}
 Or enter this code at {signup_url}:
 
 {code}
@@ -225,6 +320,25 @@ Passband is on iPhone too, in alpha on TestFlight:
         testflight = crate::pages::TESTFLIGHT_URL,
     )
 }
+
+/// The teaser: what the recipient is about to get, as (icon, line). Both parts
+/// render this one list, so the text and HTML cannot drift apart. Every line is
+/// a feature that ships today; an invite that oversells is the first thing a
+/// new user catches us in.
+///
+/// The icons are the app's own SF Symbols, rendered to PNG by
+/// `passband-site/tools/email-icons.swift` and served beside [`MARK_URL`] for
+/// the same reason. Their `alt` is empty: the line beside each says it all, so
+/// a blocked image leaves a short gap rather than a stray word.
+const TEASER: [(&str, &str); 4] = [
+    ("email-sitrep", "A sitrep, not a pile"),
+    ("email-box", "Packages, bills and receipts, filed"),
+    ("email-wind", "Unsubscribe that actually works"),
+    ("email-key", "Sign-in codes that come to you"),
+];
+
+/// Where the email's images live. See [`MARK_URL`].
+const ASSET_ORIGIN: &str = "https://passband.app";
 
 /// Where the mark is served from. Hardcoded to the project's own site rather
 /// than derived from the deployment's origin, because that is the only host
@@ -254,6 +368,23 @@ fn html_body(code: &str, signup_url: &str) -> String {
     let link = escape_html(&invite_link(code, signup_url));
     let code = escape_html(code);
     let url = escape_html(signup_url);
+    // Shown without the scheme: the full URL is one unbreakable word that runs
+    // off a phone's screen, and nobody needs "https://" to read where to go.
+    let url_label = escape_html(
+        signup_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/'),
+    );
+    let teaser: String = TEASER
+        .iter()
+        .map(|(icon, line)| {
+            format!(
+                r##"<tr><td width="24" style="padding: 0 14px 14px 0; vertical-align: middle;"><img src="{ASSET_ORIGIN}/{icon}.png" alt="" width="24" height="24" style="display: block; border: 0;"></td><td style="padding: 0 0 14px; vertical-align: middle; color: #E9EEF5;">{}</td></tr>"##,
+                escape_html(line),
+            )
+        })
+        .collect();
     format!(
         r##"<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#090D16" style="background: #090D16;"><tr><td align="left" style="padding: 40px 28px 48px;">
 <div style="max-width: 28rem; font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #A8B4C4;">
@@ -261,15 +392,14 @@ fn html_body(code: &str, signup_url: &str) -> String {
 <td style="padding-right: 10px;"><img src="{mark}" alt="" width="45" height="24" style="display: block; border: 0;"></td>
 <td style="font: 500 22px/1 Newsreader, Georgia, 'Times New Roman', serif; color: #E9EEF5; vertical-align: middle;">Passband</td>
 </tr></table>
-<p style="font: 500 34px/1.08 Newsreader, Georgia, 'Times New Roman', serif; letter-spacing: -0.01em; color: #E9EEF5; margin: 0 0 12px;">You're invited to Passband</p>
-<p style="margin: 0 0 28px;">Pick a username and connect Gmail. Your code is already filled in.</p>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 36px;"><tr><td bgcolor="#121A26" style="background: #121A26; border: 1px solid #1f3656; border-radius: 14px;">
-<a href="{link}" style="display: inline-block; padding: 15px 30px; color: #DFE8F3; font-weight: 600; font-size: 15px; letter-spacing: 0.015em; text-decoration: none;">Set up your mailbox &rarr;</a>
+<p style="font: 500 34px/1.08 Newsreader, Georgia, 'Times New Roman', serif; letter-spacing: -0.01em; color: #E9EEF5; margin: 0 0 12px;">You're off the waitlist</p>
+<p style="margin: 0 0 28px;">Your inbox is about to get a lot quieter.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 40px;"><tr><td bgcolor="#82BAF5" style="background: #82BAF5; border-radius: 14px;">
+<a href="{link}" style="display: inline-block; padding: 16px 34px; color: #090D16; font-weight: 600; font-size: 16px; letter-spacing: 0.01em; text-decoration: none;">Set up your mailbox &rarr;</a>
 </td></tr></table>
-<p style="font-size: 13px; color: #808E9F; margin: 0 0 8px;">Or enter this code at <a href="{url}" style="color: #82BAF5;">{url}</a></p>
-<p style="font: 17px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.04em; color: #E9EEF5; background: #121A26; border: 1px solid #1d2633; border-radius: 10px; padding: 12px 16px; display: inline-block; margin: 0 0 16px;">{code}</p>
-<p style="font-size: 13px; color: #62707F; margin: 0;">Works once, expires in {ttl} days.</p>
-<p style="font-size: 13px; color: #808E9F; margin: 36px 0 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Passband is on iPhone too. <a href="{testflight}" style="color: #82BAF5;">Join the alpha on TestFlight</a></p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 22px; font-size: 15px; line-height: 1.4;">{teaser}</table>
+<p style="font-size: 13px; color: #62707F; margin: 0; padding: 20px 0 0; border-top: 1px solid #1d2633;">Or use code <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #A8B4C4; white-space: nowrap;">{code}</span> at <a href="{url}" style="color: #808E9F;">{url_label}</a>. Works once, expires in {ttl} days.</p>
+<p style="font-size: 13px; color: #808E9F; margin: 12px 0 0;">On iPhone? <a href="{testflight}" style="color: #82BAF5;">Join the TestFlight alpha</a></p>
 </div>
 </td></tr></table>
 "##,
@@ -400,6 +530,10 @@ mod tests {
             );
             // House copy rule.
             assert!(!part.contains('\u{2014}'), "{part}");
+            // The teaser rides in both parts.
+            for (_, line) in TEASER {
+                assert!(part.contains(line), "{part}");
+            }
             // The iPhone alpha, last and quiet.
             assert!(part.contains(crate::pages::TESTFLIGHT_URL), "{part}");
         }
@@ -408,6 +542,76 @@ mod tests {
         assert!(text.contains(&format!("\n\n{CODE}\n\n")), "{text}");
         assert!(!text.contains(&format!("{SIGNUP_URL}?")), "{text}");
         assert!(!html.contains(&format!("{SIGNUP_URL}?")), "{html}");
+    }
+
+    /// Every image the email points at is one passband.app actually serves.
+    /// A rename on either side otherwise ships as a row of broken images, and
+    /// nothing else would notice: the site deploy is green, the send is green.
+    #[test]
+    fn every_email_image_is_routed_on_the_site() {
+        let server = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../passband-site/server.ts"
+        ))
+        .expect("passband-site/server.ts is in the checkout");
+        let mark = MARK_URL.strip_prefix(ASSET_ORIGIN).unwrap();
+        let icons = TEASER.iter().map(|(icon, _)| format!("/{icon}.png"));
+        for path in std::iter::once(mark.to_string()).chain(icons) {
+            assert!(
+                server.contains(&format!("\"{path}\"")),
+                "{path} is not routed"
+            );
+        }
+    }
+
+    /// The note: scheduled, from the person, text only, and greeting only a
+    /// name that is plainly a name.
+    #[tokio::test]
+    async fn schedules_a_plain_text_note_from_a_person() {
+        let rec: Shared = Arc::default();
+        let base = spawn_provider(rec.clone()).await;
+        let at = chrono::DateTime::parse_from_rfc3339("2030-01-02T03:04:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        client(base)
+            .send_note(
+                "Ada Founder <ada@passband.test>",
+                "grace@example.com",
+                Some("Grace Example"),
+                CODE,
+                SIGNUP_URL,
+                at,
+            )
+            .await
+            .unwrap();
+        let r = rec.lock().unwrap();
+        let body = &r.bodies[0];
+        assert_eq!(body["from"], "Ada Founder <ada@passband.test>");
+        assert_eq!(body["subject"], NOTE_SUBJECT);
+        assert_eq!(body["scheduled_at"], "2030-01-02T03:04:05Z");
+        assert!(body.get("html").is_none());
+        let text = body["text"].as_str().unwrap();
+        assert!(text.starts_with("Hi Grace,"), "{text}");
+        assert!(text.contains(&invite_link(CODE, SIGNUP_URL)), "{text}");
+        assert!(!text.contains('\u{2014}'), "{text}");
+    }
+
+    #[test]
+    fn greets_only_what_is_plainly_a_name() {
+        assert_eq!(greeting_name("Grace Example"), Some("Grace"));
+        assert_eq!(greeting_name("  José  "), Some("José"));
+        assert_eq!(greeting_name("Mary-Kate O'Neil"), Some("Mary-Kate"));
+        for bad in [
+            "",
+            "   ",
+            "evil.example",
+            "http://x",
+            "123",
+            &"a".repeat(40),
+        ] {
+            assert_eq!(greeting_name(bad), None, "{bad}");
+        }
+        assert!(note_body(Some("http://x"), CODE, SIGNUP_URL).starts_with("Hi,\n"));
     }
 
     /// Four outcomes, and every one of them says nothing about the key, the

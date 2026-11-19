@@ -56,7 +56,9 @@ pub struct AuthMailRow {
     pub critical: bool,
     /// `messages.auth_pass = 1`: DMARC or an aligned DKIM signature held.
     pub auth_pass: bool,
-    /// When the owner first revealed it through the audited reveal door.
+    /// When the owner first USED it: revealed it through the audited reveal
+    /// door (not from a notification tap), or copied it from the Mac's code
+    /// panel (`POST /client/events/{id}/handled`, audited as `copy_code`).
     pub revealed_at: Option<DateTime<Utc>>,
     /// The owner ruled it "Not me".
     pub not_mine: bool,
@@ -89,6 +91,19 @@ pub fn explainer_window(at: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
 /// For each row, in order, the id of the message that explains it, if any.
 /// The nearest qualifying explanation wins (ties to the lower id).
 pub fn explained_by(rows: &[AuthMailRow]) -> Vec<Option<i64>> {
+    explained(rows, true)
+}
+
+/// [`explained_by`] with only codes and links the owner USED as explainers:
+/// revealed on the Auth page or copied from the Mac's code panel. What the
+/// push hold reads (`docs/AUTH-MAIL-HANDLING.md`, "Held pushes"): a push is
+/// silenced only on proof the owner was at the sign-in, and a receipt is
+/// Google's word, not the owner's click.
+pub fn explained_by_used_code(rows: &[AuthMailRow]) -> Vec<Option<i64>> {
+    explained(rows, false)
+}
+
+fn explained(rows: &[AuthMailRow], receipts: bool) -> Vec<Option<i64>> {
     let services: Vec<Option<String>> = rows.iter().map(|row| service(&row.from_addr)).collect();
     rows.iter()
         .enumerate()
@@ -104,6 +119,7 @@ pub fn explained_by(rows: &[AuthMailRow]) -> Vec<Option<i64>> {
                         && explainer.auth_pass
                         && !explainer.not_mine
                         && (from..=to).contains(&explainer.received_at)
+                        && (receipts || explainer.kind() != Some(AuthKind::SigninReceipt))
                         && vouches(explainer, &services[e], alert, &services[m])
                 })
                 .map(|(_, e)| ((e.received_at - alert.received_at).abs(), e.id))
@@ -111,6 +127,12 @@ pub fn explained_by(rows: &[AuthMailRow]) -> Vec<Option<i64>> {
                 .map(|(_, id)| id)
         })
         .collect()
+}
+
+/// Do these two senders belong to one service, by the pairing's rule? False
+/// when either has no service (relays, freemail, shared hosts).
+pub fn same_service(a: &str, b: &str) -> bool {
+    matches!((service(a), service(b)), (Some(a), Some(b)) if a == b)
 }
 
 /// Does `e` vouch for alert `m` (from `m_service`), by kind and service?
@@ -595,6 +617,32 @@ mod tests {
         );
         assert_eq!(service("localhost"), None);
         assert_eq!(service("x@privaterelay.appleid.com"), None);
+    }
+
+    #[test]
+    fn the_push_hold_counts_only_codes_the_owner_used() {
+        let luma = alert(1, "hello@luma.com", 30);
+        let receipt = google_receipt(2, "Luma", 0);
+        assert_eq!(explains(&[luma.clone(), receipt.clone()]), Some(2));
+        assert_eq!(
+            explained_by_used_code(&[luma.clone(), receipt])[0],
+            None,
+            "a receipt is Google's word, not the owner's click"
+        );
+        let code = used_code(2, "codes@luma.com", 0);
+        assert_eq!(explained_by_used_code(&[luma.clone(), code])[0], Some(2));
+        let unused = row(2, "codes@luma.com", "Your code", 0, &[AuthKind::Otp]);
+        assert_eq!(explained_by_used_code(&[luma, unused])[0], None);
+    }
+
+    #[test]
+    fn same_service_reads_the_registrable_domain() {
+        assert!(same_service(
+            "no-reply@accounts.example.com",
+            "Codes <codes@example.com>"
+        ));
+        assert!(!same_service("a@example.com", "a@example.org"));
+        assert!(!same_service("someone@gmail.com", "else@gmail.com"));
     }
 
     #[test]

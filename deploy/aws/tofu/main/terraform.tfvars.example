@@ -26,6 +26,7 @@ control_client_id   = "000000000000-placeholder.apps.googleusercontent.com"
 # control_microsoft_client_id = "00000000-0000-0000-0000-000000000000"   # Outlook signup, SETUP.md §6a
 control_warden_url  = "https://warden.passband.app"
 control_invite_from = "Passband <invites@passband.app>"
+# control_note_from = "Name <name@example.com>"
 # control_llm_models       = "copy the live value"
 # control_assistant_models = "copy the live value"
 # control_llm_budget_usd       = "5.00"

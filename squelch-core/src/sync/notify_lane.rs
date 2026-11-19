@@ -20,6 +20,12 @@ use crate::types::{AccountId, SenderRule, Sensitivity, Tier};
 
 const DISABLE_AFTER_CONFIG_FAILURE: Duration = Duration::from_secs(600);
 
+/// The longest a sign-in alert's push waits for triage when the owner just
+/// used a code from the same service (`docs/AUTH-MAIL-HANDLING.md`, "Held
+/// pushes"). Triage landing ends the wait sooner: its decision pushes at once
+/// or stays silent. Past this, the alert pushes whatever triage is doing.
+pub const SIGN_IN_HOLD: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct Candidate {
     message_id: i64,
@@ -88,7 +94,7 @@ pub fn candidate(
     cfg: &NotifyConfig,
     known_contact: impl FnOnce(&str) -> bool,
 ) -> Option<Candidate> {
-    if triaged.message.is_sent || triaged.message.is_spam {
+    if triaged.message.is_sent || triaged.message.is_spam || triaged.passband_note {
         return None;
     }
     triaged.notify_eligible_at?;
@@ -118,8 +124,28 @@ pub fn candidate(
 struct Verdict<'a> {
     importance: u8,
     is_auth: bool,
+    /// The push carries a login code: never held, never explained away.
+    has_code: bool,
     one_line: &'a str,
     model_used: &'a str,
+}
+
+/// Whether [`NotifyLane::emit`] may hold a push for [`SIGN_IN_HOLD`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// The fast lane's first look: may hold.
+    May,
+    /// The deliberate lane (triage has ruled) or a hold running out: may not.
+    Never,
+}
+
+/// What [`NotifyLane::emit`] did.
+#[derive(Debug, PartialEq, Eq)]
+enum Emit {
+    Decided,
+    /// Nothing pushed or recorded yet: the caller owes a release after
+    /// [`SIGN_IN_HOLD`].
+    Held,
 }
 
 pub struct NotifyLane<S: Store> {
@@ -133,6 +159,8 @@ pub struct NotifyLane<S: Store> {
     disabled_until: std::sync::Mutex<Option<Instant>>,
     in_flight: std::sync::Mutex<std::collections::HashSet<i64>>,
     warn_days: Arc<std::sync::Mutex<super::WarnDays>>,
+    /// [`SIGN_IN_HOLD`]; a field so a test need not wait it out.
+    sign_in_hold: Duration,
 }
 
 impl<S: Store + 'static> NotifyLane<S> {
@@ -165,6 +193,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             disabled_until: std::sync::Mutex::new(None),
             in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
             warn_days,
+            sign_in_hold: SIGN_IN_HOLD,
         }
     }
 
@@ -215,31 +244,32 @@ impl<S: Store + 'static> NotifyLane<S> {
             eligible_at,
         };
         let now = Utc::now();
-        let one_line = advice
-            .login_code
-            .as_ref()
-            .and_then(|code| {
-                code.notification(
-                    is_auth,
-                    &context.message.from_addr,
-                    &context.message.subject,
-                    &context.message.body,
-                    eligible_at,
-                    now,
-                )
-            })
-            .unwrap_or_else(|| crate::text::truncate_chars(&advice.body, 160));
+        let code_line = advice.login_code.as_ref().and_then(|code| {
+            code.notification(
+                is_auth,
+                &context.message.from_addr,
+                &context.message.subject,
+                &context.message.body,
+                eligible_at,
+                now,
+            )
+        });
+        let has_code = code_line.is_some();
+        let one_line = code_line.unwrap_or_else(|| crate::text::truncate_chars(&advice.body, 160));
         self.emit(
             &row,
             Verdict {
                 importance: advice.importance,
                 is_auth,
+                has_code,
                 one_line: &one_line,
                 model_used: model,
             },
             now,
             LaneLabel::Deliberate,
+            Hold::Never,
         )
+        .map(|_| ())
     }
 
     async fn run_model(
@@ -367,13 +397,12 @@ impl<S: Store + 'static> NotifyLane<S> {
         match outcome {
             Ok(Ok(LlmOutcome::Ok(out, _))) => {
                 let importance = out.notify_importance as u8;
-                let one_line = out
-                    .login_code
-                    .as_ref()
-                    .and_then(|code| {
-                        code.notification(out.is_auth, &m.sender, &subject, &body, eligible_at, now)
-                    })
-                    .unwrap_or_else(|| crate::text::truncate_chars(&out.one_line, 160));
+                let code_line = out.login_code.as_ref().and_then(|code| {
+                    code.notification(out.is_auth, &m.sender, &subject, &body, eligible_at, now)
+                });
+                let has_code = code_line.is_some();
+                let one_line =
+                    code_line.unwrap_or_else(|| crate::text::truncate_chars(&out.one_line, 160));
                 self.store.record_notification_assessment(
                     self.account_id,
                     m.message_id,
@@ -388,17 +417,29 @@ impl<S: Store + 'static> NotifyLane<S> {
                         assessed_at: now,
                     },
                 )?;
-                self.emit(
+                let held = self.emit(
                     &m,
                     Verdict {
                         importance,
                         is_auth: out.is_auth,
+                        has_code,
                         one_line: &one_line,
                         model_used: &self.cfg.model,
                     },
                     now,
                     LaneLabel::Fast,
+                    Hold::May,
                 )?;
+                if held == Emit::Held {
+                    let lane = self.clone();
+                    let is_auth = out.is_auth;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(lane.sign_in_hold).await;
+                        if let Err(error) = lane.release_hold(&m, importance, is_auth, &one_line) {
+                            eprintln!("squelch: held sign-in push release failed: {error}");
+                        }
+                    });
+                }
             }
             Ok(Ok(LlmOutcome::Failed(kind, _))) if llm::is_config_failure(&kind) => {
                 self.disable_for(DISABLE_AFTER_CONFIG_FAILURE);
@@ -437,7 +478,66 @@ impl<S: Store + 'static> NotifyLane<S> {
         Ok(())
     }
 
+    /// The end of a held push: triage may have ruled meanwhile (and pushed
+    /// or stayed silent itself); either way this lane now decides, holding no
+    /// longer. A daemon restart mid-hold loses this, leaving the push to the
+    /// deliberate lane when triage rules.
+    fn release_hold(
+        &self,
+        m: &ModelRow,
+        importance: u8,
+        is_auth: bool,
+        one_line: &str,
+    ) -> crate::Result<()> {
+        let model = self.cfg.model.clone();
+        self.emit(
+            m,
+            Verdict {
+                importance,
+                is_auth,
+                has_code: false,
+                one_line,
+                model_used: &model,
+            },
+            Utc::now(),
+            LaneLabel::Fast,
+            Hold::Never,
+        )
+        .map(|_| ())
+    }
+
     fn emit(
+        &self,
+        m: &ModelRow,
+        v: Verdict<'_>,
+        now: DateTime<Utc>,
+        lane: LaneLabel,
+        hold: Hold,
+    ) -> crate::Result<Emit> {
+        // A sign-in alert the owner explained by using a code stays silent;
+        // one they may be about to explain waits for triage. Codes never wait.
+        if v.is_auth && !v.has_code {
+            match self.store.sign_in_hold(self.account_id, m.message_id)? {
+                crate::store::SignInHold::Explained(_) => {
+                    self.record_for_lane(
+                        lane,
+                        m.message_id,
+                        NotifyDecision::Explained,
+                        Some(v.importance),
+                        Some(v.model_used),
+                        m.eligible_at,
+                        now,
+                    )?;
+                    return Ok(Emit::Decided);
+                }
+                crate::store::SignInHold::Wait if hold == Hold::May => return Ok(Emit::Held),
+                crate::store::SignInHold::Wait | crate::store::SignInHold::Push => {}
+            }
+        }
+        self.emit_now(m, v, now, lane).map(|()| Emit::Decided)
+    }
+
+    fn emit_now(
         &self,
         m: &ModelRow,
         v: Verdict<'_>,
@@ -628,6 +728,7 @@ impl Drop for InFlight<'_> {
     }
 }
 
+#[derive(Clone)]
 struct ModelRow {
     message_id: i64,
     thread_id: String,
@@ -1253,6 +1354,70 @@ mod tests {
             "OpenAI has never heard of `anthropic/claude-haiku-4-5` and answers \
              400, which parks the lane forever"
         );
+    }
+
+    /// THE PUSH HOLD, end to end through the fast lane: an auth arrival with
+    /// no code, from the service whose code the owner just copied, pushes
+    /// nothing and records nothing until the hold runs out with triage still
+    /// silent, then pushes. The same arrival with no copied code pushes at
+    /// once.
+    #[tokio::test]
+    async fn a_sign_in_beside_a_copied_code_waits_for_triage_then_pushes() {
+        let auth_verdict = || {
+            let mut response: serde_json::Value = serde_json::from_str(&verdict(85)).unwrap();
+            let mut assessment: serde_json::Value =
+                serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+            assessment["is_auth"] = serde_json::json!(true);
+            response["content"][0]["text"] = serde_json::json!(assessment.to_string());
+            response.to_string()
+        };
+        for copied in [true, false] {
+            let (store, acct) = store();
+            let now = Utc::now();
+            let earlier = now - chrono::Duration::seconds(40);
+            let (code, _) = ingest(&store, acct, "code", &note_eml(earlier), earlier, &cfg());
+            if copied {
+                store
+                    .append_audit(
+                        acct,
+                        &crate::store::NewAuditEntry {
+                            actor: "human".into(),
+                            action: "copy_code".into(),
+                            target: Some(code.to_string()),
+                            detail: None,
+                        },
+                    )
+                    .unwrap();
+            }
+            let (alert, candidate) = ingest(&store, acct, "alert", &note_eml(now), now, &cfg());
+            let (url, _) = mock(200, auth_verdict(), false).await;
+            let mut lane = lane(&store, acct, Some(&url), cfg());
+            Arc::get_mut(&mut lane).unwrap().sign_in_hold = Duration::from_millis(300);
+            lane.clone().run(candidate.unwrap()).await.unwrap();
+            if copied {
+                assert!(
+                    store.events_after(acct, 0, 10).unwrap().is_empty(),
+                    "held: no push yet"
+                );
+                assert!(ledger(&store, acct, alert).is_none(), "and no decision yet");
+                until("the hold never released", || {
+                    !store.events_after(acct, 0, 10).unwrap().is_empty()
+                })
+                .await;
+            }
+            let events = store.events_after(acct, 0, 10).unwrap();
+            assert_eq!(events.len(), 1, "copied={copied}");
+            assert!(events[0].is_auth);
+            assert_eq!(events[0].message_id, alert);
+            until("the decision was never recorded", || {
+                ledger(&store, acct, alert).is_some()
+            })
+            .await;
+            assert_eq!(
+                ledger(&store, acct, alert).unwrap().decision,
+                NotifyDecision::Sent
+            );
+        }
     }
 
     #[tokio::test]

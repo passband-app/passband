@@ -1,5 +1,6 @@
 import {
   type ReactNode,
+  type RefObject,
   useEffect,
   useMemo,
   useRef,
@@ -10,6 +11,7 @@ import {
 } from "react";
 import { CARRIERS, createScope, markerPoint, type ScopeLayout } from "./scope";
 import { SF_SYMBOLS } from "./sf-symbols";
+import { identify, track } from "./analytics";
 
 // The "before" panel is a procedurally repeated fake inbox: the drudgery
 // Passband exists to kill. Snippets are written long so rows run the full
@@ -147,8 +149,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   transform: translateY(-50%); width: min(30rem, calc(100% - 2 * var(--gutter)));
   display: flex; flex-direction: column; gap: 1.6rem; }
 .pb-beat { display: flex; flex-direction: column; gap: 1rem; }
-.pb-lede { margin: 0; font-family: var(--serif); font-size: clamp(1.55rem, 2.6vw, 2.1rem);
-  line-height: 1.15; color: var(--dim); }
+.pb-lede { margin: 0; font-size: clamp(1.05rem, 1.5vw, 1.2rem); line-height: 1.4; color: var(--dim); }
 .pb-hero { margin: 0; font-family: var(--serif); font-weight: 500;
   font-size: clamp(2.4rem, 4.6vw, 3.4rem); line-height: 1.02; letter-spacing: -0.012em; }
 .pb-sub { margin: 0; font-size: 1rem; line-height: 1.6; color: var(--dim); max-width: 27rem; }
@@ -228,8 +229,6 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-step h3 { margin: 0; font-family: var(--serif); font-weight: 500; font-size: clamp(1.5rem, 2.3vw, 2rem);
   line-height: 1.1; letter-spacing: -0.008em; }
 .pb-step p { margin: 0; color: var(--dim); font-size: 1rem; line-height: 1.6; max-width: 22rem; }
-.pb-step kbd { font: 600 0.78em/1 var(--mono); color: var(--accent-ink); padding: 0.18em 0.5em; border-radius: 99px;
-  box-shadow: inset 0 0 0 1px rgba(78, 155, 234, 0.4); white-space: nowrap; }
 /* THE CLOUDS behind the tours (see Clouds). Wide screens only: a few large,
    soft passband-coloured glows on a stage pinned while the section is on
    screen, faded at the screen's top and bottom so a section's edge never cuts
@@ -322,7 +321,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
    container the points are measured against, so the login code panel can hang
    off the window's bottom edge and still be drawn in the same points. */
 .pb-shot { position: relative; container-type: inline-size; width: var(--shot-w); }
-.pb-app, .pb-code { --pt: calc(100cqw / 1040); }
+.pb-app { --pt: calc(100cqw / 1040); }
 .pb-app { position: relative; display: grid; grid-template-columns: 60pt minmax(0, 1fr);
   grid-template-rows: 40pt minmax(0, 1fr); height: 720pt; font-size: 12pt; color: var(--ink); line-height: 1.25; }
 .pb-app-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 14pt; padding: 0 18pt 0 16pt; }
@@ -350,10 +349,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
   display: block; box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.12); }
 .pb-side .pb-me { object-fit: cover; }
 .pb-page { padding: 0 24pt 0; display: grid; grid-template-columns: minmax(0, 1fr) 306pt;
-  column-gap: 18pt; align-items: start; }
-.pb-dash-hero { grid-column: 1 / -1; padding: 20pt 4pt 34pt; }
+  column-gap: 18pt; align-items: start; align-content: start; }
+.pb-dash-hero { grid-column: 1 / -1; padding: 20pt 4pt 18pt; }
 .pb-dash-hero small { display: block; font-size: 10pt; font-weight: 500; letter-spacing: 0.12em;
-  text-transform: uppercase; color: var(--accent); margin-bottom: 2pt; }
+  text-transform: uppercase; color: var(--accent); margin-bottom: 7pt; }
 .pb-dash-hero b { position: relative; display: inline-block; font-family: var(--serif); font-weight: 500;
   font-size: 38pt; letter-spacing: -0.01em; line-height: 1.08; }
 .pb-col { display: flex; flex-direction: column; gap: 16pt; min-width: 0; }
@@ -364,17 +363,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-zone-h em { font-style: normal; font-size: 11pt; font-weight: 600; color: var(--faint);
   background: rgba(233, 238, 245, 0.08); border-radius: 99pt; padding: 1pt 6pt; }
 .pb-zone-h small { font-size: 10pt; font-weight: 500; color: var(--faintest); }
-/* FLOW MODE, in For your eyes' corner. At rest a pill says what it is; the key slides in when the tour reaches it, the way
-   it does under the pointer in the app. */
+/* FLOW MODE, in For your eyes' corner: a pill that says what it is. */
 .pb-flow { margin-left: auto; display: flex; align-items: center; gap: 5pt;
   padding: 3pt 9pt 3pt 8pt; border-radius: 99pt; background: rgba(78, 155, 234, 0.1);
-  font-size: 10pt; font-weight: 500; color: var(--dim); transition: padding 0.3s ease, background 0.3s ease; }
-.pb-flow kbd { font: 600 9.5pt/1.25 var(--mono); color: var(--accent); border-radius: 99pt;
-  background: rgba(78, 155, 234, 0.2); box-shadow: inset 0 0 0 0.75pt rgba(78, 155, 234, 0.5);
-  max-width: 0; padding: 2pt 0; margin-right: -5pt; opacity: 0; overflow: hidden;
-  transition: max-width 0.3s ease, padding 0.3s ease, margin 0.3s ease, opacity 0.3s ease; }
-.pb-shot[data-focus="flow"] .pb-flow { padding-left: 3pt; background: rgba(78, 155, 234, 0.2); color: var(--ink); }
-.pb-shot[data-focus="flow"] .pb-flow kbd { max-width: 60pt; padding: 2pt 9pt; margin-right: 0; opacity: 1; }
+  font-size: 10pt; font-weight: 500; color: var(--dim); }
 .pb-flow svg { width: 10pt; height: 10pt; color: var(--accent); }
 .pb-eye { position: relative; display: flex; align-items: center; gap: 9pt; padding: 7pt 10pt; border-radius: 9pt;
   margin-top: 1pt; white-space: nowrap; }
@@ -431,108 +423,128 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-ship-top small { font-size: 10pt; font-weight: 500; color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
 .pb-ship .pb-chip.eta { --c: var(--faint); }
 
-/* AUTOMATIC UNSUBSCRIBES, bottom right of the sitrep, where the app stacks
-   them: one finished, one still working through the sender's page. */
-.pb-tray { position: absolute; right: 24pt; bottom: 22pt; display: flex; flex-direction: column;
-  align-items: flex-end; gap: 7pt; opacity: 0; transform: translateY(12pt);
-  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pb-shot[data-focus="unsub"] .pb-tray { opacity: 1; transform: none; }
-.pb-unsub { position: relative; display: flex; align-items: center; gap: 10pt; padding: 9pt 12pt 9pt 10pt;
-  border-radius: 14pt; font-size: 12pt; color: var(--dim); white-space: nowrap;
-  background: #212d3b; box-shadow: inset 0 0 0 0.75pt #33485e, 0 10pt 26pt -8pt rgba(0, 0, 0, 0.6); }
-.pb-unsub.done { background: #1f3733; box-shadow: inset 0 0 0 0.75pt #2f5a49, 0 10pt 26pt -8pt rgba(0, 0, 0, 0.6); }
-.pb-unsub b { color: var(--ink); font-weight: 600; }
-.pb-unsub svg { width: 15pt; height: 15pt; color: var(--positive); }
-.pb-unsub i { width: 13pt; height: 13pt; margin: 1pt; border-radius: 50%; border: 1.5pt solid rgba(233, 238, 245, 0.18);
-  border-top-color: var(--dim); animation: pb-spin 0.9s linear infinite; }
-@keyframes pb-spin { to { transform: rotate(360deg); } }
+/* MAIL ARRIVING. The tour no longer lights features: it follows mail in.
+   Each email that arrives is a card that drops in over the window, is read,
+   and flies to where it belongs, where its row opens up (a grid row going
+   from 0fr to 1fr, so the rows below make room) or its count ticks. Scroll
+   drives every card; nothing runs on a timer. */
+.pb-land { height: 0; overflow: hidden; opacity: 0; }
+.pb-land > div { display: flow-root; }
+.pb-land[data-arrived] > div > *, .pb-read[data-arrived] { animation: pb-landed 1.4s ease-out; }
+@keyframes pb-landed { from { background-color: rgba(78, 155, 234, 0.3); } }
+.pb-side span[data-arrived] { animation: pb-filed 1.2s ease-out; }
+@keyframes pb-filed { from { color: var(--accent); background: rgba(78, 155, 234, 0.3); } }
+[data-count] { transition: color 0.4s ease; }
 
-/* THE LOGIN CODE PANEL. In the app it floats at the top of the screen over
-   whatever you are working in, so here it hangs off the window's top edge:
-   half in the picture, half out, which is the feature. */
-.pb-code { position: absolute; left: 50%; top: -30pt; margin-left: -150pt; z-index: 4; width: 300pt; padding: 14pt;
-  border-radius: 22pt; opacity: 0; transform: translateY(-16pt) scale(0.97); pointer-events: none;
-  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
-  font-size: 12pt; line-height: 1.25; color: var(--ink);
-  background: rgba(38, 34, 68, 0.9); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
-  box-shadow: inset 0 0 0 0.75pt rgba(155, 140, 245, 0.4), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
-    0 0 50pt -14pt rgba(155, 140, 245, 0.45); }
-.pb-shot[data-focus="code"] .pb-code { opacity: 1; transform: none; }
-.pb-code-top { display: flex; align-items: center; gap: 10pt; }
-.pb-code-top .pb-avatar { width: 26pt; height: 26pt; font-size: 11pt; }
-.pb-code-top div { flex: 1; display: flex; flex-direction: column; gap: 1pt; }
-.pb-code-top b { font-size: 13pt; font-weight: 600; }
-.pb-code-top small { display: flex; align-items: center; gap: 4pt; font-size: 10pt; font-weight: 500; color: #9B8CF5; }
-.pb-code-top small svg { width: 10pt; height: 10pt; }
-.pb-code-top > span:last-child { font-size: 10pt; color: var(--faintest); font-variant-numeric: tabular-nums; }
-.pb-code-num { padding: 14pt 0; text-align: center; font: 600 38pt/1.1 var(--mono); letter-spacing: 0.04em; }
-.pb-code-acts { display: flex; align-items: center; gap: 8pt; font-size: 13pt; }
-.pb-code-acts span { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6pt;
-  padding: 8pt 0; border-radius: 11pt; background: var(--accent); color: #fff; font-weight: 600; }
-.pb-code-acts span svg { width: 13pt; height: 13pt; }
-.pb-code-acts em { font-style: normal; font-weight: 500; color: var(--dim); padding: 8pt 14pt; }
-
-/* WHAT THE TOUR DOES TO THE PICTURE. One thing at a time: the rest of the
-   board steps back and the zone the caption is about keeps its light, with
-   an even ring so it reads as picked out rather than selected. */
-.pb-dash-hero, .pb-zone, .pb-rec { transition: opacity 0.45s ease, box-shadow 0.45s ease; }
-.pb-shot[data-focus] :is(.pb-dash-hero, .pb-zone, .pb-rec) { opacity: 0.28; }
-.pb-shot[data-focus="headline"] .pb-dash-hero,
-.pb-shot:is([data-focus="eyes"], [data-focus="flow"]) .pb-zone-eyes,
-.pb-shot[data-focus="smart"] .pb-zone-reading,
-.pb-shot[data-focus="group"] .pb-rec { opacity: 1; }
-.pb-shot:is([data-focus="eyes"], [data-focus="flow"]) .pb-zone-eyes,
-.pb-shot[data-focus="smart"] .pb-zone-reading {
-  box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.75), 0 0 44pt -8pt rgba(78, 155, 234, 0.65); }
-/* The grouping step lights the whole rail, each card in its own hue. */
-.pb-shot[data-focus="group"] .pb-rec {
-  box-shadow: inset 0 0 0 1pt var(--zone), 0 0 36pt -10pt var(--zone); }
-
-/* FLOW MODE, MOVING. The cursor drops down the band and each row leaves as it
-   is dealt with, one after the other and quickly, then the band refills and
-   it goes again. Each row runs the same loop a beat behind the one above. */
-.pb-shot[data-focus="flow"] .pb-eye { animation: pb-walk 4.4s calc(var(--i) * 0.5s) infinite both; }
-.pb-shot[data-focus="flow"] .pb-eye.cursor { background: none; }
-@keyframes pb-walk {
-  0%, 2% { background: rgba(78, 155, 234, 0); opacity: 1; transform: none; }
-  4%, 11% { background: rgba(78, 155, 234, 0.2); opacity: 1; transform: none; }
-  17%, 80% { background: rgba(78, 155, 234, 0); opacity: 0; transform: translateX(22pt); }
-  81% { opacity: 0; transform: translateY(6pt); }
-  90%, 100% { background: rgba(78, 155, 234, 0); opacity: 1; transform: none; }
+/* The cards live on the page, not in the app, at a fixed point size so they
+   read at the caption's scale whatever the window's size. */
+.pb-inmail { --pt: 1.15px; }
+@media (max-width: 900px) { .pb-inmail { --pt: 1px; } }
+.pb-in { position: absolute; left: 0; top: 0; width: min(290pt, 100%); box-sizing: border-box; padding: 11pt 13pt; border-radius: 14pt;
+  font-size: 12pt; line-height: 1.3; color: var(--dim); overflow: hidden;
+  background: color-mix(in srgb, rgba(52, 96, 150, 0.95) calc(var(--m, 0) * 100%), rgba(24, 34, 50, 0.97));
+  box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.4), 0 18pt 44pt -10pt rgba(0, 0, 0, 0.75),
+    0 0 40pt -12pt rgba(78, 155, 234, 0.55);
+  opacity: 0; visibility: hidden; transform-origin: 0 0; }
+/* In flight the shell becomes the row it is about to form (its box, its
+   corners, its padding, tinting toward the blue the row flashes as it
+   lands). The avatar and sender stay, which is what a row is; the rest of
+   the card fades out of it. */
+.pb-in-body { display: flex; flex-direction: column; gap: 6pt; }
+.pb-in-body > :not(.pb-in-top), .pb-in-top small { opacity: var(--fade, 1); }
+.pb-in-body > .pb-in-read { opacity: calc(var(--r, 0) * var(--fade, 1)); }
+.pb-in-body > .pb-in-to { opacity: calc(var(--r, 0) * var(--fade, 1)); }
+.pb-in-top { display: flex; align-items: center; gap: 8pt; transform-origin: 0 0; }
+/* Layers only while moving: a phone has little memory for idle ones. */
+.pb-in[data-flying], .pb-in[data-flying] .pb-in-top { will-change: transform; }
+.pb-in-top .pb-logo { width: 22pt; height: 22pt; }
+.pb-in-top b { flex: 1; min-width: 0; color: var(--ink); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-in-top small { font-size: 10pt; color: var(--faintest); }
+.pb-in-subj { color: var(--ink); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-in-to { align-self: flex-start; display: flex; align-items: center; gap: 5pt; padding: 2pt 9pt 2pt 7pt;
+  border-radius: 99pt; font-size: 10pt; font-weight: 500; color: var(--accent-ink);
+  box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.55);
+  opacity: var(--r, 0); transform: translateY(calc((1 - var(--r, 0)) * 4pt));
+  max-height: calc(var(--r, 0) * 30pt); margin-top: calc((var(--r, 0) - 1) * 6pt); overflow: hidden; }
+.pb-in-to svg { width: 9pt; height: 9pt; }
+/* The first email is read in full: what it asks, by when, what it is about,
+   and the level it reaches against the squelch. */
+/* A thread: bubbles, theirs on the left and yours on the right, each coming
+   up in turn as the card is read (message k shows over the k-th third of
+   the read; the first is there from the start). */
+.pb-in-thread { display: flex; flex-direction: column; gap: 7pt; margin: 6pt 0 4pt; }
+.pb-in-msg { --s: clamp(0, calc(var(--r, 0) * 3 - var(--k) + 1), 1);
+  margin: calc((var(--s) - 1) * 7pt) 0 0; max-width: 74%; padding: calc(var(--s) * 5pt) 10pt;
+  max-height: calc(var(--s) * 40pt); overflow: hidden; opacity: calc(var(--s) * var(--fade, 1));
+  border-radius: 12pt; font-size: 10.5pt; line-height: 1.35; }
+/* The thread's card gets more air than a mail card: a conversation needs
+   room around it to read as one. */
+.pb-in[data-thread] { padding: 14pt 16pt; }
+.pb-in-msg.them { align-self: flex-start; background: rgba(233, 238, 245, 0.09); color: var(--ink);
+  border-bottom-left-radius: 4pt; }
+.pb-in-msg.you { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4pt; }
+[data-theme="light"] .pb-in-msg.them { background: rgba(29, 36, 48, 0.06); }
+.pb-in-to svg { width: 10pt; height: 10pt; }
+.pb-in-read { max-height: calc(var(--r, 0) * 140pt); opacity: var(--r, 0); overflow: hidden;
+  margin-top: calc((var(--r, 0) - 1) * 6pt);
+  display: flex; flex-direction: column; gap: 9pt; }
+.pb-in-read dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4pt 12pt; margin: 6pt 0 0;
+  padding-top: 9pt; border-top: 0.75pt solid var(--hair-strong); }
+.pb-in-read dt { font: 500 9.5pt/1.5 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faintest); }
+.pb-in-read dd { margin: 0; color: var(--ink); }
+.pb-in-meter { position: relative; height: 5pt; margin-top: 12pt; border-radius: 99pt; background: rgba(233, 238, 245, 0.08); }
+.pb-in-meter > i { position: absolute; inset: 0 auto 0 0; width: calc(var(--r, 0) * 84%); border-radius: 99pt;
+  background: linear-gradient(90deg, rgba(78, 155, 234, 0.25), var(--accent)); box-shadow: 0 0 12pt -2pt rgba(78, 155, 234, 0.7); }
+.pb-in-meter > em { position: absolute; left: 62%; top: -12pt; bottom: -3pt; width: 1px; background: var(--ink); opacity: 0.55; }
+.pb-in-meter > em::before { content: "squelch"; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  padding-bottom: 2pt; font: 500 8.5pt/1 var(--mono); font-style: normal; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+/* THE MAIL IN THE CAPTIONS. Each caption carries its email in the page,
+   under the words, so it scrolls with everything else; the run under the
+   last caption is a short stack. Only a card in flight rises above the
+   window (the words and the waiting cards still pass under it on a phone),
+   so a step dims its words, never
+   itself: an opacity on the step would trap its cards beneath the window.
+   The room under the list lets the last card reach the middle of the screen
+   and land before the window lets go. */
+.pb-mailpair .pb-steps { position: relative; padding-bottom: 12svh; }
+.pb-mailpair .pb-step { min-height: 64svh; opacity: 1; justify-content: flex-start; padding-top: 10svh; }
+.pb-mailpair .pb-step > :not(.pb-inmail) { opacity: 0.26; transition: opacity 0.4s ease; }
+.pb-mailpair .pb-step[data-on] > * { opacity: 1; }
+.pb-mailpair .pb-step:last-child { min-height: 0; }
+.pb-inmail { margin-top: 1.4rem; }
+.pb-inrun { display: flex; flex-direction: column; gap: 14px; }
+/* Sized by the driver to the card fully read, and a layout boundary, so a
+   card opening up inside it never reflows the page around it. */
+.pb-inslot { position: relative; contain: layout style; }
+/* THE TALLY. Six dots in a row, empty rings until their email lands; the
+   one that needed you rises above the rest in the accent. Then the sum in
+   two words each. */
+.pb-tally { margin: 0; max-width: 22rem; }
+.pb-tally-dots { display: flex; align-items: flex-end; gap: 0.6rem; height: 4.2rem; }
+.pb-tally-dots span { width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid; place-items: center;
+  font: 600 0.72rem/1 var(--sans); color: transparent; background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--hair-strong);
+  transition: background 0.45s ease, color 0.45s ease, box-shadow 0.45s ease, transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pb-tally-dots span[data-arrived] { background: var(--a); color: var(--f); box-shadow: none; opacity: 0.55; }
+.pb-tally-dots span.you[data-arrived] { opacity: 1; transform: translateY(-1.3rem) scale(1.18);
+  box-shadow: 0 0 0 3px var(--bg), 0 0 0 5px var(--accent), 0 10px 24px -8px rgba(46, 107, 214, 0.55); }
+.pb-tally figcaption { display: flex; gap: 2rem; margin-top: 1rem; }
+.pb-tally figcaption span { display: flex; flex-direction: column; gap: 0.2rem; color: var(--faint); font-size: 0.92rem; }
+.pb-tally figcaption b { font: 500 2.6rem/1 var(--serif); color: var(--ink); }
+.pb-tally figcaption .you, .pb-tally figcaption .you b { color: var(--accent-ink); }
+@media (prefers-reduced-motion: reduce) { .pb-tally-dots span { transition: none; } }
+/* Always above the window: the browser starts a flight on its own scroll
+   thread, before script could raise the card, so a card raised only while
+   flying would leave from underneath the window. At rest no card overlaps
+   it, and a landed card is hidden. */
+.pb-steps .pb-in { position: relative; left: auto; top: auto; visibility: visible; z-index: 5; }
+@media (max-width: 900px) {
+  .pb-mailpair .pb-step { min-height: 56svh; }
 }
-
-/* SMART UNSUBSCRIBE, as a stand-in: the real page is still being designed, so
-   this only says what it is for. The senders you stopped reading get struck. */
-.pb-read { position: relative; }
-.pb-read > * { transition: opacity 0.4s ease; }
-.pb-x { position: absolute; inset: 0; margin: auto; width: 40pt; height: 40pt; color: var(--danger);
-  opacity: 0; transform: scale(0.4) rotate(-12deg);
-  filter: drop-shadow(0 0 8pt rgba(255, 122, 104, 0.55));
-  transition: opacity 0.3s ease, transform 0.45s cubic-bezier(0.3, 1.5, 0.5, 1); }
-.pb-shot[data-focus="smart"] .pb-read:not(.content) > :not(.pb-x) { opacity: 0.3; }
-.pb-shot[data-focus="smart"] .pb-x { opacity: 1; transform: none; transition-delay: calc(0.25s + var(--i) * 0.22s); }
-
-/* YOUR AGENT, off the window's lower corner: it is a different program, so
-   it is drawn as one. What it gets is the sitrep's own answer, not the pile. */
-.pb-agent { --pt: calc(100cqw / 1040); position: absolute; left: 96pt; bottom: -34pt; z-index: 4; width: 430pt;
-  border-radius: 14pt; overflow: hidden; font: 500 11pt/1.5 var(--mono); color: var(--dim);
-  background: rgba(11, 16, 24, 0.94); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
-  box-shadow: inset 0 0 0 0.75pt rgba(130, 186, 245, 0.35), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.8),
-    0 0 50pt -14pt rgba(78, 155, 234, 0.5);
-  opacity: 0; transform: translateY(16pt) scale(0.97); pointer-events: none;
-  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pb-shot[data-focus="mcp"] .pb-agent { opacity: 1; transform: none; }
-.pb-agent-top { display: flex; align-items: center; gap: 8pt; padding: 9pt 14pt; color: var(--faint);
-  border-bottom: 1px solid var(--hair); font-size: 10pt; }
-.pb-agent-top b { color: var(--ink); font-weight: 600; }
-.pb-agent-top i { width: 7pt; height: 7pt; border-radius: 50%; background: var(--positive); }
-.pb-agent-top span { margin-left: auto; }
-.pb-agent-body { padding: 12pt 14pt 14pt; display: grid; grid-template-columns: auto 1fr; gap: 3pt 12pt; }
-.pb-agent-body > p { grid-column: 1 / -1; margin: 0; }
-.pb-agent-body > p:first-child { color: var(--accent-ink); }
-.pb-agent-body b { color: var(--ink); font-weight: 600; }
-.pb-agent-body .late { color: var(--danger); } .pb-agent-body .soon { color: var(--warn); }
-.pb-agent-body > p:last-child { margin-top: 6pt; color: var(--faint); }
+@media (prefers-reduced-motion: reduce) {
+  .pb-in { display: none; }
+  .pb-land[data-arrived] > div > *, .pb-read[data-arrived], .pb-side span[data-arrived] { animation: none; }
+}
 
 /* No phone layout, on purpose: a phone gets the same window at the same
    aspect ratio, just smaller. An accurate picture of the app beats a legible
@@ -560,7 +572,6 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 .pb-fact dd { margin: 0; }
 .pb-fact-val { margin: 1rem 0 0.7rem; font-family: var(--serif); font-weight: 500;
   font-size: clamp(1.9rem, 3.2vw, 2.5rem); line-height: 1; letter-spacing: -0.01em; color: var(--ink); }
-.pb-fact-val em { font-style: normal; color: var(--accent-ink); }
 .pb-fact p { margin: 0; color: var(--dim); font-size: 0.93rem; line-height: 1.6; max-width: 22rem; }
 .pb-fact a { color: var(--accent-ink); text-decoration: none; }
 .pb-fact a:hover { text-decoration: underline; }
@@ -605,11 +616,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 
 @media (prefers-reduced-motion: reduce) {
   .pb-cue { transition-duration: 0.01ms; }
-  .pb-step, .pb-agent, .pb-x, .pb-code, .pb-tray, .pb-dash-hero, .pb-zone, .pb-rec, .pb-flow, .pb-flow kbd { transition: none; }
+  .pb-step, .pb-dash-hero, .pb-zone, .pb-rec { transition: none; }
   .pb-slot .pb-rig { animation: none; }
   .pb-cue::after { animation: none; }
-  .pb-unsub i { animation: none; }
-  .pb-shot[data-focus="flow"] .pb-eye { animation: none; }
 }
 `;
 
@@ -1280,7 +1289,7 @@ function JoinButton({
 }
 
 // The waitlist rig, in the slot the button held, under the first headline.
-function Waitlist({ focus = true }: { focus?: boolean }) {
+function Waitlist({ focus = true, where = "hero" }: { focus?: boolean; where?: "hero" | "join" }) {
   const { chrome, handlers } = useMeter();
   const nameRef = useRef<HTMLInputElement>(null);
   // The button that opened this is gone from under the cursor, so the first
@@ -1300,6 +1309,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
     event.preventDefault();
     if (state === "busy") return;
     setState("busy");
+    track("site_waitlist_submitted", { location: where });
     try {
       const res = await fetch(WAITLIST_URL, {
         method: "POST",
@@ -1312,8 +1322,15 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
         credentials: "omit",
       });
       setState(res.ok ? "done" : "error");
+      if (res.ok) {
+        identify(email, name);
+        track("site_waitlist_joined", { location: where });
+      } else {
+        track("site_waitlist_failed", { location: where, status: res.status });
+      }
     } catch {
       setState("error");
+      track("site_waitlist_failed", { location: where, status: 0 });
     }
   };
 
@@ -1365,6 +1382,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
             value={name}
             disabled={state === "busy"}
             onChange={(event) => setName(event.target.value)}
+            onFocus={() => track("site_waitlist_field_focused", { field: "name", location: where })}
           />
           <span className="pb-field-cap" aria-hidden="true">your name</span>
         </label>
@@ -1377,6 +1395,7 @@ function Waitlist({ focus = true }: { focus?: boolean }) {
               name="email"
               required
               autoComplete="email"
+              onFocus={() => track("site_waitlist_field_focused", { field: "email", location: where })}
               placeholder="you@example.com"
               aria-label="email address"
               value={email}
@@ -1430,16 +1449,22 @@ function Glyph({ name }: { name: GlyphName }) {
   );
 }
 
-function ZoneHead({ glyph, title, count, sub }: {
-  glyph: GlyphName; title: string; count: number; sub?: string;
+function ZoneHead({ glyph, title, count, sub, land }: {
+  glyph: GlyphName; title: string; count: number; sub?: string; land?: string;
 }) {
   return (
     <div className="pb-zone-h">
       <Glyph name={glyph} />
-      {title} <em>{count}</em>
+      {title} <em data-count={land} data-from={land ? count - 1 : undefined}>{count}</em>
       {sub && <small>{sub}</small>}
     </div>
   );
+}
+
+// A row that is not on the board yet: it opens when its email lands in the
+// tour (see Showcase), so the board the tour ends on is the board as drawn.
+function Land({ id, children }: { id: string; children: ReactNode }) {
+  return <div className="pb-land" data-land={id}><div>{children}</div></div>;
 }
 
 // The app's rail: Sitrep, Calendar, Mail and Login codes on the digit keys,
@@ -1449,7 +1474,7 @@ function Rail({ on }: { on: "sitrep" | "calendar" }) {
     <nav className="pb-side" aria-hidden="true">
       <span className={on === "sitrep" ? "on" : undefined}><Glyph name="sitrep" /></span>
       <span className={on === "calendar" ? "on" : undefined}><Glyph name="calendar" /></span>
-      <span><Glyph name="mail" /></span>
+      <span data-ping="filed"><Glyph name="mail" /></span>
       <span><Glyph name="key" /></span>
       <i className="pb-side-gap" />
       <span><Glyph name="ring" /></span>
@@ -1463,10 +1488,19 @@ function Rail({ on }: { on: "sitrep" | "calendar" }) {
 }
 
 // The app's avatar palette, dark halves (Palette.avatarPalette).
-const AVATAR = {
+// The app's own avatar pairs (Lib/SenderIdentity.swift, avatarHex), night
+// and day. THEME is read off the URL before anything renders.
+const AVATAR_NIGHT = {
   blue: ["#24384F", "#A9CBF0"], green: ["#22392E", "#9AD3B6"], rust: ["#442C26", "#EBA894"],
   violet: ["#2F2A4A", "#B8ACF2"], ochre: ["#3E2E1B", "#E2C078"], rose: ["#3E2839", "#E0A6CD"],
 } as const;
+const AVATAR_DAY = {
+  blue: ["#D8E6F8", "#1C4E82"], green: ["#DCE9E1", "#246148"], rust: ["#F3E2DC", "#8E4231"],
+  violet: ["#E6E1F5", "#4C3E9C"], ochre: ["#F5EBD5", "#7E5A16"], rose: ["#EFDEE9", "#83366A"],
+} as const;
+const AVATAR: Record<keyof typeof AVATAR_NIGHT, readonly [string, string]> =
+  typeof location !== "undefined" && new URLSearchParams(location.search).get("theme") === "dark"
+    ? AVATAR_NIGHT : AVATAR_DAY;
 
 // The mail from the "before" panel's scroll, as the sitrep has it: a name, the
 // model's one-line abstraction of what the thread wants, and a chip only where
@@ -1474,11 +1508,11 @@ const AVATAR = {
 // edge, exactly as SitrepView draws it; upcoming is an amber outline.
 const EYES: Array<{
   who: string; initials: string; tone: keyof typeof AVATAR; line: string;
-  chip?: string; overdue?: boolean; clip?: boolean;
+  chip?: string; overdue?: boolean; clip?: boolean; land?: string;
 }> = [
   { who: "Parkline Properties", initials: "PP", tone: "ochre", line: "Your lease renewal still needs a signature before the new rate lapses.", chip: "3d PAST DUE", overdue: true, clip: true },
   { who: "Dr. Ortiz's Office", initials: "DO", tone: "green", line: "Confirm Thursday's 2:30 appointment or call to reschedule.", chip: "due today" },
-  { who: "Jamie Chen", initials: "JC", tone: "blue", line: "Needs your pick between two offsite venues so they can hold the date.", chip: "due Fri" },
+  { who: "Jamie Chen", initials: "JC", tone: "blue", line: "Needs your pick between two offsite venues so they can hold the date.", chip: "due Fri", land: "jamie" },
   { who: "Alex Rivera", initials: "AR", tone: "violet", line: "Replied to your offsite dates: the 14th works for everyone." },
   { who: "Mom", initials: "M", tone: "rose", line: "Sent photos from the weekend." },
 ];
@@ -1579,25 +1613,6 @@ function Logo({ brand }: { brand: Brand }) {
 
 // What the window shows off as the page scrolls past it, in the order the
 // captions arrive. `key` is what the stylesheet switches the picture on.
-const TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
-  { key: "headline", title: "Deep understanding of what matters to you",
-    line: "The sitrep opens on one sentence about your day, written from what Passband has learned you care about." },
-  { key: "eyes", title: "Only what you need to see",
-    line: "A handful of things need you today. Passband finds them, says what each one wants, and files the rest." },
-  { key: "flow", title: "Flow mode",
-    line: <>Press <kbd>space</kbd> and move through what needs you, one email after the next, until the board is clear.</> },
-  { key: "smart", title: "Smart unsubscribe",
-    line: "Passband notices the senders you have stopped reading and offers to cut them loose." },
-  { key: "group", title: "Visual smart grouping",
-    line: "Passband detects the mail that belongs together, like packages, bills, receipts and invitations, and gathers each kind into its own card." },
-  { key: "code", title: "Login codes come to you",
-    line: "A sign-in code floats over the app you are in. Copy it without opening your inbox." },
-  { key: "unsub", title: "Unsubscribe that actually works",
-    line: <>Press <kbd>u</kbd> and agents handle the rest.</> },
-  { key: "mcp", title: "An MCP to superpower your agent",
-    line: "Pre-triaged email passed on to your agent, so you only get the notifications that matter." },
-];
-
 function AppMock() {
   return (
     <div
@@ -1629,16 +1644,15 @@ function AppMock() {
           <section className="pb-zone pb-zone-eyes">
             <div className="pb-zone-h">
               <Glyph name="eye" />
-              For your eyes <em>{EYES.length}</em>
+              For your eyes <em data-count="jamie" data-from={EYES.length - 1}>{EYES.length}</em>
               <span className="pb-flow">
-                <kbd>space</kbd>
                 <Glyph name="wind" />
                 flow mode
               </span>
             </div>
-            {EYES.map(({ who, initials, tone, line, chip, overdue, clip }, i) => {
+            {EYES.map(({ who, initials, tone, line, chip, overdue, clip, land }, i) => {
               const [bg, fg] = AVATAR[tone];
-              return (
+              const row = (
                 <div key={who} className={`pb-eye${overdue ? " overdue" : ""}${i === 0 ? " cursor" : ""}`}
                   style={{ ["--i" as string]: i }}>
                   <span className="pb-avatar" style={{ background: bg, color: fg }}>{initials}</span>
@@ -1655,6 +1669,7 @@ function AppMock() {
                   )}
                 </div>
               );
+              return land ? <Land key={who} id={land}>{row}</Land> : row;
             })}
           </section>
 
@@ -1665,19 +1680,16 @@ function AppMock() {
               <small>newsletters, announcements, and offers</small>
             </div>
             <div className="pb-reading">
-              {READING.map(([brand, sender, count, blurb, content], i) => (
-                <div key={sender} className={`pb-read${content ? " content" : ""}`}>
-                  {!content && (
-                    <svg className="pb-x" viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="5"
-                      strokeLinecap="round" style={{ ["--i" as string]: i - 3 }}>
-                      <path d="M8 8l24 24M32 8 8 32" />
-                    </svg>
-                  )}
+              {READING.map(([brand, sender, count, blurb, content]) => (
+                <div key={sender} className={`pb-read${content ? " content" : ""}`}
+                  data-ping={sender === "Cats Weekly" ? "cats" : undefined}>
                   <Logo brand={brand} />
                   <div className="pb-read-text">
                     <div className="pb-read-top">
                       <b>{sender}</b>
-                      <span>{count} emails</span>
+                      {sender === "Cats Weekly"
+                        ? <span data-count="cats" data-from={count - 1} data-suffix=" emails">{count} emails</span>
+                        : <span>{count} emails</span>}
                     </div>
                     <p>{blurb}</p>
                   </div>
@@ -1689,12 +1701,14 @@ function AppMock() {
 
         <aside className="pb-rail">
           <section className="pb-rec pb-rec-cal">
-            <ZoneHead glyph="calendar" title="Calendar" count={2} />
+            <ZoneHead glyph="calendar" title="Calendar" count={2} land="cal" />
             <div className="pb-rec-row"><b>Dr. Ortiz · checkup</b><span>Thu 2:30 PM</span></div>
-            <div className="pb-rec-row"><b>Team offsite</b><span className="pb-chip">updated</span><span>Oct 14</span></div>
+            <Land id="cal">
+              <div className="pb-rec-row"><b>Team offsite</b><span className="pb-chip">updated</span><span>Oct 14</span></div>
+            </Land>
           </section>
           <section className="pb-rec pb-rec-ship">
-            <ZoneHead glyph="box" title="Shipments" count={2} />
+            <ZoneHead glyph="box" title="Shipments" count={2} land="ship" />
             <div className="pb-ship">
               <div className="pb-ship-top">
                 <Logo brand="exfed" />
@@ -1702,14 +1716,16 @@ function AppMock() {
                 <span className="pb-chip filled" style={{ ["--c" as string]: "var(--warn)" }}>out for delivery</span>
               </div>
             </div>
-            <div className="pb-ship">
-              <div className="pb-ship-top">
-                <Logo brand="rainforest" />
-                <div><b>Linen notebooks, set of 3</b><small>Rainforest · 2 items</small></div>
-                <span className="pb-chip" style={{ ["--c" as string]: "var(--accent)" }}>shipped</span>
+            <Land id="ship">
+              <div className="pb-ship">
+                <div className="pb-ship-top">
+                  <Logo brand="rainforest" />
+                  <div><b>Linen notebooks, set of 3</b><small>Rainforest · 2 items</small></div>
+                  <span className="pb-chip" style={{ ["--c" as string]: "var(--accent)" }}>shipped</span>
+                </div>
+                <span className="pb-chip eta">arrives Sat</span>
               </div>
-              <span className="pb-chip eta">arrives Sat</span>
-            </div>
+            </Land>
           </section>
           <section className="pb-rec pb-rec-bill">
             <ZoneHead glyph="bank" title="Billing" count={2} />
@@ -1717,66 +1733,16 @@ function AppMock() {
             <div className="pb-rec-row"><b>Chase ··4417</b><span className="pb-chip">statement</span></div>
           </section>
           <section className="pb-rec pb-rec-rcpt">
-            <ZoneHead glyph="receipt" title="Receipts" count={3} />
-            <div className="pb-rec-row"><b>Blue Bottle</b><span>$6.50</span></div>
+            <ZoneHead glyph="receipt" title="Receipts" count={3} land="rcpt" />
+            <Land id="rcpt">
+              <div className="pb-rec-row"><b>Blue Bottle</b><span>$6.50</span></div>
+            </Land>
             <div className="pb-rec-row"><b>DoorDash</b><span>$23.18</span></div>
             <div className="pb-rec-row"><b>Berghain Klubnacht</b><span>€25.00</span></div>
           </section>
         </aside>
       </div>
 
-      <div className="pb-tray">
-        <div className="pb-unsub done">
-          <span className="pb-avatar" style={{ background: AVATAR.rust[0], color: AVATAR.rust[1] }}>M</span>
-          <span>Unsubscribed from <b>Marriott Bonvoy</b></span>
-          <Glyph name="done" />
-        </div>
-        <div className="pb-unsub">
-          <span className="pb-avatar" style={{ background: AVATAR.violet[0], color: AVATAR.violet[1] }}>E</span>
-          <span>Unsubscribing from <b>Eventbrite</b></span>
-          <i />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// The floating login code, which in the app sits at the top of the screen
-// over whatever you are working in. A sibling of the window so it can hang
-// off its edge.
-function CodePanel() {
-  return (
-    <div className="pb-code" aria-hidden="true">
-      <div className="pb-code-top">
-        <span className="pb-avatar" style={{ background: AVATAR.blue[0], color: AVATAR.blue[1] }}>N</span>
-        <div>
-          <b>Northwind Bank</b>
-          <small><Glyph name="key" />Login code</small>
-        </div>
-        <span>24s</span>
-      </div>
-      <div className="pb-code-num">482 913</div>
-      <div className="pb-code-acts">
-        <span><Glyph name="copy" />Copy</span>
-        <em>Dismiss</em>
-      </div>
-    </div>
-  );
-}
-
-// What an agent on the Agent MCP door is handed: the same answer the sitrep
-// gives, already triaged. A sibling of the window, like the code panel.
-function AgentPanel() {
-  return (
-    <div className="pb-agent" aria-hidden="true">
-      <div className="pb-agent-top"><i /><b>Claude</b>Agent MCP<span>passband</span></div>
-      <div className="pb-agent-body">
-        <p>get_inbox_updates</p>
-        <p><b>2 need you now</b></p>
-        <span>Parkline Properties</span><span className="late">lease to sign, 3 days past due</span>
-        <span>Dr. Ortiz's Office</span><span className="soon">confirm Thursday 2:30, today</span>
-        <p>4,307 others triaged. Nothing else is worth interrupting you.</p>
-      </div>
     </div>
   );
 }
@@ -1785,9 +1751,15 @@ function AgentPanel() {
 // the reading line (mid-screen, or lower on a phone where the window holds
 // the top) is the one the window shows. Before the first and after the last
 // the window is just the sitrep.
-function useTourFocus() {
+function useTourFocus(tour: "sitrep" | "calendar", titles: string[]) {
   const stepsRef = useRef<HTMLOListElement>(null);
   const [focus, setFocus] = useState(-1);
+  const reached = useRef(new Set<number>());
+  useEffect(() => {
+    if (focus < 0 || reached.current.has(focus)) return;
+    reached.current.add(focus);
+    track("site_tour_step", { tour, step: focus + 1, title: titles[focus] });
+  }, [focus]);
 
   useEffect(() => {
     const list = stepsRef.current;
@@ -1927,11 +1899,432 @@ function Clouds({ kind }: { kind: "mail" | "events" }) {
   );
 }
 
+// THE MAIL THAT ARRIVES DURING THE TOUR, told in the left column at the
+// speed of the wheel: nothing pins, nothing waits for you. The window is the
+// only thing that holds still. The first caption carries Jamie's email, which
+// lives its whole life as it scrolls up the screen: it rises in, is read, and
+// leaves for the window once it passes the middle. The second carries the
+// run, a short stack of emails that each leave the same way, so two or three
+// are in the air at once. `to` is the zone each lands in; the mock has
+// a matching data-land row (or data-ping) and a data-count that ticks.
+type Inbound = {
+  id: string; who: string; subject: string; to: string;
+  face: { brand: Brand } | { initials: string; tone: keyof typeof AVATAR };
+};
+const JAMIE: Inbound = { id: "jamie", who: "Jamie Chen", subject: "Offsite venue: Lisbon or Porto?",
+  to: "For your eyes", face: { initials: "JC", tone: "blue" } };
+const RUN: Inbound[] = [
+  { id: "ship", who: "Rainforest", subject: "Your linen notebooks have shipped", to: "Shipments",
+    face: { brand: "rainforest" } },
+  { id: "cats", who: "Cats Weekly", subject: "Nine boxes, ranked by sit quality", to: "Reading",
+    face: { brand: "cats" } },
+  { id: "filed", who: "Marriott Bonvoy", subject: "Your points summary is ready", to: "Filed",
+    face: { initials: "M", tone: "rust" } },
+  { id: "rcpt", who: "Blue Bottle", subject: "Your receipt from Blue Bottle", to: "Receipts",
+    face: { initials: "BB", tone: "ochre" } },
+  { id: "cal", who: "Alex Rivera", subject: "Offsite: the 14th it is", to: "Calendar",
+    face: { initials: "AR", tone: "violet" } },
+];
+
+const STEPS: Array<{ title: string; line: ReactNode }> = [
+  { title: "New mail comes in",
+    line: "Passband reads it the way you would. Jamie needs a venue picked by Friday, so the email goes to the top of your day." },
+  { title: "The rest sorts itself",
+    line: "A shipping update, a newsletter, a points summary and a receipt come in behind it. Each one goes to its own place instead of landing in front of you." },
+  { title: "What's left is yours",
+    line: "Six emails came in and one needed you. That one is at the top, and the rest are where you'd look for them later." },
+];
+
+// The closing tally, as a picture: one dot per email this morning, filling
+// in as each lands; the one that needed you stands up out of the row.
+const TALLY: Array<[id: string, initials: string, tone: keyof typeof AVATAR_NIGHT]> = [
+  ["ship", "R", "ochre"], ["cats", "CW", "green"], ["jamie", "JC", "blue"],
+  ["filed", "M", "rust"], ["rcpt", "BB", "ochre"], ["cal", "AR", "violet"],
+];
+
+const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+
+// A card rises in, is read, and leaves for its zone. `full` shows the whole
+// read (Jamie's). It opens downward into the step's spare room (steps sit at
+// their top, and are taller than what they hold), so nothing visible moves.
+function InCard({ m, full }: { m: Inbound; full?: boolean }) {
+  return (
+    <div className="pb-in" data-in={m.id} data-full={full || undefined}>
+      <div className="pb-in-body">
+      <div className="pb-in-top">
+        {"brand" in m.face
+          ? <Logo brand={m.face.brand} />
+          : <span className="pb-avatar" style={{ background: AVATAR[m.face.tone][0], color: AVATAR[m.face.tone][1] }}>{m.face.initials}</span>}
+        <b>{m.who}</b>
+        <small>now</small>
+      </div>
+      <div className="pb-in-subj">{m.subject}</div>
+      {full && (
+        <div className="pb-in-read">
+          <dl>
+            <dt>Asks</dt><dd>Pick a venue</dd>
+            <dt>By</dt><dd>Friday</dd>
+            <dt>About</dt><dd>Team offsite</dd>
+          </dl>
+          <div className="pb-in-meter"><i /><em /></div>
+        </div>
+      )}
+      <span className="pb-in-to">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2.5 8h11m0 0L9.5 4m4 4-4 4" />
+        </svg>
+        {m.to}
+      </span>
+      </div>
+    </div>
+  );
+}
+
+// Drives the cards off where each one is on screen. Every card sits in the
+// page and scrolls with it; only a card in flight is moved. d is how far past
+// the reading line the card's middle is, in screen heights.
+//
+// IN STEP WITH THE SCROLL, where the browser can be. Safari scrolls on its own
+// thread (at 120Hz on a ProMotion phone) and hands script the position late
+// and at most 60 times a second, so anything script moves on scroll steps
+// along in chunks against the page. So where scroll timelines exist (Safari
+// 26, Chrome), each card's whole path, rise, flight and morph, is worked out
+// once as keyframes against its slot's ViewTimeline, and the browser plays it
+// against the scroll itself. Script keeps only what is not motion: the read
+// opening, the row opening, colours, counts. Elsewhere script drives it all,
+// the same pose() either way.
+//
+// Within script's share, each frame reads every position first and then
+// writes, and a flight touches nothing but transforms, radius, opacity and
+// colour: the card is scaled (non-uniformly) from its own box to the row's,
+// and its sender line is counter-scaled inside it so the name lands at the
+// row's type size without a reflow. Each card's slot is sized once to the
+// card fully read, so the read opening never moves anything around it.
+type Flier = {
+  id: string; card: HTMLElement; slot: HTMLElement; top: HTMLElement;
+  target: HTMLElement; inner: HTMLElement | null;
+  counts: HTMLElement[]; tally: HTMLElement | null;
+  full: boolean; thread: boolean;
+  w0: number; h0: number; r0: number; pl: number; pt: number; topH: number; type0: number;
+  last: Record<string, string>; landed: boolean;
+  // The flight as the timeline was built: the row's box, so script can keep
+  // the corners in step without measuring anything mid-scroll.
+  plan: { t: { left: number; top: number; width: number }; endH: number; rowR: number; typeEnd: number } | null;
+};
+
+const flightOf = (f: Flier, d: number) =>
+  f.full ? clamp01((d - 0.08) / 0.26) : clamp01((d + 0.04) / 0.24);
+
+// One card at one moment. home is the slot's top left on screen; t the row's
+// box on screen, endH and rowR its height and radius once open.
+function pose(f: Flier, d: number, home: { left: number; top: number },
+  t: { left: number; top: number; width: number }, endH: number, rowR: number, typeEnd: number) {
+  const a = clamp01((d + (f.full ? 0.48 : 0.42)) / 0.18);
+  const fl = flightOf(f, d);
+  const e = ease(fl);
+  const lerp = (x: number, y: number) => x + (y - x) * e;
+  if (fl <= 0) {
+    return {
+      transform: `translate(0px, ${((1 - ease(a)) * 24).toFixed(2)}px) scale(1, 1)`,
+      opacity: a.toFixed(3),
+      borderRadius: `${f.r0}px / ${f.r0}px`,
+      top: "translate(0px, 0px) scale(1, 1)",
+    };
+  }
+  const sx = lerp(f.w0, t.width) / f.w0;
+  const sy = lerp(f.h0, endH) / f.h0;
+  const x = lerp(home.left, t.left) - home.left;
+  const y = lerp(home.top, t.top) - home.top - Math.sin(Math.PI * e) * 40;
+  const R = lerp(f.r0, rowR);
+  const u = lerp(1, typeEnd / f.type0);
+  const tx = lerp(f.pl, 10) / sx - f.pl;
+  const ty = lerp(f.pt, Math.max(0, (endH - f.topH * u) / 2)) / sy - f.pt;
+  return {
+    transform: `translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`,
+    opacity: fl >= 1 ? "0" : (1 - clamp01((fl - 0.86) / 0.14)).toFixed(3),
+    borderRadius: `${(R / sx).toFixed(2)}px / ${(R / sy).toFixed(2)}px`,
+    top: `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${(u / sx).toFixed(4)}, ${(u / sy).toFixed(4)})`,
+  };
+}
+
+// The nearest sticky ancestor: the window holds still in it while the cards fly.
+function stickyOf(el: HTMLElement) {
+  for (let n = el.parentElement; n; n = n.parentElement) {
+    if (getComputedStyle(n).position === "sticky") return n;
+  }
+  return null;
+}
+
+type ViewTimelineCtor = new (o: { subject: Element; axis: "block" }) => AnimationTimeline;
+
+function useArrivals(pairRef: RefObject<HTMLDivElement | null>) {
+  useEffect(() => {
+    const pair = pairRef.current;
+    const shot = pair?.querySelector<HTMLElement>(".pb-shot");
+    if (!pair || !shot) return;
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const VT = (window as unknown as { ViewTimeline?: ViewTimelineCtor }).ViewTimeline;
+
+    const fliers: Flier[] = [];
+    for (const card of Array.from(pair.querySelectorAll<HTMLElement>(".pb-steps .pb-in"))) {
+      const id = card.dataset.in!;
+      const target = shot.querySelector<HTMLElement>(`[data-land="${id}"], [data-ping="${id}"]`);
+      if (!target) continue;
+      fliers.push({
+        id, card, slot: card.parentElement as HTMLElement, top: card.querySelector<HTMLElement>(".pb-in-top")!,
+        target, inner: target.classList.contains("pb-land") ? (target.firstElementChild as HTMLElement) : null,
+        counts: Array.from(shot.querySelectorAll<HTMLElement>(`[data-count="${id}"]`)),
+        tally: pair.querySelector<HTMLElement>(`[data-tally="${id}"]`),
+        full: card.hasAttribute("data-full"), thread: card.hasAttribute("data-thread"),
+        w0: 0, h0: 0, r0: 0, pl: 0, pt: 0, topH: 0, type0: 1, last: {}, landed: false, plan: null,
+      });
+    }
+
+    // Each card's resting metrics and its slot's height, measured with the
+    // card fully read. Batched: every write, then every read, then every
+    // write, so it costs one layout however many cards there are.
+    const measure = () => {
+      for (const f of fliers) {
+        f.slot.style.height = "";
+        f.card.style.setProperty("--r", "1");
+        f.last = {};
+      }
+      for (const f of fliers) {
+        const cs = getComputedStyle(f.card);
+        f.w0 = f.card.offsetWidth;
+        f.h0 = f.card.offsetHeight;
+        f.r0 = parseFloat(cs.borderTopLeftRadius) || 16;
+        f.pl = parseFloat(cs.paddingLeft) || 0;
+        f.pt = parseFloat(cs.paddingTop) || 0;
+        f.topH = f.top.offsetHeight;
+        f.type0 = parseFloat(getComputedStyle(f.slot).getPropertyValue("--pt")) || 1.15;
+      }
+      for (const f of fliers) f.slot.style.height = `${f.h0}px`;
+    };
+
+    // THE SCROLL TIMELINES. Every flight lands while the window is stuck, so
+    // a row's place on screen is the sticky box's resting top plus the row's
+    // offset inside it, measured with the rows that land before it open.
+    // Sampled finely through the flight, coarsely elsewhere, and handed to
+    // the browser against the slot's view timeline (cover: 0 when the slot's
+    // top meets the screen's bottom, 1 when its bottom leaves the top).
+    let anims: Animation[] = [];
+    const build = () => {
+      for (const an of anims) an.cancel();
+      anims = [];
+      const sticky = stickyOf(shot);
+      if (!VT || reduce || !sticky) return false;
+      const vh = vhB;
+      const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
+      const typeEnd = shot.offsetWidth / 1040;
+      const stickyTop = parseFloat(getComputedStyle(sticky).top) || 0;
+      const saved = fliers.map((f) => f.target.style.height);
+      const y0 = scrollY;
+      fliers.forEach((f, k) => {
+        const before = fliers[k - 1];
+        if (before?.inner) before.target.style.height = "auto";
+        const tr = f.target.getBoundingClientRect();
+        const sr = sticky.getBoundingClientRect();
+        const hr = f.slot.getBoundingClientRect();
+        const endH = f.inner ? f.inner.offsetHeight : tr.height;
+        const rowR = f.inner?.firstElementChild
+          ? parseFloat(getComputedStyle(f.inner.firstElementChild as HTMLElement).borderTopLeftRadius) || 0 : 0;
+        const t = { left: tr.left, top: stickyTop + (tr.top - sr.top), width: tr.width };
+        f.plan = { t, endH, rowR, typeEnd };
+        const pageTop = hr.top + y0;
+        const h = hr.height;
+        const start = pageTop - vh;
+        const span = vh + h;
+        // d runs from the rise's start to the flight's end inside this band.
+        const busy = (s: number) => {
+          const d = (line - (pageTop - s + h / 2)) / vh;
+          return d > -0.62 && d < 0.5;
+        };
+        const cardFrames: Keyframe[] = [];
+        const topFrames: Keyframe[] = [];
+        for (let s = start; ; ) {
+          const offset = Math.min(1, (s - start) / span);
+          const homeTop = pageTop - s;
+          const d = (line - (homeTop + h / 2)) / vh;
+          const p = pose(f, d, { left: hr.left, top: homeTop }, t, endH, rowR, typeEnd);
+          // Transform and opacity only: anything else keeps Safari from
+          // running the animation off the main thread.
+          cardFrames.push({ offset, transform: p.transform, opacity: p.opacity });
+          topFrames.push({ offset, transform: p.top });
+          if (offset >= 1) break;
+          s += busy(s) ? 3 : 40;
+        }
+        const thin = (fr: Keyframe[], keys: string[]) => fr.filter((x, i) =>
+          i === 0 || i === fr.length - 1 ||
+          keys.some((k) => x[k] !== fr[i - 1][k]) || keys.some((k) => x[k] !== fr[i + 1][k]));
+        // Anchored to the slot's top meeting the screen's top, in pixels of
+        // scroll, never to the screen's bottom: on a phone the screen's
+        // height changes as the toolbar slides away, and a range tied to it
+        // would shift every flight off its row.
+        const timeline = new VT({ subject: f.slot, axis: "block" });
+        const range = { rangeStart: `exit ${(start - pageTop).toFixed(1)}px`, rangeEnd: `exit ${h.toFixed(1)}px` };
+        anims.push(
+          f.card.animate(thin(cardFrames, ["transform", "opacity"]), { timeline, fill: "both", ...range }),
+          f.top.animate(thin(topFrames, ["transform"]), { timeline, fill: "both", ...range }),
+        );
+      });
+      fliers.forEach((f, k) => {
+        f.target.style.height = saved[k];
+      });
+      return true;
+    };
+    let timelines = false;
+    // The screen height everything is timed against, taken when the flights
+    // are built. A phone's toolbar changes innerHeight mid-scroll; that is
+    // not a reason to retime or rebuild anything.
+    let vhB = innerHeight;
+    let builtW = 0;
+
+    const set = (f: Flier, el: HTMLElement, key: string, prop: string, value: string) => {
+      if (f.last[key] === value) return;
+      f.last[key] = value;
+      if (prop.startsWith("--")) el.style.setProperty(prop, value);
+      else (el.style as unknown as Record<string, string>)[prop] = value;
+    };
+
+    let raf = 0;
+    const frame = () => {
+      raf = 0;
+      const vh = vhB;
+      const line = vh * (innerWidth > 900 ? 0.5 : 0.62);
+      const typeEnd = shot.offsetWidth / 1040;
+
+      // READ everything.
+      const reads = fliers.map((f) => {
+        const home = f.slot.getBoundingClientRect();
+        const d = (line - (home.top + home.height / 2)) / vh;
+        const fl = flightOf(f, d);
+        const flying = !reduce && fl > 0 && fl < 1;
+        const live = flying && !timelines;
+        return {
+          home, d, fl, flying,
+          t: live ? f.target.getBoundingClientRect() : null,
+          rowH: f.inner ? f.inner.offsetHeight : 0,
+          rowR: live && f.inner?.firstElementChild
+            ? parseFloat(getComputedStyle(f.inner.firstElementChild as HTMLElement).borderTopLeftRadius) || 0 : 0,
+        };
+      });
+
+      // WRITE everything.
+      fliers.forEach((f, k) => {
+        const { home, d, fl, flying, t, rowH, rowR } = reads[k];
+        const r = f.thread ? clamp01((d + 0.36) / 0.38)
+          : f.full ? clamp01((d + 0.16) / 0.18) : clamp01((d + 0.2) / 0.14);
+        set(f, f.card, "r", "--r", r.toFixed(3));
+
+        const arrived = fl >= 1;
+        if (arrived !== f.target.hasAttribute("data-arrived")) f.target.toggleAttribute("data-arrived", arrived);
+        if (f.tally && arrived !== f.tally.hasAttribute("data-arrived")) f.tally.toggleAttribute("data-arrived", arrived);
+        if (arrived && !f.landed) {
+          f.landed = true;
+          track("site_mail_landed", { id: f.id });
+        }
+        for (const el of f.counts) {
+          const text = `${Number(el.dataset.from) + (arrived ? 1 : 0)}${el.dataset.suffix ?? ""}`;
+          if (el.textContent !== text) el.textContent = text;
+          const color = arrived ? "var(--accent-ink)" : "";
+          if (el.style.color !== color) el.style.color = color;
+        }
+
+        // The row opens through the second half of the flight, so the card
+        // and the row it becomes finish together.
+        if (f.inner) {
+          const open = reduce ? (arrived ? 1 : 0) : clamp01((fl - 0.45) / 0.55);
+          set(f, f.target, "lh", "height", open >= 1 ? "auto" : `${(open * rowH).toFixed(1)}px`);
+          set(f, f.target, "lo", "opacity", open.toFixed(3));
+        }
+
+        set(f, f.card, "fd", "--fade", flying ? (1 - clamp01((fl - 0.05) / 0.4)).toFixed(3) : "1");
+        set(f, f.card, "m", "--m", flying ? clamp01((fl - 0.4) / 0.6).toFixed(3) : "0");
+        if (timelines) {
+          // The browser moves the card; script only keeps its corners in
+          // step (a frame late costs nothing there).
+          if (f.plan) {
+            const pl = f.plan;
+            set(f, f.card, "br", "borderRadius",
+              pose(f, flying ? d : -1, home, pl.t, pl.endH, pl.rowR, pl.typeEnd).borderRadius);
+          }
+          return;
+        }
+        f.card.toggleAttribute("data-flying", flying);
+
+        // No scroll timelines: script moves the card too.
+        if (reduce) {
+          set(f, f.card, "op", "opacity", arrived ? "0" : "1");
+          return;
+        }
+        // Not in flight: pose()'s resting branch (fl is 0 or 1 here; a landed
+        // card is simply hidden), so no row box is needed.
+        const p = t
+          ? pose(f, d, home, t, f.inner ? rowH : t.height, rowR, typeEnd)
+          : pose(f, arrived ? -1 : d, home, { left: 0, top: 0, width: f.w0 }, 0, 0, typeEnd);
+        set(f, f.card, "tf", "transform", p.transform);
+        set(f, f.card, "op", "opacity", arrived ? "0" : p.opacity);
+        set(f, f.card, "br", "borderRadius", p.borderRadius);
+        set(f, f.top, "tt", "transform", p.top);
+      });
+    };
+    const queue = () => {
+      if (!raf) raf = requestAnimationFrame(frame);
+    };
+    const remeasure = () => {
+      vhB = innerHeight;
+      builtW = innerWidth;
+      measure();
+      timelines = build();
+      queue();
+    };
+    // Only a change of width reflows the cards. A height change is a phone's
+    // toolbar coming or going, which happens as the scroll starts: rebuilding
+    // then is exactly when it would hurt.
+    const onResize = () => (innerWidth !== builtW ? remeasure() : queue());
+    remeasure();
+    frame();
+    document.fonts?.ready.then(remeasure);
+    addEventListener("scroll", queue, { passive: true });
+    addEventListener("resize", onResize);
+    return () => {
+      cancelAnimationFrame(raf);
+      for (const an of anims) an.cancel();
+      removeEventListener("scroll", queue);
+      removeEventListener("resize", onResize);
+    };
+  }, [pairRef]);
+}
+
 function Showcase() {
-  const { stepsRef, focus } = useTourFocus();
+  const { stepsRef, focus } = useTourFocus("sitrep", STEPS.map((x) => x.title));
+  const pairRef = useRef<HTMLDivElement>(null);
+  useArrivals(pairRef);
+
+  // What sits under each caption.
+  const mail = [
+    <div className="pb-inslot"><InCard m={JAMIE} full /></div>,
+    <div className="pb-inrun">
+      {RUN.map((m) => <div key={m.id} className="pb-inslot"><InCard m={m} /></div>)}
+    </div>,
+    <figure className="pb-tally" aria-label="Six emails came in this morning. One needs you.">
+      <div className="pb-tally-dots" aria-hidden="true">
+        {TALLY.map(([id, initials, tone]) => (
+          <span key={id} data-tally={id} className={id === "jamie" ? "you" : undefined}
+            style={{ ["--a" as string]: AVATAR[tone][0], ["--f" as string]: AVATAR[tone][1] }}>{initials}</span>
+        ))}
+      </div>
+      <figcaption>
+        <span><b>6</b>came in</span>
+        <span className="you"><b>1</b>needs you</span>
+      </figcaption>
+    </figure>,
+  ];
 
   return (
-    <div className="pb-pair">
+    <div className="pb-pair pb-mailpair" ref={pairRef}>
       <figure className="pb-panel pb-before">
         <figcaption>
           <b>Before</b> everything, in the order it arrived
@@ -1952,21 +2345,20 @@ function Showcase() {
         </div>
         <figure className="pb-panel pb-after">
           <figcaption><b>After</b> what Passband shows you</figcaption>
-          <div className="pb-shot" data-focus={focus < 0 ? undefined : TOUR[focus].key}>
+          <div className="pb-shot">
             <div className="pb-window">
               <AppMock />
             </div>
-            <CodePanel />
-            <AgentPanel />
           </div>
         </figure>
       </div>
       <ol className="pb-steps" ref={stepsRef}>
-        {TOUR.map(({ key, title, line }, i) => (
-          <li key={key} className="pb-step" data-on={i === focus || undefined}>
+        {STEPS.map(({ title, line }, i) => (
+          <li key={title} className="pb-step" data-on={i === focus || undefined}>
             <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
             <h3>{title}</h3>
             <p>{line}</p>
+            <div className="pb-inmail" aria-hidden="true">{mail[i]}</div>
           </li>
         ))}
       </ol>
@@ -1984,8 +2376,12 @@ function Showcase() {
 // hatched (likely) or folded into "1 unlikely" until opened, as in
 // CalendarMarks.swift. Every name in it is invented.
 const CAL_CSS = `
-.pb-pair.pb-cal .pb-steps { grid-row: 1; padding-top: 8svh; }
-.pb-pair.pb-cal .pb-hold { grid-row: 1; }
+/* Mirrored: the window holds the left and the notes pass on its right, so
+   the second tour does not read as a repeat of the first. */
+.pb-pair.pb-cal { grid-template-columns: auto minmax(0, 1fr); }
+.pb-pair.pb-cal .pb-steps { grid-column: 2; grid-row: 1; padding-top: 8svh; }
+.pb-pair.pb-cal .pb-step { padding: 0 0 0 clamp(1.5rem, 3vw, 3rem); }
+.pb-pair.pb-cal .pb-hold { grid-column: 1; grid-row: 1; }
 .pb-calshot .pb-app-title b { font-family: var(--sans); font-weight: 700; font-size: 17pt; }
 .pb-seg { margin-left: auto; display: flex; padding: 3pt; border-radius: 99pt; background: #1a2535;
   font-size: 12pt; font-weight: 600; color: var(--ink); }
@@ -2011,6 +2407,15 @@ const CAL_CSS = `
 .pb-day > header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4pt 2pt;
   font-size: 11.5pt; font-weight: 500; color: #818c9a; white-space: nowrap; gap: 4pt; }
 .pb-day.out > header { color: #46515d; }
+/* A chip that lands in the tour: no gap of its own until it opens. */
+.pb-day .pb-land { margin-top: -3pt; }
+/* The calendar tour keeps the original pacing: its last step is full height
+   and the list ends with it, so the window lets go while that step is still
+   level with it rather than after it has passed (which would fold the
+   summit away again on screen). */
+.pb-pair.pb-cal.pb-mailpair .pb-steps { padding-bottom: 0; }
+.pb-pair.pb-cal.pb-mailpair .pb-step:last-child { min-height: 64svh; }
+.pb-day .pb-land .pb-ev { margin-top: 3pt; }
 .pb-day.out .pb-ev { filter: brightness(0.7) saturate(0.6); }
 .pb-day > header small { font-size: 9.5pt; color: var(--faintest); transition: color 0.4s ease; }
 .pb-day::after { content: ""; position: absolute; inset: 1pt; border-radius: 9pt; pointer-events: none;
@@ -2080,51 +2485,31 @@ const CAL_CSS = `
 .pb-evkeys kbd { font: 600 9pt/1 var(--mono); padding: 2pt 5pt; margin-right: 4pt; border-radius: 4pt;
   background: #1e2b3d; color: var(--dim); }
 
-/* THE REMINDER, as the iPhone shows it: the system's own banner, dark
-   material, the app icon, title, time, and the line the model wrote. Hung off
-   the window's top right. */
-.pb-remind { --pt: calc(100cqw / 1040); position: absolute; right: 22pt; top: -34pt; z-index: 4; width: 350pt;
-  padding: 12pt 14pt 13pt 12pt; border-radius: 24pt; display: grid; grid-template-columns: 38pt minmax(0, 1fr) auto;
-  column-gap: 11pt; align-items: start; font-family: var(--sans); font-size: 13pt; line-height: 1.28; color: #f5f5f7;
-  background: rgba(46, 46, 50, 0.72); -webkit-backdrop-filter: blur(24px) saturate(1.8); backdrop-filter: blur(24px) saturate(1.8);
-  box-shadow: inset 0 0 0 0.5pt rgba(255, 255, 255, 0.14), 0 24pt 60pt -12pt rgba(0, 0, 0, 0.75),
-    0 0 50pt -14pt rgba(78, 155, 234, 0.45);
-  opacity: 0; transform: translateY(-16pt) scale(0.97); pointer-events: none;
-  transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pb-remind img { grid-row: 1 / span 3; align-self: center; width: 38pt; height: 38pt; border-radius: 9pt; }
-.pb-remind b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pb-remind time { font-size: 11.5pt; color: rgba(235, 235, 245, 0.55); padding-left: 8pt; }
-.pb-remind small { grid-column: 2 / -1; font-size: 13pt; font-weight: 600; }
-.pb-remind p { grid-column: 2 / -1; margin: 0; }
-
 /* WHAT THE TOUR DOES TO THE PICTURE. As on the sitrep: the rest steps back
    and the part the caption is about keeps its light, ringed and glowing. */
 .pb-calshot[data-focus] .pb-ev { opacity: 0.3; }
 .pb-calshot[data-focus] .pb-evsec { opacity: 0.3; }
-.pb-calshot:is([data-focus="plans"], [data-focus="behind"], [data-focus="remind"]) .pb-ev.night,
+.pb-calshot[data-focus="plans"] .pb-ev.night,
 .pb-calshot[data-focus="unlikely"] .pb-ev.summit { opacity: 1; }
-.pb-calshot:is([data-focus="plans"], [data-focus="unlikely"], [data-focus="remind"]) .pb-evsec.top,
-.pb-calshot[data-focus="behind"] .pb-evsec.mail { opacity: 1; }
+.pb-calshot:is([data-focus="plans"], [data-focus="unlikely"]) .pb-evsec.top { opacity: 1; }
 .pb-calshot[data-focus="plans"] .pb-ev.night,
 .pb-calshot[data-focus="unlikely"] .pb-ev.summit {
   box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.9), 0 0 22pt -4pt rgba(78, 155, 234, 0.8); }
-.pb-calshot[data-focus="plans"] .pb-evsec.top,
-.pb-calshot[data-focus="behind"] .pb-behind {
+.pb-calshot[data-focus="plans"] .pb-evsec.top {
   box-shadow: inset 0 0 0 1pt rgba(130, 186, 245, 0.75), 0 0 44pt -8pt rgba(78, 155, 234, 0.65); }
-.pb-calshot[data-focus="behind"] .pb-brow.update { background: rgba(78, 155, 234, 0.2); }
 .pb-calshot[data-focus="unlikely"] .pb-ev.fold { max-height: 19pt; opacity: 1; margin-top: 0; }
 .pb-calshot[data-focus="unlikely"] .pb-day.summitday > header small { color: var(--accent-ink); }
-.pb-calshot[data-focus="remind"] .pb-remind { opacity: 1; transform: none; }
-.pb-calshot[data-focus="remind"] .pb-tickets { box-shadow: 0 0 0 1pt rgba(130, 186, 245, 0.6), 0 0 28pt -4pt rgba(78, 155, 234, 0.9); }
 
 @media (prefers-reduced-motion: reduce) {
-  .pb-ev, .pb-evsec, .pb-remind, .pb-day::after, .pb-tickets, .pb-brow { transition: none; }
+  .pb-ev, .pb-evsec, .pb-day::after, .pb-tickets, .pb-brow { transition: none; }
   .pb-evcard { animation: none; }
 }
 `;
 const CAL_CSS_RESOLVED = CAL_CSS.replace(/(-?\d*\.?\d+)pt\b/g, "calc($1 * var(--pt))");
 
-type Chip = { t?: string; name: string; hue: string; kind?: "maybe" | "likely" | "thin" | "fold"; id?: string };
+type Chip = { t?: string; name: string; hue: string; kind?: "maybe" | "likely" | "thin" | "fold"; id?: string;
+  /** Not on the calendar until its thread lands in the tour (see CalShowcase). */
+  land?: string };
 // November 2026, Sunday first, as the app lays it out: five weeks, the last
 // running into December. Index 0 is Sunday November 1.
 // November 2026, Sunday first, as the app lays it out: five weeks, the last
@@ -2148,7 +2533,7 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
   { label: "15", chips: [] },
   { label: "16", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2pm", name: "1:1 Jamie", hue: "purple" }] },
   { label: "17", chips: [{ t: "10am", name: "Board", hue: "red" }, { t: "3pm", name: "Hiring", hue: "green" }] },
-  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "5pm", name: "Demo", hue: "teal" }] },
+  { label: "18", chips: [{ t: "10am", name: "Design crit", hue: "purple" }, { t: "2pm", name: "Hedge Coffee", hue: "green", land: "coffee" }, { t: "5pm", name: "Demo", hue: "teal" }] },
   { label: "19", chips: [{ t: "9:30", name: "Standup", hue: "purple" }, { t: "2:30pm", name: "Dr. Ortiz", hue: "teal" }] },
   { label: "20", chips: [{ t: "10am", name: "Roadmap", hue: "purple" }, { t: "10pm", name: "Endzeit x Non Series", hue: "purple", kind: "maybe", id: "night" }] },
   { label: "21", chips: [] },
@@ -2168,15 +2553,13 @@ const CAL_DAYS: Array<{ label: string; out?: boolean; unlikely?: number; chips: 
   { label: "Dec 5", out: true, chips: [] },
 ];
 
-const CAL_TOUR: Array<{ key: string; title: string; line: ReactNode }> = [
-  { key: "plans", title: "Your inbox already knows your plans",
-    line: "Invitations, tickets and bookings show up on your calendar as they arrive, with the flyer, the place, and a line on how likely you are to go." },
-  { key: "behind", title: "When plans change, the event keeps up",
-    line: "Every email about an event stays attached to it. A corrected lineup or a new start time lands on the event, not at the bottom of your inbox." },
+// The first step lights nothing: its thread flies in and becomes the event,
+// which is the picture. The second picks out the folded summit.
+const CAL_TOUR: Array<{ key?: string; title: string; line: ReactNode }> = [
+  { title: "Plans made in a reply",
+    line: "You and Maya settled on 2pm Wednesday at Hedge Coffee in a reply. No invite went out, so your calendar app never saw it. Passband put it on Wednesday." },
   { key: "unlikely", title: "Not every invite is a plan",
-    line: "The summit a vendor sent to everyone on its list folds away as unlikely. It is there if you want it, and out of the way if you don't." },
-  { key: "remind", title: "Reminders that know the event",
-    line: "Passband picks the moment, an hour before doors or ten minutes before a call, and says what will help. Tap to see your tickets." },
+    line: "A vendor sent its summit invite to everyone on its list. Passband folds it away as unlikely, and it opens if you're curious." },
 ];
 
 
@@ -2295,12 +2678,15 @@ function CalMock({ focus }: { focus: string | undefined }) {
             <div key={day.label}
               className={`pb-day${day.out ? " out" : ""}${i === selected ? " sel" : ""}${i === 10 ? " summitday" : ""}`}>
               <header>{day.label}{day.unlikely ? <small>{day.unlikely} unlikely</small> : null}</header>
-              {day.chips.map((c) => (
-                <div key={c.name}
-                  className={`pb-ev ${c.hue}${c.kind === "fold" ? " fold thin" : c.kind ? ` ${c.kind}` : ""}${c.id ? ` ${c.id}` : ""}${c.id === "night" && i === selected && focus !== "unlikely" ? " picked" : ""}`}>
-                  {c.t && <span>{c.t}</span>}{c.name}
-                </div>
-              ))}
+              {day.chips.map((c) => {
+                const chip = (
+                  <div key={c.name}
+                    className={`pb-ev ${c.hue}${c.kind === "fold" ? " fold thin" : c.kind ? ` ${c.kind}` : ""}${c.id ? ` ${c.id}` : ""}${c.id === "night" && i === selected && focus !== "unlikely" ? " picked" : ""}`}>
+                    {c.t && <span>{c.t}</span>}{c.name}
+                  </div>
+                );
+                return c.land ? <Land key={c.name} id={c.land}>{chip}</Land> : chip;
+              })}
             </div>
           ))}
         </div>
@@ -2312,23 +2698,55 @@ function CalMock({ focus }: { focus: string | undefined }) {
 
 // The reminder an hour before doors. The line is the kind the
 // reminder model writes: short, no links, no codes.
-function RemindBanner() {
+// The thread under the first step: an ordinary back-and-forth that settles
+// on a time. Its reply comes up as it is read, then the card leaves for
+// Wednesday and becomes the event.
+const COFFEE: Inbound = { id: "coffee", who: "Maya Lin", subject: "Could you do 2p on Wednesday?",
+  to: "Wed 18 · 2:00 PM", face: { initials: "ML", tone: "rose" } };
+
+// The back-and-forth, oldest first. The first line is there when the card
+// arrives; the rest come up one by one as it is read.
+const THREAD: Array<["them" | "you", string]> = [
+  ["them", "Coffee next week? It has been forever."],
+  ["you", "Yes please. When works for you?"],
+  ["them", "Could you do 2p on Wednesday?"],
+  ["you", "Yeah! Let’s do Hedge Coffee."],
+];
+
+function ThreadCard({ m }: { m: Inbound }) {
+  const face = "initials" in m.face ? m.face : null;
   return (
-    <div className="pb-remind" aria-hidden="true">
-      <img src="/icon-180.png" alt="" />
-      <b>Endzeit x Non Series</b>
-      <time>now</time>
-      <small>In 1 hr · Downtown San Francisco</small>
-      <p>Doors at 10. Tap to see your tickets in the Endzeit email.</p>
+    <div className="pb-in" data-in={m.id} data-full data-thread>
+      <div className="pb-in-body">
+        <div className="pb-in-top">
+          {face && <span className="pb-avatar" style={{ background: AVATAR[face.tone][0], color: AVATAR[face.tone][1] }}>{face.initials}</span>}
+          <b>{m.who}</b>
+          <small>Re: coffee?</small>
+        </div>
+        <div className="pb-in-thread">
+          {THREAD.map(([who, line], k) => (
+            <div key={k} className={`pb-in-msg ${who}`} style={{ ["--k" as string]: k }}>{line}</div>
+          ))}
+        </div>
+        <span className="pb-in-to">
+          <Glyph name="calendar" />
+          {m.to}
+        </span>
+      </div>
     </div>
   );
 }
 
 function CalShowcase() {
-  const { stepsRef, focus } = useTourFocus();
-  const key = focus < 0 ? undefined : CAL_TOUR[focus].key;
+  const { stepsRef, focus } = useTourFocus("calendar", CAL_TOUR.map((x) => x.title));
+  const pairRef = useRef<HTMLDivElement>(null);
+  useArrivals(pairRef);
+  // Past the last step the window keeps the last step's picture, so nothing
+  // on it folds back while it scrolls away. Before the first, it is plain.
+  const past = focus < 0 && !!stepsRef.current && stepsRef.current.getBoundingClientRect().bottom < innerHeight / 2;
+  const key = focus >= 0 ? CAL_TOUR[focus].key : past ? CAL_TOUR[CAL_TOUR.length - 1].key : undefined;
   return (
-    <div className="pb-pair pb-cal">
+    <div className="pb-pair pb-cal pb-mailpair" ref={pairRef}>
       <div className="pb-hold">
         <figure className="pb-panel pb-after">
           <figcaption><b>Calendar</b> built from your mail</figcaption>
@@ -2336,22 +2754,212 @@ function CalShowcase() {
             <div className="pb-window">
               <CalMock focus={key} />
             </div>
-            <RemindBanner />
           </div>
         </figure>
       </div>
       <ol className="pb-steps" ref={stepsRef}>
-        {CAL_TOUR.map(({ key, title, line }, i) => (
-          <li key={key} className="pb-step" data-on={i === focus || undefined}>
+        {CAL_TOUR.map(({ title, line }, i) => (
+          <li key={title} className="pb-step" data-on={i === focus || undefined}>
             <i aria-hidden="true">{String(i + 1).padStart(2, "0")}</i>
             <h3>{title}</h3>
             <p>{line}</p>
+            {i === 0 && <div className="pb-inmail" aria-hidden="true"><div className="pb-inslot"><ThreadCard m={COFFEE} /></div></div>}
           </li>
         ))}
       </ol>
     </div>
   );
 }
+
+
+// THE LIGHT PAGE. Warm paper, ink, and one friendly blue: the same page with
+// the instrument taken off it. The analyzer's chrome (graticule, markers,
+// readouts, machined controls) goes; the trace stays as a calm ink line. The
+// app's own window stays dark, because that is the app, and a dark product
+// shot on paper reads as a thing you could have. ?theme=dark shows the night
+// page.
+export const THEME: "light" | "dark" =
+  typeof location !== "undefined" && new URLSearchParams(location.search).get("theme") === "dark" ? "dark" : "light";
+
+const NIGHT_TOKENS = `
+  --bg: #090D16; --canvas: #0E141D; --card: #121A26;
+  --ink: #E9EEF5; --dim: #A8B4C4; --faint: #808E9F; --faintest: #62707F;
+  --hair: rgba(233, 238, 245, 0.08); --hair-strong: rgba(233, 238, 245, 0.14);
+  --accent: #4E9BEA; --accent-ink: #82BAF5;
+  --warn: #E8AC4C; --positive: #4FC08A; --danger: #FF7A68;`;
+
+const LIGHT_CSS = `
+:root[data-theme="light"] {
+  --bg: #FAF7F2; --canvas: #FFFFFF; --card: #FFFFFF;
+  --ink: #1D2430; --dim: #4F5867; --faint: #6F7886; --faintest: #959CA7;
+  --hair: rgba(29, 36, 48, 0.08); --hair-strong: rgba(29, 36, 48, 0.13);
+  --accent: #2E6BD6; --accent-ink: #2A62C4;
+  --warn: #B7791F; --positive: #2F8F5B; --danger: #D24B3A;
+  --shadow: 0 1px 2px rgba(29, 36, 48, 0.06), 0 12px 32px -12px rgba(29, 36, 48, 0.18);
+}
+:root[data-theme="light"] html, html[data-theme="light"] { color-scheme: light; }
+
+/* The app's window carries its own day palette (THE APP, IN DAY, below). */
+[data-theme="light"] .pb-shot { color: var(--ink); }
+
+/* HERO: the instrument's furniture goes, the line stays. */
+[data-theme="light"] :is(.pb-mkr, .pb-mkrs, .pb-read-l, .pb-read-r) { display: none; }
+/* The scrim only quiets the line behind the words; a soft lift of light,
+   never a slab of paper over the sky. */
+[data-theme="light"] .pb-scrim { background:
+  linear-gradient(90deg, rgba(247,244,242,0.9) 0%, rgba(247,244,242,0.8) 28%, rgba(247,244,242,0.3) 44%, rgba(247,244,242,0) 58%); }
+[data-theme="light"] .pb-scrim { -webkit-mask-image: linear-gradient(#000 70%, transparent 90%);
+  mask-image: linear-gradient(#000 70%, transparent 90%); }
+@media (max-width: 820px) {
+  [data-theme="light"] .pb-scrim { background:
+    linear-gradient(180deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0.3) 26%, rgba(255,255,255,0) 36%); }
+}
+[data-theme="light"] .pb-brand img { filter: none; }
+
+/* THE BUTTON: one solid, friendly pill. No meter, no filament. */
+[data-theme="light"] .pb-cta { color: #fff; background: var(--ink); border: 0; border-radius: 999px;
+  padding: 0.95rem 1.7rem; box-shadow: 0 1px 2px rgba(29,36,48,0.12), 0 10px 24px -10px rgba(29,36,48,0.45); }
+[data-theme="light"] .pb-cta:hover, [data-theme="light"] .pb-cta:focus-visible { color: #fff; background: #2B3444;
+  box-shadow: 0 1px 2px rgba(29,36,48,0.12), 0 14px 30px -10px rgba(29,36,48,0.5); }
+[data-theme="light"] :is(.pb-cta, .pb-rig)::before, [data-theme="light"] .pb-cta-meter { display: none; }
+[data-theme="light"] .pb-cta[disabled] { color: rgba(255,255,255,0.7); }
+[data-theme="light"] .pb-cta[disabled]:hover { box-shadow: none; }
+/* The form: a white card with two fields and the same button. */
+[data-theme="light"] .pb-rig { background: #fff; border: 1px solid var(--hair-strong); border-radius: 16px;
+  box-shadow: var(--shadow); }
+[data-theme="light"] .pb-rig:hover, [data-theme="light"] .pb-rig:focus-within { border-color: rgba(46,107,214,0.45);
+  box-shadow: 0 0 0 4px rgba(46,107,214,0.1), var(--shadow); }
+[data-theme="light"] .pb-rig-name { border-bottom-color: var(--hair-strong); }
+[data-theme="light"] .pb-rig-field { color: var(--ink); }
+[data-theme="light"] .pb-rig-field::placeholder, [data-theme="light"] .pb-field-cap { color: var(--faintest); }
+[data-theme="light"] .pb-rig-field:is(:not(:placeholder-shown), :-webkit-autofill) + .pb-field-cap { color: var(--faint); }
+[data-theme="light"] .pb-rig-field:focus + .pb-field-cap { color: var(--accent); }
+[data-theme="light"] .pb-rig-field:-webkit-autofill { -webkit-text-fill-color: var(--ink); caret-color: var(--ink);
+  box-shadow: inset 0 0 0 100vw #fff; }
+[data-theme="light"] .pb-cta-in-rig { margin: 0.45rem; padding: 0.8rem 1.3rem; border-radius: 999px; border: 0; }
+[data-theme="light"] .pb-cta-in-rig:hover, [data-theme="light"] .pb-cta-in-rig:focus-visible { box-shadow: none; }
+
+/* THE TOUR. No step numbers; the windows sit on paper like photographs. */
+[data-theme="light"] .pb-step > i { display: none; }
+[data-theme="light"] .pb-window { border-color: rgba(29,36,48,0.1);
+  box-shadow: 0 2px 4px rgba(29,36,48,0.05), 0 30px 70px -28px rgba(29,36,48,0.4); }
+[data-theme="light"] .pb-after .pb-window { border-color: rgba(29,36,48,0.14);
+  box-shadow: 0 2px 4px rgba(29,36,48,0.06), 0 40px 90px -30px rgba(29,36,48,0.5); }
+[data-theme="light"] .pb-before .pb-window { filter: none; background: #fff; }
+[data-theme="light"] .pb-row { border-bottom-color: var(--hair); }
+[data-theme="light"] .pb-row-sender { color: var(--dim); }
+[data-theme="light"] .pb-unread { background: rgba(210, 75, 58, 0.1); color: var(--danger); }
+[data-theme="light"] .pb-panel figcaption b { color: var(--faint); }
+[data-theme="light"] .pb-after figcaption b { color: var(--accent); }
+[data-theme="light"] .pb-gate::before { background: linear-gradient(transparent, rgba(29,36,48,0.18) 25%, rgba(29,36,48,0.18) 75%, transparent);
+  box-shadow: none; }
+[data-theme="light"] .pb-gate span { background: #fff; color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--hair-strong), var(--shadow); }
+@media (max-width: 900px) {
+  [data-theme="light"] .pb-after { background: linear-gradient(var(--bg) 86%, rgba(250,247,242,0)); }
+  [data-theme="light"] .pb-gate::before { background: linear-gradient(90deg, transparent, rgba(29,36,48,0.18) 25%, rgba(29,36,48,0.18) 75%, transparent); }
+}
+/* The arriving mail: white cards, like a notification, darkening into the
+   app's row as they land. */
+[data-theme="light"] .pb-in { color: var(--dim);
+  background: color-mix(in srgb, rgba(52, 96, 150, 0.95) calc(var(--m, 0) * 100%), #ffffff);
+  box-shadow: inset 0 0 0 1px rgba(29,36,48,0.08), 0 1px 2px rgba(29,36,48,0.06), 0 16px 36px -14px rgba(29,36,48,0.28); }
+/* The name stays ink until the ground has darkened enough to carry it, then
+   flips light over the last stretch, so it never goes pale on pale. */
+[data-theme="light"] .pb-in-top b { color: color-mix(in srgb, #F4F7FB calc(clamp(0, (var(--m, 0) - 0.55) * 4, 1) * 100%), var(--ink)); }
+[data-theme="light"] .pb-in-subj, [data-theme="light"] .pb-in-read dd { color: var(--ink); }
+[data-theme="light"] .pb-in-to { box-shadow: inset 0 0 0 1px rgba(46,107,214,0.35); color: var(--accent); }
+[data-theme="light"] .pb-in-meter { background: rgba(29,36,48,0.08); }
+[data-theme="light"] .pb-in-meter > i { box-shadow: none; background: linear-gradient(90deg, rgba(46,107,214,0.35), var(--accent)); }
+[data-theme="light"] :is(.pb-in-read dt, .pb-in-meter > em::before) { font-family: var(--sans); letter-spacing: 0.02em; }
+/* The tally and the trust row: plain cards, sans labels. */
+[data-theme="light"] .pb-facts { background: #fff; border-color: var(--hair-strong); box-shadow: var(--shadow); }
+[data-theme="light"] .pb-facts::before { display: none; }
+[data-theme="light"] .pb-fact { border-color: var(--hair); }
+[data-theme="light"] .pb-fact dt { font-family: var(--sans); font-size: 0.78rem;
+  letter-spacing: 0.01em; text-transform: none; }
+[data-theme="light"] .pb-fact dt b { display: none; }
+[data-theme="light"] .pb-fact a { color: var(--accent); }
+
+
+
+/* THE APP, IN DAY. Every value from the client's own code: Palette.swift's
+   light inks, hairlines and accent; Glass.swift's light canvas (a pale sky,
+   E6EFFC to D5E5F8, under the brand wash); zone panes are the material at a
+   12% tint of the zone's colour; calendar chips are CalendarColor.swift's
+   light tones for each hue (OKLab, L .885 / .43 / .60). */
+[data-theme="light"] .pb-shot {
+  --bg: #EDF3FA; --canvas: #EDF3FA; --card: #FFFFFF;
+  --ink: #141C26; --dim: #455465; --faint: #6B7A8B; --faintest: #94A2B2;
+  --hair: rgba(30, 50, 70, 0.12); --hair-strong: rgba(30, 50, 70, 0.2);
+  --accent: #2B7FD4; --accent-ink: #1C63AE;
+  --warn: #B5761A; --positive: #1F7A4D; --danger: #D6412F; }
+[data-theme="light"] .pb-after .pb-window { background: linear-gradient(#E3EDFA, #D3E3F7); border-color: rgba(30, 50, 70, 0.14); }
+[data-theme="light"] .pb-side { background: rgba(255, 255, 255, 0.45); border-right-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-side span { color: #6B7A8B; }
+[data-theme="light"] .pb-side span.on { background: rgba(43, 127, 212, 0.16); color: #2B7FD4; }
+[data-theme="light"] .pb-me { box-shadow: inset 0 0 0 0.5pt rgba(30, 50, 70, 0.15); }
+[data-theme="light"] .pb-zone { background: rgba(255, 255, 255, 0.72); box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1),
+  0 1pt 2pt rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-zone-h em { background: rgba(30, 50, 70, 0.08); }
+[data-theme="light"] .pb-flow { background: rgba(43, 127, 212, 0.1); }
+[data-theme="light"] .pb-eye.cursor { background: rgba(43, 127, 212, 0.1); }
+[data-theme="light"] .pb-eye.overdue.cursor { background: rgba(214, 65, 47, 0.08); }
+[data-theme="light"] .pb-read { background: rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-read.content { background: rgba(201, 161, 90, 0.32); }
+[data-theme="light"] .pb-rec-cal { --bg-c: #E6EFFA; --edge: rgba(43, 127, 212, 0.3); }
+[data-theme="light"] .pb-rec-ship { --bg-c: #F6EEE3; --edge: rgba(181, 118, 26, 0.32); }
+[data-theme="light"] .pb-rec-bill { --bg-c: #E4ECF6; --edge: rgba(28, 99, 174, 0.28); }
+[data-theme="light"] .pb-rec-rcpt { --bg-c: #E5F0EA; --edge: rgba(31, 122, 77, 0.3); }
+[data-theme="light"] .pb-ship { background: rgba(255, 255, 255, 0.7); }
+[data-theme="light"] .pb-land[data-arrived] > div > *, [data-theme="light"] .pb-read[data-arrived] { animation-name: pb-landed-day; }
+@keyframes pb-landed-day { from { background-color: rgba(43, 127, 212, 0.22); } }
+/* The arriving mail lands as a light row now, so it whitens rather than
+   darkens on the way in. */
+[data-theme="light"] .pb-in { background: color-mix(in srgb, rgba(205, 224, 247, 1) calc(var(--m, 0) * 100%), #ffffff); }
+[data-theme="light"] .pb-in-top b { color: var(--ink); }
+/* Calendar. */
+[data-theme="light"] .pb-calshot .pb-window { background: linear-gradient(#E3EDFA, #D3E3F7); }
+[data-theme="light"] .pb-seg { background: rgba(30, 50, 70, 0.08); }
+[data-theme="light"] .pb-seg span.on { background: #2B7FD4; color: #fff; }
+[data-theme="light"] :is(.pb-caltool .nav, .pb-caltool .today, .pb-caltool .new) { background: rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-wd { color: #94A2B2; border-bottom-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-day { border-bottom-color: rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-day > header { color: #6B7A8B; }
+[data-theme="light"] .pb-day.out > header { color: #A9B4C1; }
+[data-theme="light"] .pb-day.sel::after { box-shadow: inset 0 0 0 1pt rgba(43, 127, 212, 0.6); }
+[data-theme="light"] .pb-ev { color: var(--ink); }
+[data-theme="light"] .pb-day.out .pb-ev { filter: none; opacity: 0.5; }
+[data-theme="light"] .pb-ev.picked { box-shadow: inset 0 0 0 1.25pt #2B7FD4; }
+[data-theme="light"] .pb-ev.thin span { color: #94A2B2; }
+[data-theme="light"] .pb-ev.red { --fill: #FDC9D6; --ink: #7E314B; --edge: #C1577A; }
+[data-theme="light"] .pb-ev.purple { --fill: #D2D6FE; --ink: #46468A; --edge: #7373D1; }
+[data-theme="light"] .pb-ev.teal { --fill: #A9E6E7; --ink: #035C5E; --edge: #009295; }
+[data-theme="light"] .pb-ev.brown { --fill: #F5D3AD; --ink: #6F4509; --edge: #B07010; }
+[data-theme="light"] .pb-ev.green { --fill: #C3E4BE; --ink: #265E21; --edge: #499441; }
+[data-theme="light"] .pb-ev.gray { --fill: #DCE3EC; --ink: #3F516A; --edge: #6E829D; }
+[data-theme="light"] .pb-evcard { background: rgba(255, 255, 255, 0.78); box-shadow: inset 0 0 0 0.75pt rgba(30, 50, 70, 0.1); }
+[data-theme="light"] .pb-behind { background: rgba(30, 50, 70, 0.05); }
+[data-theme="light"] .pb-evkeys kbd { background: rgba(30, 50, 70, 0.08); color: var(--dim); }
+[data-theme="light"] .pb-brow.update { background: rgba(43, 127, 212, 0.14); }
+
+/* THE DAWN. The hero's ground is a morning sky: pale blue overhead,
+   warming to peach where the line runs like a horizon, and back to paper at
+   the foot so the page below carries on from it. The scope still paints on
+   paper; multiplied onto the sky, its paper vanishes and its ink stays. The
+   analyzer's markers and marker table stay off the day page. */
+[data-theme="light"] .pb-stage { background:
+  linear-gradient(180deg, rgba(250,247,242,0) 84%, #FAF7F2 97%),
+  radial-gradient(ellipse 55% 26% at 68% 72%, rgba(255, 190, 150, 0.5), rgba(255, 190, 150, 0) 70%),
+  linear-gradient(180deg, #D8E5F6 0%, #E7EDF6 32%, #F4EEEA 55%, #FADFCD 72%, #FAEBDF 84%, #FAF7F2 97%); }
+[data-theme="light"] .pb-scene { mix-blend-mode: multiply; }
+[data-theme="light"] .pb-grat { display: none; }
+[data-theme="light"] .pb-stage .pb-cue { color: rgba(29, 36, 48, 0.45); }
+
+/* The footer mark keeps its colour on paper. */
+[data-theme="light"] .pb-foot-mark { filter: none; opacity: 0.55; }
+`;
 
 // MARK: - the page
 
@@ -2395,6 +3003,7 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [scrolled, setScrolled] = useState(false);
   const [locked, setLocked] = useState(false);
+  const squelchSent = useRef(false);
   const readoutRef = useRef<HTMLElement>(null);
   const [layout, setLayout] = useState<ScopeLayout>(() => scopeLayout());
 
@@ -2405,6 +3014,7 @@ export function App() {
     const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
     const scene = createScope(canvas, {
       reduceMotion,
+      light: THEME === "light",
       layout: scopeLayout,
       // Written straight to the DOM: it changes every frame, and a re-render
       // per frame would buy nothing.
@@ -2433,6 +3043,10 @@ export function App() {
       const p = Math.min(1, t <= 1 ? t * SHUT : SHUT + (t - 1) * 0.3);
       scene?.setProgress(p);
       setLocked(p > 0.46);
+      if (p > 0.46 && !squelchSent.current) {
+        squelchSent.current = true;
+        track("site_squelch_closed");
+      }
       setScrolled(scrolled > innerHeight * 0.03);
     };
     const onResize = () => {
@@ -2469,6 +3083,7 @@ export function App() {
   }, []);
   const open = (next: boolean) => {
     if (next === joining) return;
+    if (next) track("site_waitlist_opened");
     history.pushState(null, "", next ? WAITLIST_PATH : "/");
     setJoining(next);
   };
@@ -2477,23 +3092,66 @@ export function App() {
     // tab, a new window, a saved link. Let the browser have those.
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
     event.preventDefault();
+    if (next) track("site_cta_clicked", { location: "hero" });
     open(next);
   };
 
   // The closing button goes back up to the hero and opens the rig there, so
   // there is only ever one form on the page.
   const backToTop = () => {
+    track("site_cta_clicked", { location: "close" });
     const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
     scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
     open(true);
   };
 
+  // WHAT GETS SEEN: each tagged section once, the first time a third of it
+  // (or a third of the screen, for one taller than that) is on screen; and
+  // how far down the page anyone gets.
+  useEffect(() => {
+    const seen = new Set<string>();
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const name = (e.target as HTMLElement).dataset.track!;
+        const enough = e.intersectionRatio >= 0.33 || e.intersectionRect.height >= innerHeight * 0.33;
+        if (e.isIntersecting && enough && !seen.has(name)) {
+          seen.add(name);
+          track("site_section_viewed", { section: name });
+        }
+      }
+    }, { threshold: [0, 0.1, 0.2, 0.33, 0.5] });
+    document.querySelectorAll<HTMLElement>("[data-track]").forEach((el) => io.observe(el));
+
+    const marks = [25, 50, 75, 90, 100];
+    const hit = new Set<number>();
+    let raf = 0;
+    const depth = () => {
+      raf = 0;
+      const max = document.documentElement.scrollHeight - innerHeight;
+      const pct = max <= 0 ? 100 : ((scrollY + 1) / max) * 100;
+      for (const m of marks) {
+        if (pct >= m && !hit.has(m)) {
+          hit.add(m);
+          track("site_scroll_depth", { percent: m });
+        }
+      }
+    };
+    const queue = () => { if (!raf) raf = requestAnimationFrame(depth); };
+    addEventListener("scroll", queue, { passive: true });
+    return () => {
+      io.disconnect();
+      cancelAnimationFrame(raf);
+      removeEventListener("scroll", queue);
+    };
+  }, []);
+
   return (
     <main className="pb">
       <style href="pb-page" precedence="default">{PAGE_CSS_RESOLVED}</style>
       <style href="pb-cal" precedence="default">{CAL_CSS_RESOLVED}</style>
+      <style href="pb-light" precedence="default">{LIGHT_CSS}</style>
 
-      <section ref={storyRef} className="pb-story">
+      <section ref={storyRef} className="pb-story" data-track="hero">
         <div
           ref={stageRef}
           className="pb-stage"
@@ -2521,9 +3179,10 @@ export function App() {
             ))}
           </div>
           <span className="pb-read-l" aria-hidden="true">SPAN&nbsp;&nbsp;your inbox&nbsp;&nbsp;·&nbsp;&nbsp;4,312 msgs</span>
-          <span className="pb-read-r" aria-hidden="true">SQUELCH&nbsp;<b ref={readoutRef}>0%</b></span>
+          <span className="pb-read-r" aria-hidden="true">FILTER&nbsp;<b ref={readoutRef}>0%</b></span>
 
           <div className="pb-cue" aria-hidden="true">scroll</div>
+
         </div>
 
         <div className="pb-track">
@@ -2544,7 +3203,7 @@ export function App() {
                 <p className="pb-lede">Inbox zero every day was never realistic.</p>
                 <h1 className="pb-hero">You’re only human.</h1>
                 <p className="pb-sub">
-                  Your attention is valuable. You deserve an inbox that treats it that way.
+                  Most email can wait, and some of it never needed you at all.
                 </p>
               </div>
               <div className="pb-slot">
@@ -2558,8 +3217,8 @@ export function App() {
               <div className="pb-beat">
                 <h2 className="pb-hero">Know what needs you.</h2>
                 <p className="pb-sub">
-                  Passband brings the important things forward, so you can give them your
-                  attention and get on with your day.
+                  Passband reads every email as it lands and puts the few that need you at the
+                  top, so you can answer them and get on with your day.
                 </p>
               </div>
             </div>
@@ -2567,64 +3226,61 @@ export function App() {
         </div>
       </section>
 
-      <section className="pb-section pb-clouded">
+      <section className="pb-section pb-clouded" data-track="sitrep_tour">
         <Clouds kind="mail" />
         <h2 className="pb-h2">
-          Same inbox. <em>Squelched.</em>
+          Same inbox. <em>Quieter.</em>
         </h2>
         <p className="pb-intro">
-          Every email still arrives. Passband reads each one, pulls forward the few that
-          need you, and files the rest where you can find them when you want to.
+          You still get every email. Here is one morning of it, start to finish.
         </p>
         <Showcase />
       </section>
 
-      <section className="pb-section pb-clouded">
+      <section className="pb-section pb-clouded" data-track="calendar_tour">
         <Clouds kind="events" />
         <h2 className="pb-h2">
-          Plans arrive by email. <em>So does your calendar.</em>
+          Your calendar is already <em>in your email.</em>
         </h2>
         <p className="pb-intro">
-          Passband lays out the invitations, tickets and bookings in your mail, says how
-          likely you are to go, keeps each one current as the mail changes, and reminds you
-          when it counts.
+          Passband puts the invitations, tickets and bookings from your mail on a calendar
+          and marks how likely you are to go.
         </p>
         <CalShowcase />
       </section>
 
-      <section className="pb-section pb-join">
-        <h2 className="pb-h2">That’s an inbox built in the <em>modern era.</em></h2>
-        <p className="pb-intro">Join the waitlist and we will email you when a spot opens.</p>
-        <Waitlist focus={false} />
+      <section className="pb-section pb-join" data-track="join">
+        <h2 className="pb-h2">Try it on <em>your own inbox.</em></h2>
+        <p className="pb-intro">Join the waitlist and we'll email you when a spot opens.</p>
+        <Waitlist focus={false} where="join" />
         <p className="pb-fine">For Mac and iPhone.</p>
       </section>
 
-      <section className="pb-section pb-layer">
-        <h2 className="pb-h2">An intelligence layer, <em>not a wrapper.</em></h2>
+      <section className="pb-section pb-layer" data-track="intelligence_layer">
+        <h2 className="pb-h2">It reads your mail <em>before you do.</em></h2>
         <div className="pb-layer-body">
           <p>
-            Most AI email is a chat box bolted onto the same inbox. You still do the reading.
-            It just answers questions about the pile.
+            Most AI email is a chat box added to the same inbox. You still read everything
+            yourself, and the chat answers questions about the pile.
           </p>
           <p>
-            Passband puts a capable agentic layer underneath instead. Every message is read
-            as it arrives, revisited as things change, and turned into what it means for you:
-            a deadline, a package, a receipt, a person waiting on a reply.
+            Passband reads each message when it arrives, and again when something changes,
+            like a new reply or a moved date. Each one becomes what it is to you: a deadline,
+            a package, a receipt, someone waiting on an answer.
           </p>
           <p>
-            Everything else draws on that one understanding. The sitrep, the notifications
-            on your phone and the agent you already use all start from mail that has been
-            read, not mail that is waiting to be.
+            The sitrep, the notifications on your phone and the AI agent you already use all
+            work from that same reading.
           </p>
         </div>
       </section>
 
-      <section className="pb-section" style={{ paddingTop: 0 }}>
+      <section className="pb-section" style={{ paddingTop: 0 }} data-track="trust_facts">
         <dl className="pb-facts">
           <div className="pb-fact">
             <dt><b>01</b> License</dt>
             <dd>
-              <div className="pb-fact-val">Open <em>source</em></div>
+              <div className="pb-fact-val">Open source</div>
               <p>
                 MIT licensed. Every line is <a href="https://github.com/passband-app/passband">on GitHub</a>,
                 the threat model included.
@@ -2634,7 +3290,7 @@ export function App() {
           <div className="pb-fact">
             <dt><b>02</b> Where it runs</dt>
             <dd>
-              <div className="pb-fact-val">Yours <em>or ours</em></div>
+              <div className="pb-fact-val">Yours or ours</div>
               <p>
                 <a href="/self-host">Self-host</a> the daemon on your own machine, or let us run an
                 isolated instance for you.
@@ -2644,7 +3300,7 @@ export function App() {
           <div className="pb-fact">
             <dt><b>03</b> Training on your mail</dt>
             <dd>
-              <div className="pb-fact-val"><em>Never</em></div>
+              <div className="pb-fact-val">Never</div>
               <p>
                 Not for us, not for our model provider. <a href="/trust">Where your mail goes</a>,
                 every wire of it.
@@ -2654,7 +3310,7 @@ export function App() {
         </dl>
       </section>
 
-      <section className="pb-section pb-close">
+      <section className="pb-section pb-close" data-track="close">
         <h2 className="pb-h2">Find a little breathing room.</h2>
         <button className="pb-cta" type="button" onClick={backToTop}>
           <span className="pb-cta-label">join the waitlist</span>
@@ -2662,7 +3318,7 @@ export function App() {
         </button>
       </section>
 
-      <footer className="pb-foot">
+      <footer className="pb-foot" data-track="footer">
         <div className="pb-foot-grid">
           <a className="pb-foot-mark" href="/" aria-label="Passband home"><img src="/mark.svg" alt="" width={42} height={23} /></a>
           <nav aria-label="Legal">

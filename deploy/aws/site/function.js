@@ -2,8 +2,9 @@
 // passband-site/appcast.xml. Do not edit: change server.ts and rebuild.
 // Runtime: cloudfront-js-2.0, viewer-request event. Mirrors server.ts's
 // routing exactly; deploy/aws/site/function.test.ts holds it to that.
-var LATEST = "0.0.19";
+var LATEST = "0.0.20";
 var RELEASES_REPO = "passband-app/passband-releases";
+var DMG_SINCE = "0.0.21";
 var ROUTES = {
   "/main.js": "/dist/main.js",
   "/icon.svg": "/icon.svg",
@@ -11,6 +12,10 @@ var ROUTES = {
   "/mark.svg": "/mark.svg",
   "/mark.png": "/mark.png",
   "/mark-light.png": "/mark-light.png",
+  "/email-sitrep.png": "/email-sitrep.png",
+  "/email-box.png": "/email-box.png",
+  "/email-wind.png": "/email-wind.png",
+  "/email-key.png": "/email-key.png",
   "/icon-180.png": "/icon-180.png",
   "/icon-512.png": "/icon-512.png",
   "/og.png": "/og.png",
@@ -27,7 +32,16 @@ var ROUTES = {
   "/appcast.xml": "/appcast.xml",
   "/.well-known/security.txt": "/security.txt"
 };
-var DL = /^\/download\/(Passband-(\d+\.\d+\.\d+)\.zip)$/;
+var DL = /^\/download\/(Passband-(\d+\.\d+\.\d+)\.(?:zip|dmg))$/;
+
+function versionAtLeast(a, b) {
+  var x = a.split(".");
+  var y = b.split(".");
+  for (var i = 0; i < 3; i++) {
+    if (Number(x[i]) !== Number(y[i])) return Number(x[i]) > Number(y[i]);
+  }
+  return true;
+}
 
 function redirect(location) {
   return {
@@ -47,7 +61,7 @@ function handler(event) {
   if (path === "/download" || path === "/download/latest") {
     return redirect(
       LATEST
-        ? "/download/Passband-" + LATEST + ".zip"
+        ? "/download/Passband-" + LATEST + (versionAtLeast(LATEST, DMG_SINCE) ? ".dmg" : ".zip")
         : "https://github.com/" + RELEASES_REPO + "/releases"
     );
   }

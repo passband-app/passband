@@ -83,7 +83,7 @@ final class LoginCodePanel {
         let host = FirstClickHostingView(
             rootView: LoginCodeCard(
                 entry: entry,
-                onCopied: { [weak self] in self?.close(id, answered: true) },
+                onCopied: { [weak self] in self?.close(id, answered: true, fading: true) },
                 onCopy: { [weak self] in
                     self?.markAnswered(id)
                     onCopy()
@@ -159,16 +159,35 @@ final class LoginCodePanel {
         if id == showing { onMissed = nil }
     }
 
-    private func close(_ id: UUID?, answered: Bool) {
+    /// `fading` floats the panel up and out instead of dropping it: the exit
+    /// after a copy, so the card leaving reads as "done" rather than "gone".
+    private func close(_ id: UUID?, answered: Bool, fading: Bool = false) {
         guard let panel, id == showing else { return }
         self.panel = nil
         showing = nil
         let missed = onMissed
         onMissed = nil
+        if !answered { missed?() }
+        guard fading else {
+            Self.drop(panel)
+            return
+        }
+        var lifted = panel.frame
+        lifted.origin.y += 10
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(lifted, display: true)
+        } completionHandler: {
+            MainActor.assumeIsolated { Self.drop(panel) }
+        }
+    }
+
+    private static func drop(_ panel: NSPanel) {
         panel.orderOut(nil)
         // Dropping the hosting view drops the code with it.
         panel.contentView = nil
-        if !answered { missed?() }
     }
 }
 
@@ -218,13 +237,15 @@ private struct LoginCodeCard: View {
 
             Text(entry.login.code)
                 .font(Typo.mono(38, weight: .semibold))
-                .foregroundStyle(Palette.ink)
+                .foregroundStyle(copied ? Palette.positive : Palette.ink)
                 .tracking(5)
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
                 .textSelection(.disabled)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, Space.s14)
+                .scaleEffect(copied ? 1.08 : 1)
+                .animation(.spring(response: 0.28, dampingFraction: 0.5), value: copied)
                 .accessibilityLabel("login code \(entry.login.code)")
 
             // Drawn by hand, both of them. The system's glass buttons dim
@@ -232,7 +253,13 @@ private struct LoginCodeCard: View {
             // is: they would sit there looking disabled for the whole minute.
             HStack(spacing: Space.s8) {
                 Button(action: copy) {
-                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    HStack(spacing: Space.s6) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .contentTransition(.symbolEffect(.replace))
+                            .symbolEffect(.bounce, value: copied)
+                        Text(copied ? "Copied" : "Copy")
+                            .contentTransition(.opacity)
+                    }
                         .font(Typo.ui(13, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
@@ -240,6 +267,7 @@ private struct LoginCodeCard: View {
                         .background(
                             RoundedRectangle(cornerRadius: Radius.well, style: .continuous)
                                 .fill(copied ? Palette.positive : Palette.lock))
+                        .animation(.easeOut(duration: 0.15), value: copied)
                         .contentShape(RoundedRectangle(cornerRadius: Radius.well, style: .continuous))
                 }
                 Button(action: onDismiss) {
@@ -273,10 +301,10 @@ private struct LoginCodeCard: View {
         guard !copied, Clip.copy(entry.login.pasteable) else { return }
         copied = true
         onCopy()
-        // Long enough to read "Copied", short enough that the panel is gone
-        // by the time the pointer is back on the field.
+        // Long enough to see the code pop green, short enough that the panel
+        // is gone by the time the pointer is back on the field.
         Task {
-            try? await Task.sleep(for: .milliseconds(700))
+            try? await Task.sleep(for: .milliseconds(750))
             onCopied()
         }
     }

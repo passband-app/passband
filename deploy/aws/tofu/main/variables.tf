@@ -247,6 +247,12 @@ variable "control_invite_from" {
   type        = string
 }
 
+variable "control_note_from" {
+  description = "SQUELCH_CONTROL_NOTE_FROM: who the personal note after an invite is from, e.g. \"Name <name@example.com>\". null sends no note."
+  type        = string
+  default     = null
+}
+
 variable "control_waitlist_origin" {
   description = "SQUELCH_CONTROL_WAITLIST_ORIGIN; null leaves control's default (https://passband.app)."
   type        = string

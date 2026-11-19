@@ -3556,7 +3556,9 @@ fn cmd_serve(
 
         // THE MORNING BRIEF: once a local day near 08:00, to the owner's
         // iPhones. Always spawned; idle while the owner has it off, outside
-        // the morning window, or with no iPhone registered.
+        // the morning window, or with no iPhone registered. The same worker
+        // checks, every few hours, whether a lapsed owner is owed their one
+        // "you shouldn't have had to open these" note (`lapsed_note`).
         let morning_brief_handle = tokio::spawn(squelch_api::morning_brief_worker(
             api_state.clone(),
             shutdown_tx.subscribe(),

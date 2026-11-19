@@ -185,6 +185,73 @@ pub fn signup_provisioned(label: &str) -> String {
     format!(":tada: New tenant provisioned: `{label}`")
 }
 
+/// The budget poller topped up a tenant's triage key for this window
+/// ([`crate::budget_topup`]). No amounts: the label is enough to look the key up.
+pub fn llm_auto_topup_applied(label: &str) -> String {
+    format!(
+        ":battery: LLM budget auto top-up applied: `{label}`\n\
+         Triage had nearly spent this month's budget; it has one more month's worth until \
+         the next reset. Once per cycle."
+    )
+}
+
+/// The gateway refused a tenant's automatic top-up. Sent on the first failed
+/// attempt in a window and then at a bounded rate while it keeps failing.
+pub fn llm_auto_topup_failed(label: &str, error: &str, attempt: i32) -> String {
+    format!(
+        ":rotating_light: *LLM budget auto top-up FAILED:* `{label}` (attempt {attempt})\n\
+         {error}\n\
+         Triage for this tenant stops when its budget runs out. It is retried automatically; \
+         by hand: `squelch-control llm topup {label}`"
+    )
+}
+
+/// A tenant's automatic top-up was sent and may have landed, but the
+/// read-back did not show it. NOT a prompt to top up by hand: doing so on top
+/// of a write that landed gives more than one month.
+pub fn llm_auto_topup_unconfirmed(label: &str, attempt: i32) -> String {
+    format!(
+        ":warning: *LLM budget auto top-up NOT CONFIRMED:* `{label}` (attempt {attempt})\n\
+         The write may have landed; the read-back did not show it. It is retried \
+         automatically with the same amount. Check the key in the gateway before topping \
+         up by hand."
+    )
+}
+
+/// A tenant is near the end of this window's budget, and the window's
+/// automatic top-up is already spent: the key carries an earlier top-up (one
+/// given by hand, or this window's own) at least as large as the automatic
+/// one would have been. Nothing more is added automatically until the reset.
+pub fn llm_auto_topup_covered(label: &str) -> String {
+    format!(
+        ":warning: *LLM budget nearly spent, no auto top-up left this window:* `{label}`\n\
+         It is at 95% of its limit including an earlier top-up. Triage stops when it runs \
+         out, until the next reset. More by hand: `squelch-control llm topup {label}`"
+    )
+}
+
+/// A top-up crossed a window boundary on the way to the gateway, which granted
+/// it in the NEW window. It counts as that window's top-up.
+pub fn llm_auto_topup_anchored_late(label: &str) -> String {
+    format!(
+        ":battery: LLM budget auto top-up applied in the next window: `{label}`\n\
+         The write crossed a budget reset, so it counts as the new window's one top-up. \
+         The window that asked for it has closed."
+    )
+}
+
+/// A late grant carried more than one month into the window it landed in, and
+/// bringing it down to one month failed. The window is still counted as
+/// topped up; the extra is the operator's to take off by hand.
+pub fn llm_auto_topup_cap_failed(label: &str) -> String {
+    format!(
+        ":warning: *LLM budget late top-up not capped:* `{label}`\n\
+         A top-up that landed in the next window carries more than one month, and \
+         bringing it down failed. Lower it by hand: \
+         `squelch-control llm topup {label} --usd <one month>`"
+    )
+}
+
 /// A new address landed on the waitlist. Carries the name they typed, when
 /// there is one, and NEVER the address: the admin page is where that lives.
 /// Sent only for a NEW row, so resubmitting the form cannot page anybody.
@@ -317,6 +384,12 @@ mod tests {
             signup_already_provisioned("ethan", Some("vk-1"), None),
             signup_not_recorded("ethan", None, Some("vk-2")),
             signup_provisioned("ethan"),
+            llm_auto_topup_applied("ethan"),
+            llm_auto_topup_failed("ethan", "the LLM gateway refused the request", 2),
+            llm_auto_topup_unconfirmed("ethan", 1),
+            llm_auto_topup_covered("ethan"),
+            llm_auto_topup_anchored_late("ethan"),
+            llm_auto_topup_cap_failed("ethan"),
         ];
         for m in &msgs {
             assert!(m.contains("`ethan`"), "{m}");
@@ -326,6 +399,17 @@ mod tests {
         assert!(msgs[0].contains("get events") && msgs[0].contains("`vk-1`"));
         assert!(msgs[0].contains("`vk-2`"));
         assert!(!msgs[2].contains("`vk-1`") && msgs[2].contains("`vk-2`"));
+        // A top-up alert names the tenant and carries no dollar amount.
+        for m in &msgs[4..] {
+            assert!(!m.contains('$'), "{m}");
+        }
+        assert!(msgs[5].contains("FAILED") && msgs[5].contains("attempt 2"));
+        assert!(msgs[5].contains("llm topup ethan"), "{}", msgs[5]);
+        assert!(msgs[6].contains("NOT CONFIRMED") && !msgs[6].contains("FAILED"));
+        assert!(!msgs[6].contains("llm topup"), "{}", msgs[6]);
+        assert!(msgs[7].contains("no auto top-up left"), "{}", msgs[7]);
+        assert!(msgs[8].contains("next window"), "{}", msgs[8]);
+        assert!(msgs[9].contains("not capped"), "{}", msgs[9]);
         // No keys minted, no orphan line.
         assert!(!signup_incomplete("ethan", &err, None, None).contains("Orphaned"));
 

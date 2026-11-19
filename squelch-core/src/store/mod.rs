@@ -241,6 +241,11 @@ pub struct TriagedMessage {
     /// First classification from incremental sync may use reserved arrival
     /// capacity. Historical backfill and repairs use background capacity.
     pub foreground_triage: bool,
+    /// The message is a note Passband FILED into this mailbox itself
+    /// ([`crate::sync::ingest::is_filed_passband_note`]), never one that
+    /// arrived. Stored the way the archive tier stores mail: findable, and
+    /// never triaged, placed, pushed or counted.
+    pub passband_note: bool,
     /// Ingested by the first-run backfill (`triage.first_load`): the mail a
     /// new account opens on, which shares a small FYE allowance. Written on
     /// the row's first insert only, like `notify_eligible_at`.
@@ -1438,6 +1443,19 @@ pub struct LeggedHit {
     pub vector: bool,
 }
 
+/// What the notify lane does with an auth arrival's push, given what the
+/// owner did around it (`docs/AUTH-MAIL-HANDLING.md`, "Held pushes").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInHold {
+    /// A sign-in alert explained by a code the owner used: no push.
+    Explained(i64),
+    /// Triage has not ruled yet, and the owner just used a code from this
+    /// service: hold the push briefly, it may be explained.
+    Wait,
+    /// Push now.
+    Push,
+}
+
 /// A locally-stored sealed message, exposed ONLY to the TUI. This type never
 /// crosses the MCP boundary.
 #[derive(Debug, Clone)]
@@ -2406,6 +2424,10 @@ pub trait Store:
         given_name: Option<&str>,
         photo: Option<&AccountPhoto>,
     ) -> Result<()>;
+
+    /// The push hold for one auth arrival (`docs/AUTH-MAIL-HANDLING.md`,
+    /// "Held pushes"). Reads only ids and times: no sealed content leaves.
+    fn sign_in_hold(&self, account_id: AccountId, message_id: i64) -> Result<SignInHold>;
 
     /// LOCAL-ONLY (TUI): list sealed messages. This is the ONLY method that
     /// exposes sealed content and must never be reachable from MCP.

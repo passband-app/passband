@@ -23,6 +23,7 @@ pub mod guard;
 mod handlers;
 mod http_metrics;
 mod invite_mail;
+mod lapsed_note;
 pub mod limits;
 mod markdown;
 mod memory;
@@ -57,12 +58,13 @@ pub use error::ApiError;
 /// WRITE credential, which the readonly-bound sync loop must never touch.
 pub use handlers::run_shred_pass;
 pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
+/// The morning brief's worker and its pass.
+pub use lapsed_note::{LapsedOutcome, run_lapsed_pass};
 /// The ceilings a `/client/*` request runs under and the store-call cap.
 pub use limits::{
     LONG_REQUEST_TIMEOUT, REQUEST_TIMEOUT, ROUTE_CEILINGS, RequestCeiling, RequestTimeouts,
     STORE_CALL_SLOTS, UPSTREAM_REQUEST_TIMEOUT, route_ceiling,
 };
-/// The morning brief's worker and its pass.
 pub use morning_brief::{BriefOutcome, MorningBriefTiming, morning_brief_worker, run_brief_pass};
 /// Smart re-notify's worker and its pass (issue #625).
 pub use renotify::{

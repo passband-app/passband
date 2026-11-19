@@ -309,8 +309,8 @@ extension TestFlightNudge {
     }
 
     /// A first look that never needed the veil has ended: the corner card a
-    /// short beat later, once nothing else is up (a newcomer's What's New
-    /// usually is), and only if the rule still holds then. Gives up after ten
+    /// short beat later, once nothing else is up, and only if the rule still
+    /// holds then. Gives up after ten
     /// minutes of other cards; the two-day rule is still there behind it.
     func askAfterOnboarding(_ store: AppStore) {
         Task { @MainActor in

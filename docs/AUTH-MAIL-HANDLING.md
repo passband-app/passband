@@ -114,6 +114,38 @@ before the attacker's sign-in still explains it.
 Computed at read time in Rust, reading done auth rows only within the window
 of an open alert.
 
+### Held pushes (2026-11-10)
+
+The pairing above only quieted the Auth page. The push for the same alert
+fired on arrival, so an alert we already knew was the owner's still buzzed
+"New sign-in". The notify lane now asks `Store::sign_in_hold` before pushing
+any auth arrival that carries no login code:
+
+- **Explained**: triage called it a non-critical `login_alert`, and a code or
+  sign-in link the owner USED explains it (the pairing rules above, minus the
+  Google receipt: a push is silenced only on the owner's own click, never on
+  a third party's mail). No push; the decision is recorded as `explained`.
+- **Wait**: triage has not ruled yet, and in the 5 minutes before the alert
+  the owner used a code from the same service. The fast lane holds the push
+  for at most `SIGN_IN_HOLD` (30s). Triage ruling ends the wait early: the
+  deliberate lane pushes at once or records `explained`. When the 30s runs
+  out the fast lane decides again without holding, so a slow triage costs
+  30s, never the push. A daemon restart mid-hold leaves the push to the
+  deliberate lane.
+- **Push**: everything else, at once, as before.
+
+"Used" means one of two audited clicks, both read by `sealed_rows`:
+
+- `reveal_sealed` without `detail='notification'`: revealed on the Auth page
+  or FYE (unchanged);
+- `copy_code`: Copy on the Mac's floating code panel. The panel already called
+  `POST /client/events/{id}/handled` to clear the phone's banner; on an auth
+  event that route now also writes `copy_code` against the event's message.
+  Existing Mac apps send it, so this needs only a daemon roll.
+
+A code push itself is never held. Critical changes, app grants and security
+alerts are never explained, so never silenced.
+
 ### Verdicts
 
 Table `auth_verdicts(account_id, message_id, verdict CHECK IN ('mine','not_mine'),

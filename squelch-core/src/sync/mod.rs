@@ -288,8 +288,10 @@ fn notify_eligible_stamp(
     cfg: &crate::config::NotifyConfig,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
+    // A note Passband filed itself is never an arrival to push about.
     let eligible = origin == IngestOrigin::Incremental
         && !triaged.message.is_sent
+        && !triaged.passband_note
         && events::is_fresh(triaged.message.received_at, cfg, now);
     eligible.then_some(now)
 }

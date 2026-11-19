@@ -22,6 +22,19 @@
 //! touches an invite code again: invites provision tenants, and this flow is for
 //! people whose tenant already exists.
 //!
+//! THE FIRST APP HOP AFTER A SIGNUP ASKS ONE QUESTION INSTEAD OF GOING TO
+//! GOOGLE. A signup that finishes leaves a signed handoff cookie (see
+//! [`cookie::HandoffClaim`]): one-shot, two hours, bound to this host and to
+//! `/app`, naming the tenant row and the address it was set up with. When the
+//! newly installed app opens `/app/auth` in that browser, the page asks
+//! whether to continue as that mailbox, and the person confirms with a
+//! same-origin press (`POST /app/handoff`) before the nonce is spent and the
+//! same pairing page comes back. "Use a different account" is the ordinary
+//! Google sign-in. Anything else about the cookie (absent, forged, expired,
+//! already spent, a tenant that is no longer that row) falls through to Google
+//! as if it had never been sent: the handoff is a shortcut, never a new way to
+//! be refused.
+//!
 //! THE AGENT HOP is the fourth, and it is the app hop run on somebody else's
 //! behalf. WorkOS AuthKit is the OAuth authorization server agents use to reach
 //! a tenant's `/mcp`, in "Standalone Connect" mode: it runs the OAuth dance with
@@ -339,58 +352,14 @@ pub async fn signup_form(State(state): State<ControlState>, RawQuery(query): Raw
         .map(|code| code.chars().take(MAX_FIELD).collect::<String>())
         .filter(|code| invites::is_plausible(code))
         .unwrap_or_default();
-    let label = if invite.is_empty() {
-        String::new()
-    } else {
-        suggested_label(&state, &invite).await.unwrap_or_default()
-    };
     pages::signup_form_with(
         &state.config().base_domain,
         waitlist_url(&state).as_deref(),
-        &label,
+        None,
         &invite,
         None,
         state.config().microsoft.is_some(),
     )
-}
-
-/// A username to prefill for the person an emailed invite was minted for: the
-/// first of [`labels::suggestions`] this control plane has no tenant under.
-///
-/// A SUGGESTION, NOT A CLAIM. It is an editable value in the field, nothing is
-/// reserved, and `POST /signup` checks it again like anything typed. So every
-/// failure here is quiet and lands on an empty field, the form as it was: a
-/// lookup that errors, a shared code nobody's address is behind, or every
-/// candidate taken.
-///
-/// THE STORE ONLY, NEVER THE WARDEN. A page view must not wait on the cluster
-/// (a hung warden would hold an invite link blank for the client's whole
-/// timeout) or let one forwarded link drive warden calls at the page rate
-/// limit, ten times what the signup POST allows. The POST asks the warden, so
-/// the one case the store misses (live in the cluster, unrecorded here) is
-/// still caught, one submit later. And a PENDING label, which only the warden
-/// knows about, stays suggestible: it is almost always this same person back
-/// to finish, which is exactly the case the POST lets through.
-///
-/// WHAT IT SHOWS: the address's local part, and with the fallback the first
-/// label of its domain. Never the address, but most of one, to whoever holds
-/// the link; the same link already carries a live code, so that holder is the
-/// invitee or somebody they gave it to.
-async fn suggested_label(state: &ControlState, invite: &str) -> Option<String> {
-    let email = state
-        .store()
-        .email_for_available_invite(&invites::hash(invite), chrono::Utc::now())
-        .await
-        .inspect_err(|e| tracing::warn!(error = %e, "invite address lookup failed"))
-        .ok()??;
-    for candidate in labels::suggestions(&email) {
-        match state.store().label_exists(&candidate).await {
-            Ok(false) => return Some(candidate),
-            Ok(true) => continue,
-            Err(_) => return None,
-        }
-    }
-    None
 }
 
 /// Where the form sends somebody who has no invite code, or `None` on a
@@ -401,12 +370,6 @@ async fn suggested_label(state: &ControlState, invite: &str) -> Option<String> {
 /// would put back the oracle it was written to avoid: whether the link is on
 /// the page would start answering something about the code in the URL. It is on
 /// every signup page, prefilled or not, refused or not.
-///
-/// The prefilled USERNAME does answer something, deliberately: an emailed code
-/// that is live fills it, and anything else leaves it empty. That is not an
-/// oracle worth guarding (codes are 80 bits, and `POST /signup` already tells a
-/// live code from a dead one), so it is no argument for making this link
-/// conditional too.
 ///
 /// Read from `config.waitlist` rather than [`ControlState::waitlist`]: that
 /// accessor also requires the Resend client, because the paths that MAIL an
@@ -433,7 +396,9 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
     // rides along with it, because "that code is not usable" is exactly the
     // moment somebody discovers they do not have a working one.
     let waitlist = waitlist_url(&state);
-    let reject = |error: &str, label: &str| {
+    // A form that showed no username field is re-rendered without one, so a
+    // refused CODE does not suddenly ask for a username too.
+    let reject = |error: &str, label: Option<&str>| {
         pages::signup_form_with(
             &config.base_domain,
             waitlist.as_deref(),
@@ -444,12 +409,21 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         )
     };
 
-    let label = match labels::parse(&raw_label) {
-        Ok(l) => l,
-        Err(e) => return reject(&e.message(), &raw_label),
+    // NO USERNAME IS THE ORDINARY CASE: the form does not ask for one, and the
+    // callback makes one from the mailbox address (see `pick_label`). A typed
+    // one only arrives from the form a conflict re-rendered with the field.
+    let typed = if raw_label.trim().is_empty() {
+        None
+    } else {
+        match labels::parse(&raw_label) {
+            Ok(l) => Some(l),
+            Err(e) => return reject(&e.message(), Some(&raw_label)),
+        }
     };
+    let label = typed.clone().unwrap_or_default();
+    let shown = typed.as_deref();
     let Some(provider) = provider_choice(&state, Some(&raw_provider)) else {
-        return reject("Outlook signup is not available yet.", &label);
+        return reject("Outlook signup is not available yet.", shown);
     };
 
     // The invite is GATED here and held below, once the address is known to be
@@ -460,7 +434,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
     // a hold on a perfectly good code; and gate at all, so a nonsense code costs
     // a point lookup rather than a round trip to the warden.
     if !invites::is_plausible(&raw_invite) {
-        return reject(INVITE_REFUSED, &label);
+        return reject(INVITE_REFUSED, shown);
     }
     let code_hash = invites::hash(&raw_invite);
     match state
@@ -469,47 +443,43 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         .await
     {
         Ok(Some(_)) => {}
-        Ok(None) => return reject(INVITE_REFUSED, &label),
+        Ok(None) => return reject(INVITE_REFUSED, shown),
         Err(e) => {
             tracing::error!(error = %e, "invite lookup failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+            return reject("Something went wrong on our side. Please try again.", shown);
         }
     }
 
-    // Two authorities on whether a label is free, and both are asked: this
-    // control plane's own record, and the warden, which is the one that knows
-    // what actually exists in the cluster.
-    match state.store().label_exists(&label).await {
-        Ok(true) => return reject(LABEL_TAKEN, ""),
-        Ok(false) => {}
-        Err(e) => {
-            tracing::error!(error = %e, "label lookup failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+    if let Some(label) = shown {
+        // Two authorities on whether a typed label is free, and both are asked: this
+        // control plane's own record, and the warden, which is the one that knows
+        // what actually exists in the cluster.
+        match state.store().label_exists(label).await {
+            Ok(true) => return reject(LABEL_TAKEN, Some("")),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "label lookup failed");
+                return reject("Something went wrong on our side. Please try again.", shown);
+            }
         }
-    }
-    match state.warden().status(&label).await {
-        Ok(None) => {}
-        // A PENDING tenant is a half-finished signup, and this is how its owner
-        // gets to finish it: the label is let through here and the warden
-        // decides at call 1 whether the Google account coming back is the one
-        // that reserved it. A stranger who guesses a pending label spends a
-        // consent and gets "already taken"; they cannot take it, and their
-        // invite is not spent either.
-        Ok(Some(s)) if s.is_pending() => {}
-        Ok(Some(_)) => return reject(LABEL_TAKEN, ""),
-        Err(e) => {
-            // PRIVACY: the warden error type, never the bearer or the URL.
-            tracing::error!(error = %e, "warden availability check failed");
-            return reject(
-                "Signup is temporarily unavailable. Please try again in a few minutes.",
-                &label,
-            );
+        match state.warden().status(label).await {
+            Ok(None) => {}
+            // A PENDING tenant is a half-finished signup, and this is how its owner
+            // gets to finish it: the label is let through here and the warden
+            // decides at call 1 whether the Google account coming back is the one
+            // that reserved it. A stranger who guesses a pending label spends a
+            // consent and gets "already taken"; they cannot take it, and their
+            // invite is not spent either.
+            Ok(Some(s)) if s.is_pending() => {}
+            Ok(Some(_)) => return reject(LABEL_TAKEN, Some("")),
+            Err(e) => {
+                // PRIVACY: the warden error type, never the bearer or the URL.
+                tracing::error!(error = %e, "warden availability check failed");
+                return reject(
+                    "Signup is temporarily unavailable. Please try again in a few minutes.",
+                    shown,
+                );
+            }
         }
     }
 
@@ -517,10 +487,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         (Ok(a), Ok(b)) => (a, b),
         _ => {
             tracing::error!("the system random source failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+            return reject("Something went wrong on our side. Please try again.", shown);
         }
     };
 
@@ -531,10 +498,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "building the consent url failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+            return reject("Something went wrong on our side. Please try again.", shown);
         }
     };
 
@@ -552,13 +516,10 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         Ok(Some(id)) => id,
         // Lost the race with another tab, or the code went away between the
         // gate above and here. Same message as every other invite failure.
-        Ok(None) => return reject(INVITE_REFUSED, &label),
+        Ok(None) => return reject(INVITE_REFUSED, shown),
         Err(e) => {
             tracing::error!(error = %e, "reserving the invite failed");
-            return reject(
-                "Something went wrong on our side. Please try again.",
-                &label,
-            );
+            return reject("Something went wrong on our side. Please try again.", shown);
         }
     };
 
@@ -585,7 +546,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         release_invite(&state, invite_id, &holder).await;
         return reject(
             "Too many signups are in flight right now. Please try again in a few minutes.",
-            &label,
+            shown,
         );
     }
 
@@ -871,10 +832,224 @@ pub async fn console_auth(
 /// NO RETURN URL, and no parameter that could become one, exactly as next door.
 /// The only place it can send anybody is a `passband://` link built from this
 /// deployment's own base domain.
-pub async fn app_auth(State(state): State<ControlState>, RawQuery(query): RawQuery) -> Response {
+///
+/// RIGHT AFTER A SIGNUP, ONE QUESTION INSTEAD OF GOOGLE. The browser that just
+/// finished a signup holds a handoff cookie naming the tenant it created. A
+/// valid, unspent one for a tenant that is still exactly that tenant is
+/// answered with a page asking "continue as {mailbox}?" (see
+/// [`app_handoff_offer`]). Nothing is minted or spent here: that is
+/// [`app_handoff`], on the page's same-origin POST. The page's other link is
+/// this route with `skip_handoff=1`, which is the ordinary Google sign-in for
+/// that one request. It leaves the cookie where it is: this is a GET that any
+/// site can send a browser to, so it must not be a way to wipe a handoff, and
+/// the cookie ends with the browser session or its two hours anyway.
+///
+/// The handoff wins over `?provider=`, because it names the tenant just made
+/// whichever company that mailbox is at, and the page names the mailbox so a
+/// person who meant another account can take the other link. A cookie that
+/// cannot be used goes on to Google below, unchanged, and is cleared.
+pub async fn app_auth(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let secure = !state.config().is_insecure();
+    let query = query.as_deref();
+    let presented = if param(query, "skip_handoff").as_deref() == Some("1") {
+        false
+    } else {
+        match usable_handoff(&state, &headers).await {
+            Handoff::Usable(claim) => return app_handoff_offer(&state, &claim, query),
+            Handoff::Unusable => true,
+            Handoff::Absent => false,
+        }
+    };
+    let resp = app_auth_at_google(&state, query);
+    if presented {
+        with_cleared_handoff(resp, secure)
+    } else {
+        resp
+    }
+}
+
+/// What [`usable_handoff`] made of the request's handoff cookie.
+enum Handoff {
+    /// No cookie. Google, as always.
+    Absent,
+    /// A cookie that cannot be used, for whatever reason. Google, and the
+    /// cookie is cleared so it is not presented again.
+    Unusable,
+    /// Valid, unspent, and naming a tenant that is still exactly that tenant.
+    Usable(cookie::HandoffClaim),
+}
+
+/// The raw handoff cookie on a request, if there is one.
+fn handoff_cookie_value(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(cookie::handoff_from_header)
+}
+
+/// Whether the handoff a finished signup left in this browser can be offered.
+///
+/// THREE CHECKS, every failure the same [`Handoff::Unusable`], a store that
+/// will not answer included: the MAC and window ([`cookie::verify_handoff`]);
+/// the tenant row the claim names is still active at that label for that
+/// address (one query, so a label purged and signed up again is a different
+/// row and never matches); and the nonce is not spent yet. The handoff is a
+/// shortcut, never a new way to be refused.
+///
+/// PRIVACY: the label and an outcome. Never the nonce, the address, or the
+/// cookie value.
+async fn usable_handoff(state: &ControlState, headers: &HeaderMap) -> Handoff {
+    let Some(value) = handoff_cookie_value(headers) else {
+        return Handoff::Absent;
+    };
+    let Some(claim) = cookie::verify_handoff(
+        &state.config().cookie_key,
+        value,
+        chrono::Utc::now().timestamp(),
+    ) else {
+        tracing::info!("app login handoff did not verify; on to Google");
+        return Handoff::Unusable;
+    };
+    let label = &claim.label;
+
+    match state
+        .store()
+        .handoff_tenant_is_live(claim.tid, label, &claim.email)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(label = %label, "app login handoff names no live tenant; on to Google");
+            return Handoff::Unusable;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "app login handoff tenant lookup failed; on to Google");
+            return Handoff::Unusable;
+        }
+    }
+
+    match state.store().handoff_spent(&claim.nonce).await {
+        Ok(false) => Handoff::Usable(claim),
+        Ok(true) => {
+            tracing::info!(label = %label, "app login handoff already spent; on to Google");
+            Handoff::Unusable
+        }
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "app login handoff spend check failed; on to Google");
+            Handoff::Unusable
+        }
+    }
+}
+
+/// The page that offers the handoff: the mailbox by name, a Continue button
+/// that POSTs to [`app_handoff`] with a token only this page carries, and the
+/// ordinary Google sign-in as the other choice. Mints nothing and spends
+/// nothing, so a page elsewhere that sends somebody here has caused one page
+/// view.
+fn app_handoff_offer(
+    state: &ControlState,
+    claim: &cookie::HandoffClaim,
+    query: Option<&str>,
+) -> Response {
+    let csrf = cookie::handoff_csrf(&state.config().cookie_key, &claim.nonce);
+    tracing::info!(label = %claim.label, "app login handoff offered");
+    no_store(pages::app_handoff_confirm(
+        &claim.email,
+        &csrf,
+        &other_account_href(query),
+    ))
+}
+
+/// The "use a different account" link: this route, told to ignore the
+/// handoff, keeping the two parameters it honours. Built from fixed strings
+/// only; nothing the caller sent is echoed into it.
+fn other_account_href(query: Option<&str>) -> String {
+    let mut href = String::from("/app/auth?skip_handoff=1");
+    if param(query, "provider").as_deref() == Some("microsoft") {
+        href.push_str("&provider=microsoft");
+    }
+    match param(query, "theme").as_deref() {
+        Some("light") => href.push_str("&theme=light"),
+        Some("dark") => href.push_str("&theme=dark"),
+        _ => {}
+    }
+    href
+}
+
+/// `POST /app/handoff` — the Continue button on [`app_handoff_offer`]'s page.
+///
+/// THE ONLY PLACE A HANDOFF IS SPENT, and only on a request that is plainly
+/// that page's own press: the origin is this deployment
+/// ([`crate::admin::same_origin`]), the cookie is a usable handoff (and
+/// `SameSite=Lax` keeps it off any cross-site POST to begin with), and the
+/// form carries the token derived from that cookie's nonce. Then the nonce is
+/// spent in the store, which is the one-shot check across every control task,
+/// and only then does the warden mint.
+///
+/// Every refusal is a 303 back to `/app/auth`, which shows the page again or,
+/// for a handoff that is gone, goes on to Google. Never an error page of its
+/// own.
+pub async fn app_handoff(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !crate::admin::same_origin(&state, &headers) {
+        tracing::warn!(outcome = "origin_refused", "app login handoff refused");
+        return back_to_app_auth();
+    }
+    let Handoff::Usable(claim) = usable_handoff(&state, &headers).await else {
+        return back_to_app_auth();
+    };
+    let label = &claim.label;
+    if !cookie::handoff_csrf_ok(
+        &state.config().cookie_key,
+        &claim.nonce,
+        &field(&body, "csrf"),
+    ) {
+        tracing::warn!(outcome = "csrf_refused", label = %label, "app login handoff refused");
+        return back_to_app_auth();
+    }
+
+    match state.store().spend_handoff(&claim.nonce, label).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(label = %label, "app login handoff already spent");
+            return back_to_app_auth();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "spending the app login handoff failed");
+            return back_to_app_auth();
+        }
+    }
+
+    let resp = finish_app_login(&state, label, &claim.email, "app login via handoff").await;
+    with_cleared_handoff(resp, !state.config().is_insecure())
+}
+
+/// Where every refused handoff press goes: back to the app login, which
+/// decides afresh between the offer and Google.
+fn back_to_app_auth() -> Response {
+    (StatusCode::SEE_OTHER, [(header::LOCATION, "/app/auth")]).into_response()
+}
+
+/// Attach the handoff-clearing header to a response.
+fn with_cleared_handoff(mut resp: Response, secure: bool) -> Response {
+    if let Ok(value) = header::HeaderValue::from_str(&cookie::clear_handoff_cookie(secure)) {
+        resp.headers_mut().append(header::SET_COOKIE, value);
+    }
+    resp
+}
+
+/// The app login's trip to Google: the whole of `/app/auth` before the handoff
+/// existed, and still what every request without a usable one gets.
+fn app_auth_at_google(state: &ControlState, query: Option<&str>) -> Response {
     let config = state.config();
-    let Some(provider) = provider_choice(&state, param(query.as_deref(), "provider").as_deref())
-    else {
+    let Some(provider) = provider_choice(state, param(query, "provider").as_deref()) else {
         return app_unavailable();
     };
 
@@ -888,7 +1063,7 @@ pub async fn app_auth(State(state): State<ControlState>, RawQuery(query): RawQue
 
     // Flow::Console: identity alone, online, no refresh token. An app login asks
     // Google exactly what a console login asks, because it is the same question.
-    let consent = match endpoints_for(&state, provider)
+    let consent = match endpoints_for(state, provider)
         .ok_or(oauth::OAuthError::Config("no microsoft app".into()))
         .and_then(|e| oauth::consent_url(&e, csrf_state, Flow::Console))
     {
@@ -1492,14 +1667,14 @@ pub async fn oauth_callback(
             //
             // Nothing has been provisioned at this point, so the retry is clean.
             Err(oauth::OAuthError::Scope) => {
-                tracing::info!(label = %label, "consent granted only part of the scope set");
+                tracing::info!("consent granted only part of the scope set");
                 release().await;
                 return done(partial_consent_problem());
             }
             Err(e) => {
                 // The error type only. Its `Display` is written to carry no code,
                 // no secret, and no provider body.
-                tracing::warn!(error = %e, label = %label, "token exchange failed");
+                tracing::warn!(error = %e, "token exchange failed");
                 release().await;
                 return done(pages::problem(
                     StatusCode::BAD_GATEWAY,
@@ -1582,31 +1757,77 @@ pub async fn oauth_callback(
     // back only the public half. Nothing is encrypted yet and no credential
     // exists on the far side: what this creates is a reservation, tied to this
     // mailbox, that only this mailbox can complete.
-    let created = match state
-        .warden()
-        .create_tenant(&label, &grant.account_email, provider.tenant_value())
-        .await
-    {
-        Ok(c) => c,
-        Err(WardenError::LabelTaken) => {
-            release().await;
-            return done(pages::problem(
-                StatusCode::CONFLICT,
-                "That username was just taken",
-                "Someone claimed it while you were signing in. Pick another one. Your invite code has not been used.",
-            ));
+    //
+    // THE LABEL IS SETTLED HERE, not on the form. With nothing typed, each of
+    // `labels::candidates` for this mailbox is tried in turn until the warden
+    // takes one: it is the authority on what is free, and it hands a PENDING
+    // label back to the mailbox that reserved it, so a retried half-finished
+    // signup lands where it left off. Only when every candidate is taken does
+    // the person see a username field, on the form re-rendered for it.
+    let typed = !label.is_empty();
+    let candidates = if typed {
+        vec![label]
+    } else {
+        labels::candidates(&grant.account_email, &config.cookie_key)
+    };
+    let mut picked = None;
+    for candidate in candidates {
+        if !typed {
+            match state.store().label_exists(&candidate).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "label lookup failed");
+                    release().await;
+                    return done(internal_problem());
+                }
+            }
         }
-        Err(e) => {
-            // PRIVACY: the error type and the label. Never the recipient, the
-            // bearer, or anything the warden said verbatim.
-            tracing::error!(error = %e, label = %label, "creating the tenant failed");
-            release().await;
-            return done(pages::problem(
-                StatusCode::BAD_GATEWAY,
-                "Your mailbox could not be set up",
-                "Nothing was set up and your invite code has not been used. Try again in a few minutes.",
-            ));
+        match state
+            .warden()
+            .create_tenant(&candidate, &grant.account_email, provider.tenant_value())
+            .await
+        {
+            Ok(c) => {
+                picked = Some((candidate, c));
+                break;
+            }
+            Err(WardenError::LabelTaken) if !typed => continue,
+            Err(WardenError::LabelTaken) => {
+                release().await;
+                return done(pages::problem(
+                    StatusCode::CONFLICT,
+                    "That username was just taken",
+                    "Someone claimed it while you were signing in. Pick another one. Your invite code has not been used.",
+                ));
+            }
+            Err(e) => {
+                // PRIVACY: the error type and the label. Never the recipient, the
+                // bearer, or anything the warden said verbatim.
+                tracing::error!(error = %e, label = %candidate, "creating the tenant failed");
+                release().await;
+                return done(pages::problem(
+                    StatusCode::BAD_GATEWAY,
+                    "Your mailbox could not be set up",
+                    "Nothing was set up and your invite code has not been used. Try again in a few minutes.",
+                ));
+            }
         }
+    }
+    let Some((label, created)) = picked else {
+        // The conflict: every name this address suggests is somebody else's.
+        tracing::info!("signup needs a typed username: every candidate is taken");
+        release().await;
+        return done(pages::signup_form_with(
+            &config.base_domain,
+            waitlist_url(&state).as_deref(),
+            Some(""),
+            "",
+            Some(
+                "Every username we tried for your mailbox is taken. Your invite code has not been used.",
+            ),
+            config.microsoft.is_some(),
+        ));
     };
 
     // The ONE moment a plaintext refresh token exists on this machine ends
@@ -1665,7 +1886,9 @@ pub async fn oauth_callback(
                 // resets. That bill is onboarding, not the person's usage. It
                 // rides the gateway's one-cycle override, so it ends by itself
                 // at the first reset. Signup only: `llm mint` is a reset and
-                // `llm topup` is the operator's own call.
+                // `llm topup` is the operator's own call. The budget poller
+                // (`crate::budget_topup`) keeps this allowance and adds its
+                // one top-up on top of it if the first window still runs out.
                 //
                 // Fail-soft like the mint: a key without the allowance is a
                 // tenant on the ordinary limit, which `llm topup --usd` fixes
@@ -1776,7 +1999,8 @@ pub async fn oauth_callback(
     // the same address is still reserved for this mailbox.
     //
     // The warden answers with a pairing code, and the success page no longer
-    // shows it: the app's own onboarding pairs through /app/auth. The code is
+    // shows it: the app pairs through /app/auth, on the handoff this signup
+    // leaves behind. The code is
     // one-shot and lapses after the daemon's pairing TTL. A route that installs
     // the credential WITHOUT minting one, like reconnect_credentials, is the
     // real fix and is a warden API change (tracked separately).
@@ -1960,10 +2184,46 @@ pub async fn oauth_callback(
     tracing::info!(label = %label, "tenant provisioned");
     state.alert(alert::signup_provisioned(&label));
 
-    // No pairing code on this page: the app's own onboarding signs in and
-    // pairs through /app/auth, which is also where the analytics id joins the
-    // app.
-    done(pages::success(&config.tenant_url(&label)))
+    // No pairing code on this page: the app pairs through /app/auth, which is
+    // also where the analytics id joins the app. What this page leaves behind
+    // is the HANDOFF, so that the first /app/auth from this browser can offer
+    // to continue as this mailbox instead of sending the person back to Google
+    // minutes after they were there. See `cookie::HandoffClaim` for the model.
+    //
+    // Bound to the tenant ROW as recorded, re-read here rather than assumed:
+    // without a row id there is nothing to bind to, and no handoff is simply
+    // an app login through Google, which is what every signup before this got.
+    let mut resp = done(pages::success(&config.tenant_url(&label)));
+    let handle = match state.store().active_tenant_handle(&label).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "tenant lookup for the app login handoff failed; no handoff");
+            None
+        }
+    };
+    match (handle, random_token()) {
+        (Some((tid, email)), Ok(nonce)) => {
+            let claim = cookie::HandoffClaim::new(
+                tid,
+                &label,
+                &email,
+                nonce,
+                chrono::Utc::now().timestamp(),
+            );
+            let value = cookie::set_handoff_cookie(
+                &cookie::sign_handoff(&config.cookie_key, &claim),
+                !config.is_insecure(),
+            );
+            if let Ok(value) = header::HeaderValue::from_str(&value) {
+                resp.headers_mut().append(header::SET_COOKIE, value);
+            }
+        }
+        (None, _) => {}
+        (_, Err(_)) => {
+            tracing::error!(label = %label, "the system random source failed; no app login handoff")
+        }
+    }
+    resp
 }
 
 /// The console login's half of the callback: prove who is signed in, hold it
@@ -2397,10 +2657,34 @@ async fn app_login(
         }
     };
 
+    // What the page names: Google's verified address, or, for Microsoft
+    // (whose address is only a label), the mailbox the tenant was set up as.
+    let account_email = match identity.microsoft_id {
+        None => identity.email.clone(),
+        Some(_) => match state.store().active_tenant_email(&label).await {
+            Ok(Some(email)) => email,
+            _ => identity.email.clone(),
+        },
+    };
+
+    finish_app_login(state, &label, &account_email, "app login complete").await
+}
+
+/// The end both app logins share, once the tenant is known: mint the pairing
+/// code, find the analytics id, and render the page that opens the app.
+/// Reached from [`app_login`] after Google, and from [`app_handoff`]
+/// after a finished signup's handoff was spent. `done` is the line logged once
+/// the code exists, which is how the two are told apart in the logs.
+async fn finish_app_login(
+    state: &ControlState,
+    label: &str,
+    account_email: &str,
+    done: &'static str,
+) -> Response {
     // THE TICKET, exactly as next door: an ordinary pairing code for an ordinary
     // device, one-shot and ten minutes, which the tenant's own daemon claims into
     // a device token. No new credential type and no new revocation story.
-    let pairing = match state.warden().pair(&label).await {
+    let pairing = match state.warden().pair(label).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, label = %label, "minting the app pairing code failed");
@@ -2410,14 +2694,14 @@ async fn app_login(
 
     // PRIVACY: the label and never the code, which is live for ten minutes and is
     // the whole credential. The mailbox is not logged either, here as everywhere.
-    tracing::info!(label = %label, "app login complete");
+    tracing::info!(label = %label, "{done}");
 
     // The person's analytics id, re-issued IDENTICALLY on every sign-in: that
     // stability is what lets a reinstall (or a second device) re-adopt the
     // same PostHog identity. Fail-soft — a lookup error is an aid-less link,
     // never a refused login — and `Ok(None)` is simply a tenant that predates
     // the funnel.
-    let analytics_id = match state.store().analytics_id_for_label(&label).await {
+    let analytics_id = match state.store().analytics_id_for_label(label).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, label = %label, "analytics id lookup failed");
@@ -2428,18 +2712,9 @@ async fn app_login(
     // The page builds the `passband://` link itself, from this deployment's own
     // tenant URL and the warden's code. Nothing a caller sent is in it, because
     // this route accepted nothing a caller sent.
-    // What the page names: Google's verified address, or, for Microsoft
-    // (whose address is only a label), the mailbox the tenant was set up as.
-    let account_email = match identity.microsoft_id {
-        None => identity.email.clone(),
-        Some(_) => match state.store().active_tenant_email(&label).await {
-            Ok(Some(email)) => email,
-            _ => identity.email.clone(),
-        },
-    };
     let page = pages::app_signed_in(
-        &account_email,
-        &state.config().tenant_url(&label),
+        account_email,
+        &state.config().tenant_url(label),
         &pairing.pair_code,
         PAIRING_MINUTES,
         analytics_id.as_deref(),
@@ -3352,8 +3627,8 @@ fn incomplete_problem() -> Response {
     pages::problem(
         StatusCode::BAD_GATEWAY,
         "Your mailbox is not finished yet",
-        "Your username is reserved and your invite code has not been used. Start again with the \
-         same code, username, and Google account to finish.",
+        "Your mailbox is reserved and your invite code has not been used. Start again with the \
+         same code and the same account to finish.",
     )
 }
 

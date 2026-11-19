@@ -11,7 +11,8 @@
 //! time tests run in Rust.
 
 use super::*;
-use crate::renotify::{BusySpan, Candidate, Outcome, Policy, Trigger, Why};
+use crate::quick_clear::{Basis, CalibrationSample, Planned};
+use crate::renotify::{BannerKind, BusySpan, Candidate, Outcome, Policy, Trigger, Why};
 use crate::triage::ghost::EventTime;
 use crate::types::EventKind;
 
@@ -219,8 +220,9 @@ impl SqliteStore {
             "SELECT e.id, e.message_id, e.thread_id, e.kind, e.importance, e.sender,
                     e.one_line, e.deadline, e.created_at,
                     (SELECT COUNT(*) FROM renotify_items i
+                     JOIN renotify_batches b ON b.id = i.batch_id
                      WHERE i.account_id = e.account_id AND i.message_id = e.message_id
-                       AND i.due_at IS NULL)
+                       AND i.due_at IS NULL AND b.kind = 'renotify')
              FROM events e
              JOIN messages m ON m.account_id = e.account_id AND m.id = e.message_id
              LEFT JOIN triage t ON t.account_id = m.account_id AND t.message_id = m.id
@@ -374,29 +376,90 @@ impl SqliteStore {
         listeners: usize,
         items: &[(i64, Option<DateTime<Utc>>)],
     ) -> Result<i64> {
+        let rows: Vec<ItemRow> = items
+            .iter()
+            .map(|(message_id, due_at)| ItemRow {
+                message_id: *message_id,
+                due_at: *due_at,
+                priced: None,
+            })
+            .collect();
+        self.record_banner(
+            account_id,
+            BannerKind::Renotify,
+            trigger,
+            fired_at,
+            listeners,
+            &rows,
+        )
+    }
+
+    /// Write one quick-clear banner and its queue, in order, each item with
+    /// its predicted seconds and basis (for calibration). Same table, same
+    /// tap route, same habits as a re-notify; `kind` tells them apart.
+    pub fn record_quick_clear(
+        &self,
+        account_id: AccountId,
+        trigger: Trigger,
+        fired_at: DateTime<Utc>,
+        listeners: usize,
+        items: &[Planned],
+    ) -> Result<i64> {
+        let rows: Vec<ItemRow> = items
+            .iter()
+            .map(|p| ItemRow {
+                message_id: p.message_id,
+                due_at: None,
+                priced: Some((p.est_secs, p.raw_secs, p.basis)),
+            })
+            .collect();
+        self.record_banner(
+            account_id,
+            BannerKind::QuickClear,
+            trigger,
+            fired_at,
+            listeners,
+            &rows,
+        )
+    }
+
+    fn record_banner(
+        &self,
+        account_id: AccountId,
+        kind: BannerKind,
+        trigger: Trigger,
+        fired_at: DateTime<Utc>,
+        listeners: usize,
+        items: &[ItemRow],
+    ) -> Result<i64> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO renotify_batches(account_id, trigger, fired_at, listeners)
-             VALUES(?1,?2,?3,?4)",
+            "INSERT INTO renotify_batches(account_id, trigger, kind, fired_at, listeners)
+             VALUES(?1,?2,?3,?4,?5)",
             params![
                 account_id,
                 trigger.as_str(),
+                kind.as_str(),
                 fired_at.to_rfc3339(),
                 listeners as i64
             ],
         )?;
         let id = tx.last_insert_rowid();
-        for (position, (message_id, due_at)) in items.iter().enumerate() {
+        for (position, item) in items.iter().enumerate() {
             tx.execute(
-                "INSERT INTO renotify_items(batch_id, account_id, message_id, position, due_at)
-                 VALUES(?1,?2,?3,?4,?5)",
+                "INSERT INTO renotify_items(batch_id, account_id, message_id, position, due_at,
+                                            est_secs, basis, raw_secs)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     id,
                     account_id,
-                    message_id,
+                    item.message_id,
                     position as i64,
-                    due_at.map(|d| d.to_rfc3339())
+                    item.due_at.map(|d| d.to_rfc3339()),
+                    item.priced.map(|(secs, _, _)| i64::from(secs)),
+                    item.priced.map(|(_, _, basis)| basis.as_str()),
+                    item.priced.map(|(_, raw, _)| i64::from(raw)),
                 ],
             )?;
         }
@@ -408,14 +471,130 @@ impl SqliteStore {
         Ok(id)
     }
 
-    /// Banners fired at or after `since`: the day's budget so far.
-    pub fn renotify_fired_since(&self, account_id: AccountId, since: DateTime<Utc>) -> Result<u32> {
+    /// When the latest quick-clear banner fired, if ever.
+    pub fn last_quick_clear_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT fired_at FROM renotify_batches
+                 WHERE account_id = ?1 AND kind = 'quick_clear'
+                 ORDER BY id DESC LIMIT 1",
+                params![account_id],
+                |r| dt(r, 0),
+            )
+            .optional()?)
+    }
+
+    /// Every item of every quick-clear banner fired at or after `since`, with
+    /// what it was predicted to cost and what it really took
+    /// ([`crate::quick_clear::actual_secs`]): the calibration's input.
+    /// "Predicted" is the estimate BEFORE the owner's multiplier (`raw_secs`,
+    /// else `est_secs` on rows older than it), so the multiplier is learned
+    /// against the planner's own numbers and settles.
+    ///
+    /// Handled means opened, done or replied to after the banner (a reply
+    /// from before it is no response to it). A smart-clear row is handled when a smart-clear
+    /// press took it after the banner, and it really took nothing.
+    pub fn quick_clear_calibration(
+        &self,
+        account_id: AccountId,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<CalibrationSample>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT fired_at FROM renotify_batches WHERE account_id = ?1 ORDER BY id DESC LIMIT 100",
+            "SELECT b.fired_at, i.basis, COALESCE(i.raw_secs, i.est_secs), t.opened_at, COALESCE(t.dwell_ms, 0),
+                    t.status, t.resolved_at, COALESCE(t.resolved_by, ''),
+                    (SELECT MAX(s.received_at) FROM messages s
+                     WHERE s.account_id = m.account_id AND s.thread_id = m.thread_id
+                       AND s.is_sent = 1 AND s.id > m.id)
+             FROM renotify_batches b
+             JOIN renotify_items i ON i.batch_id = b.id
+             LEFT JOIN messages m ON m.account_id = i.account_id AND m.id = i.message_id
+             LEFT JOIN triage t ON t.account_id = i.account_id AND t.message_id = i.message_id
+             WHERE b.account_id = ?1 AND b.kind = 'quick_clear'
+             ORDER BY b.id DESC LIMIT 5000",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id], |r| {
+                Ok((
+                    dt(r, 0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    dt_opt(r, 3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    dt_opt(r, 6)?,
+                    r.get::<_, String>(7)?,
+                    dt_opt(r, 8)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for (fired_at, basis, est, opened_at, dwell_ms, status, resolved_at, by, reply_at) in rows {
+            if fired_at < since {
+                continue;
+            }
+            // A reply from before the banner is not a response to it: a
+            // card waiting on others usually has the owner's own reply.
+            let replied = reply_at.is_some_and(|t| t >= fired_at);
+            let Some(basis) = basis.as_deref().and_then(Basis::parse) else {
+                continue;
+            };
+            let done_after =
+                status.as_deref() == Some("done") && resolved_at.is_some_and(|t| t >= fired_at);
+            let (handled, actual) = if basis == Basis::SmartClear {
+                let swept = done_after && by.starts_with("smart_clear:");
+                (swept, swept.then_some(0))
+            } else {
+                (
+                    replied || opened_at.is_some_and(|t| t >= fired_at) || done_after,
+                    crate::quick_clear::actual_secs(
+                        fired_at,
+                        opened_at,
+                        dwell_ms.max(0) as u64,
+                        resolved_at,
+                    ),
+                )
+            };
+            out.push(CalibrationSample {
+                basis,
+                predicted_secs: est.unwrap_or(0).clamp(0, i64::from(u32::MAX)) as u32,
+                actual_secs: actual,
+                handled,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Re-notify banners fired at or after `since`: the day's budget so
+    /// far. Quick clears have their own ([`Self::quick_clear_fired_since`]).
+    pub fn renotify_fired_since(&self, account_id: AccountId, since: DateTime<Utc>) -> Result<u32> {
+        self.fired_since(account_id, BannerKind::Renotify, since)
+    }
+
+    /// Quick-clear banners fired at or after `since`, against
+    /// [`crate::quick_clear::DAILY_CAP`].
+    pub fn quick_clear_fired_since(
+        &self,
+        account_id: AccountId,
+        since: DateTime<Utc>,
+    ) -> Result<u32> {
+        self.fired_since(account_id, BannerKind::QuickClear, since)
+    }
+
+    fn fired_since(
+        &self,
+        account_id: AccountId,
+        kind: BannerKind,
+        since: DateTime<Utc>,
+    ) -> Result<u32> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT fired_at FROM renotify_batches WHERE account_id = ?1 AND kind = ?2
+             ORDER BY id DESC LIMIT 100",
         )?;
         let fired = stmt
-            .query_map(params![account_id], |r| dt(r, 0))?
+            .query_map(params![account_id, kind.as_str()], |r| dt(r, 0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(fired.iter().filter(|t| **t >= since).count() as u32)
     }
@@ -468,32 +647,33 @@ impl SqliteStore {
         since: DateTime<Utc>,
     ) -> Result<Vec<Outcome>> {
         let conn = self.lock()?;
-        let batches: Vec<(i64, String, DateTime<Utc>, bool)> = {
+        let batches: Vec<(i64, String, DateTime<Utc>, bool, String)> = {
             let mut stmt = conn.prepare(
-                "SELECT id, trigger, fired_at, opened_at IS NOT NULL FROM renotify_batches
+                "SELECT id, trigger, fired_at, opened_at IS NOT NULL, kind FROM renotify_batches
                  WHERE account_id = ?1 ORDER BY id DESC LIMIT ?2",
             )?;
             stmt.query_map(params![account_id, BATCHES_KEPT], |r| {
-                Ok((r.get(0)?, r.get(1)?, dt(r, 2)?, r.get(3)?))
+                Ok((r.get(0)?, r.get(1)?, dt(r, 2)?, r.get(3)?, r.get(4)?))
             })?
             .collect::<std::result::Result<_, _>>()?
         };
         let mut items = conn.prepare_cached(
             "SELECT t.opened_at, t.status, t.resolved_at,
-                    EXISTS(SELECT 1 FROM messages s
-                           WHERE s.account_id = m.account_id AND s.thread_id = m.thread_id
-                             AND s.is_sent = 1 AND s.id > m.id)
+                    (SELECT MAX(s.received_at) FROM messages s
+                     WHERE s.account_id = m.account_id AND s.thread_id = m.thread_id
+                       AND s.is_sent = 1 AND s.id > m.id)
              FROM renotify_items i
              LEFT JOIN messages m ON m.account_id = i.account_id AND m.id = i.message_id
              LEFT JOIN triage t ON t.account_id = i.account_id AND t.message_id = i.message_id
              WHERE i.account_id = ?1 AND i.batch_id = ?2",
         )?;
         let mut out = Vec::new();
-        for (id, trigger, fired_at, opened) in batches {
+        for (id, trigger, fired_at, opened, kind) in batches {
             if fired_at < since {
                 continue;
             }
-            let Some(trigger) = Trigger::parse(&trigger) else {
+            let (Some(trigger), Some(kind)) = (Trigger::parse(&trigger), BannerKind::parse(&kind))
+            else {
                 continue;
             };
             let rows = items
@@ -502,17 +682,24 @@ impl SqliteStore {
                         dt_opt(r, 0)?,
                         r.get::<_, Option<String>>(1)?,
                         dt_opt(r, 2)?,
-                        r.get::<_, Option<bool>>(3)?.unwrap_or(false),
+                        dt_opt(r, 3)?,
                     ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let handled = rows
                 .iter()
-                .filter(|(opened_at, status, resolved_at, replied)| {
-                    // A reply in the thread is handling it whenever it came:
-                    // the candidate query already excluded mail replied to
-                    // BEFORE the banner.
-                    *replied
+                .filter(|(opened_at, status, resolved_at, reply_at)| {
+                    // For a re-notify, a reply in the thread is handling it
+                    // whenever it came: the candidate query already excluded
+                    // mail replied to BEFORE the banner. A quick-clear queue
+                    // has no such filter (a card waiting on others usually
+                    // has the owner's reply already), so only a reply sent
+                    // since the banner counts there.
+                    let replied = match kind {
+                        BannerKind::Renotify => reply_at.is_some(),
+                        BannerKind::QuickClear => reply_at.is_some_and(|t| t >= fired_at),
+                    };
+                    replied
                         || opened_at.is_some_and(|t| t >= fired_at)
                         || (status.as_deref() == Some("done")
                             && resolved_at.is_some_and(|t| t >= fired_at))
@@ -520,6 +707,7 @@ impl SqliteStore {
                 .count();
             out.push(Outcome {
                 trigger,
+                kind,
                 fired_at,
                 opened,
                 items: rows.len() as u32,
@@ -530,7 +718,18 @@ impl SqliteStore {
     }
 }
 
-/// When `message_id` was last named in a banner, if ever (any reason).
+/// One item row as written.
+struct ItemRow {
+    message_id: i64,
+    due_at: Option<DateTime<Utc>>,
+    /// A quick-clear item's predicted seconds (after the multiplier, then
+    /// before it) and basis.
+    priced: Option<(u32, u32, Basis)>,
+}
+
+/// When `message_id` was last named in a re-notify banner, if ever (either
+/// reason). A quick-clear queue is not a re-notify: being counted in one
+/// spends none of a message's re-notifies and starts no cooldown.
 fn last_renotified(
     conn: &Connection,
     account_id: AccountId,
@@ -539,7 +738,7 @@ fn last_renotified(
     let mut stmt = conn.prepare_cached(
         "SELECT b.fired_at FROM renotify_items i
          JOIN renotify_batches b ON b.id = i.batch_id
-         WHERE i.account_id = ?1 AND i.message_id = ?2
+         WHERE i.account_id = ?1 AND i.message_id = ?2 AND b.kind = 'renotify'
          ORDER BY b.id DESC LIMIT 1",
     )?;
     Ok(stmt

@@ -1216,6 +1216,15 @@ impl SqliteStore {
         lite: bool,
     ) -> Result<Option<i64>> {
         let lite = lite && archive;
+        // A NOTE PASSBAND FILED ITSELF (`sync::ingest::is_filed_passband_note`)
+        // is stored as an archive row: findable by search and the reader, and
+        // absent from every band, count and queue. No triage job, so no
+        // decision, no placement in For your eyes or Reading, no push, and no
+        // line in a later note. Every sighting is the same: the first inserts
+        // it, a later one hands back the row it finds. Never on a heal, which
+        // refuses archive rows anyway.
+        let note = triaged.passband_note && heal.is_none() && !archive;
+        let archive = archive || note;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
 
@@ -1238,6 +1247,7 @@ impl SqliteStore {
             )
             .optional()?;
         match stored {
+            Some((id, _)) if note => return Ok(Some(id)),
             Some(_) if archive => return Ok(None),
             Some((_, true)) if heal.is_some() => return Ok(None),
             Some((id, true)) => return Ok(Some(id)),
@@ -2163,6 +2173,89 @@ impl SqliteStore {
             .collect())
     }
 
+    /// Should the push for this auth arrival wait, go, or stay silent? See
+    /// [`SignInHold`]. Reads the same rows and the same pairing as the Auth
+    /// page, with only codes the owner used as explainers.
+    pub(super) fn sign_in_hold(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<SignInHold> {
+        use crate::triage::auth_pairing::{
+            EXPLAINED_BEFORE_SECONDS, explained_by_used_code, explainer_window, same_service,
+        };
+        let conn = self.lock()?;
+        let id = message_id.to_string();
+        if let Some((_, alert)) =
+            sealed_rows(&conn, account_id, "m.id = ?2", std::slice::from_ref(&id))?
+                .into_iter()
+                .next()
+        {
+            // Triage has called it auth: the answer is the Auth page's own.
+            if !alert.explainable() {
+                return Ok(SignInHold::Push);
+            }
+            let (from, to) = explainer_window(alert.received_at);
+            let mut rows = vec![alert];
+            rows.extend(
+                sealed_rows(
+                    &conn,
+                    account_id,
+                    "m.received_at BETWEEN ?2 AND ?3 AND m.id != ?4",
+                    &[from.to_rfc3339(), to.to_rfc3339(), id],
+                )?
+                .into_iter()
+                .map(|(_, row)| row),
+            );
+            return Ok(
+                explained_by_used_code(&rows)[0].map_or(SignInHold::Push, SignInHold::Explained)
+            );
+        }
+        // Not auth by triage's word. Decided means decided: push.
+        let decided: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_message_decisions
+              WHERE account_id=?1 AND message_id=?2)",
+            params![account_id, message_id],
+            |r| r.get(0),
+        )?;
+        if decided {
+            return Ok(SignInHold::Push);
+        }
+        let Some((from_addr, received_at)) = conn
+            .query_row(
+                "SELECT from_addr, received_at FROM messages WHERE account_id=?1 AND id=?2",
+                params![account_id, message_id],
+                |r| Ok((r.get::<_, String>(0)?, dt(r, 1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(SignInHold::Push);
+        };
+        // Undecided: worth waiting only when the owner used a code from this
+        // service in the window that could explain it. A loose read on
+        // purpose (any used message, any kind): it only buys time for triage,
+        // and the strict pairing above decides.
+        let since =
+            (received_at - chrono::Duration::seconds(EXPLAINED_BEFORE_SECONDS)).to_rfc3339();
+        let mut stmt = conn.prepare_cached(
+            "SELECT m.from_addr FROM audit_log al
+               JOIN messages m ON m.account_id=al.account_id AND CAST(m.id AS TEXT)=al.target
+              WHERE al.account_id=?1 AND al.ts >= ?2 AND m.received_at >= ?2 AND m.id != ?3
+                AND ((al.action='reveal_sealed' AND al.detail IS NOT 'notification')
+                     OR al.action='copy_code')",
+        )?;
+        let senders = stmt
+            .query_map(params![account_id, since, message_id], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(if senders.iter().any(|s| same_service(s, &from_addr)) {
+            SignInHold::Wait
+        } else {
+            SignInHold::Push
+        })
+    }
+
     pub(super) fn sealed_body(&self, account_id: AccountId, message_id: i64) -> Result<SealedBody> {
         // Human Auth lookup detail: same membership as `sealed_messages`.
         let conn = self.lock()?;
@@ -2561,8 +2654,9 @@ fn sealed_rows(
                     s.message_id IS NOT NULL, json_extract(d.decision_json,'$.auth'), t.sealed_kind,
                     v.verdict, m.auth_pass,
                     (SELECT MIN(al.ts) FROM audit_log al WHERE al.account_id=m.account_id
-                           AND al.action='reveal_sealed' AND al.target=CAST(m.id AS TEXT)
-                           AND al.detail IS NOT 'notification'),
+                           AND al.target=CAST(m.id AS TEXT)
+                           AND ((al.action='reveal_sealed' AND al.detail IS NOT 'notification')
+                                OR al.action='copy_code')),
                     COALESCE(t.first_load, 0)
              FROM messages m
              LEFT JOIN triage t ON t.message_id = m.id AND t.account_id=m.account_id

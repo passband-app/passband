@@ -44,7 +44,16 @@ export const CARRIERS = [
   { dx: 0.047, h: 0.46 },
 ];
 
-const BG = "9, 13, 22";
+// Night: phosphor on a dark screen, stroked additively. Day: an ink line on
+// paper, laid down like a pen plotter's, no glow.
+const NIGHT = {
+  bg: "9, 13, 22", additive: true, wash: "", gateFill: "78, 155, 234", gateLine: "rgba(130, 186, 245, %a)",
+  strokes: [[9, "rgba(78, 155, 234, 0.05)"], [3.5, "rgba(78, 155, 234, 0.28)"], [1.2, "rgba(214, 233, 255, 0.85)"]] as Array<[number, string]>,
+};
+const DAY = {
+  bg: "255, 255, 255", additive: false, wash: "46, 107, 214", gateFill: "46, 107, 214", gateLine: "rgba(46, 107, 214, %a)",
+  strokes: [[7, "rgba(46, 107, 214, 0.06)"], [2.4, "rgba(46, 107, 214, 0.3)"], [1.25, "rgba(30, 52, 98, 0.85)"]] as Array<[number, string]>,
+};
 
 // The same passband the meter and the app's gate use: flat top, steep skirts.
 const response = (x: number, c: number, w: number) => 1 / Math.sqrt(1 + Math.pow((x - c) / w, 16));
@@ -71,8 +80,11 @@ export function createScope(
     reduceMotion: boolean;
     layout: () => ScopeLayout;
     onReadout: (squelch: number) => void;
+    light?: boolean;
   },
 ): Scope | null {
+  const P = opts.light ? DAY : NIGHT;
+  const BG = P.bg;
   const ctx = canvas.getContext("2d", { alpha: false });
   if (!ctx) return null;
 
@@ -165,7 +177,8 @@ export function createScope(
 
     // Persistence: fade, never clear. Faster when still so a resize settles.
     ctx.globalCompositeOperation = "source-over";
-    ctx.fillStyle = `rgba(${BG}, ${still ? 1 : Math.min(1, 0.2 * dt * 60)})`;
+    const fade = still ? 1 : Math.min(1, 0.2 * dt * 60);
+    ctx.fillStyle = `rgba(${BG}, ${fade})`;
     ctx.fillRect(0, 0, width, height);
 
     // The filter's response, drawn as the gate: a shaded mask under a thin
@@ -179,8 +192,8 @@ export function createScope(
       ctx.lineTo(width, baseY);
       ctx.closePath();
       const fill = ctx.createLinearGradient(0, baseY - amp, 0, baseY);
-      fill.addColorStop(0, `rgba(78, 155, 234, ${0.07 * gate})`);
-      fill.addColorStop(1, `rgba(78, 155, 234, 0)`);
+      fill.addColorStop(0, `rgba(${P.gateFill}, ${0.07 * gate})`);
+      fill.addColorStop(1, `rgba(${P.gateFill}, 0)`);
       ctx.fillStyle = fill;
       ctx.fill();
       ctx.beginPath();
@@ -190,7 +203,7 @@ export function createScope(
         else ctx.lineTo(x, top(i / 200));
       }
       ctx.setLineDash([4 * dpr, 5 * dpr]);
-      ctx.strokeStyle = `rgba(130, 186, 245, ${0.5 * gate})`;
+      ctx.strokeStyle = P.gateLine.replace("%a", String(0.5 * gate));
       ctx.lineWidth = 1 * dpr;
       ctx.stroke();
       ctx.setLineDash([]);
@@ -203,7 +216,7 @@ export function createScope(
       const x = i / (POINTS - 1);
       trace[i] += (sample(x, e, c, w, L.spread, still) - trace[i]) * k;
     }
-    ctx.globalCompositeOperation = "lighter";
+    ctx.globalCompositeOperation = P.additive ? "lighter" : "source-over";
     const path = new Path2D();
     for (let i = 0; i < POINTS; i++) {
       const x = (i / (POINTS - 1)) * width;
@@ -212,12 +225,25 @@ export function createScope(
       else path.lineTo(x, y);
     }
     ctx.lineJoin = "round";
-    const strokes: Array<[number, string]> = [
-      [9, "rgba(78, 155, 234, 0.05)"],
-      [3.5, "rgba(78, 155, 234, 0.28)"],
-      [1.2, "rgba(214, 233, 255, 0.85)"],
-    ];
-    for (const [lw, color] of strokes) {
+    // Day: the area under the line in a soft wash of the blue, so the line
+    // sits on something instead of floating on bare paper.
+    if (P.wash) {
+      const area = new Path2D(path);
+      area.lineTo(width, baseY + 2 * dpr);
+      area.lineTo(0, baseY + 2 * dpr);
+      area.closePath();
+      const g = ctx.createLinearGradient(0, baseY - amp, 0, baseY);
+      // Painted every frame into a canvas that only fades, so it is laid
+      // down at the fade's rate and settles at the strength written here.
+      // Fades to nothing before the floor, so the fill never ends in an
+      // edge of its own across the sky.
+      g.addColorStop(0, `rgba(${P.wash}, ${0.08 * fade})`);
+      g.addColorStop(0.7, `rgba(${P.wash}, ${0.025 * fade})`);
+      g.addColorStop(1, `rgba(${P.wash}, 0)`);
+      ctx.fillStyle = g;
+      ctx.fill(area);
+    }
+    for (const [lw, color] of P.strokes) {
       ctx.lineWidth = lw * dpr;
       ctx.strokeStyle = color;
       ctx.stroke(path);

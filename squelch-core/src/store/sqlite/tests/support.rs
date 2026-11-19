@@ -294,6 +294,7 @@ impl TriagedBuilder {
 
     pub(super) fn build(&self) -> TriagedMessage {
         TriagedMessage {
+            passband_note: false,
             foreground_triage: self.foreground,
             first_load: false,
             message: self.msg(),

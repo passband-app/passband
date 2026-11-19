@@ -1241,8 +1241,9 @@ struct MailSection: View {
                     selection: $prefs.threadStyle)
             }
             // The Mac's alone: an iPhone's default mail app needs an
-            // entitlement from Apple. The one-time ask after a send is
-            // DefaultMailApp's; this is where anyone goes afterwards.
+            // entitlement from Apple. The one-time ask (the system's dialog,
+            // when an inbox first loads) is DefaultMailApp's; this is where
+            // anyone who refused goes afterwards.
             #if os(macOS)
                 RowDivider()
                 DefaultMailAppRow()

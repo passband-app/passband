@@ -2,10 +2,10 @@
 // macOS to make it so, and the Settings button that does the same.
 //
 // THE ASK IS THE SYSTEM'S ALONE. There is no card, sheet or step of ours: the
-// first time an inbox is loaded over a verified connection, and a second
-// later so nothing lands mid-transition, Passband asks macOS to make it the
-// default mail app. macOS may show its own confirmation; that is the whole
-// ask. One rule covers both roads to that moment:
+// first time an inbox is loaded over a verified connection, Passband decides,
+// and a second later (so nothing lands mid-transition) asks macOS to make it
+// the default mail app. macOS may show its own confirmation; that is the
+// whole ask. One rule covers both roads to that moment:
 //
 //   * A NEW INSTALL, at the end of its first look (FirstLoad.conclude): the
 //     inbox is on screen for the first time.
@@ -16,9 +16,17 @@
 // refusal never asks again. Skipped when Passband is already the default.
 //
 // NEVER OVER ANOTHER ONE-TIME CARD (the first-load veil, What's New, the
-// iPhone or agent ad, the share ask, the update card). If one is up when the
-// second has passed, nothing is stamped and nothing waits behind it: the next
-// launch tries again.
+// iPhone or agent ad, the share ask, the update card). If one is up at the
+// decision, nothing is stamped and nothing waits behind it: the next launch
+// tries again. The decision runs BEFORE What's New and the agent ad are
+// offered at the first sync, and a launch that asks holds them, and the
+// iPhone ad, until the next launch (`holdsCardsThisLaunch`): they never land
+// beside the system's dialog.
+//
+// ONLY A BUNDLE THAT CLAIMS mailto: ASKS. Every build shares one bundle id
+// and one defaults domain, and build.sh strips mailto: from all but release
+// builds. A dev build asking would spend the one ask, for an app Launch
+// Services cannot pick, on the very Mac the release will run on.
 //
 // Settings > Mail keeps the button for anyone who refused and changed their
 // mind.
@@ -63,29 +71,50 @@ final class DefaultMailApp {
     /// The last "Make default" failed or was declined.
     private(set) var lastRequestFailed = false
 
-    /// An ask is waiting out its second, so a second caller in that window
-    /// does not queue another.
-    private var pending = false
+    /// Whether this bundle's Info.plist declares the mailto: scheme. Injected
+    /// so a suite can stand in a plist.
+    private let declaresMailto: () -> Bool
+
+    /// This launch decided to ask. Two callers in the same second (the end of
+    /// a first look and the first sync) make one request, and the other
+    /// one-time cards hold until the next launch.
+    private(set) var askedThisLaunch = false
+
+    /// The other one-time cards (What's New, the agent ad, the iPhone ad)
+    /// stay down for the rest of a launch that asked.
+    static var holdsCardsThisLaunch: Bool { shared.askedThisLaunch }
 
     init(
         defaults: UserDefaults = .standard,
         forced: Bool = DefaultMailApp.forced,
         probe: @escaping () -> Bool = DefaultMailApp.systemSaysPassband,
-        request: (() -> Void)? = nil
+        request: (() -> Void)? = nil,
+        declaresMailto: @escaping () -> Bool = { DefaultMailApp.declaresMailto(Bundle.main.infoDictionary) }
     ) {
         self.defaults = defaults
+        self.declaresMailto = declaresMailto
         self.probe = probe
         self.isForced = forced
         self.request = request ?? { DefaultMailApp.shared.makeDefault() }
         refresh()
     }
 
-    /// THE RULE, pure: a verified connection, nothing else on screen, not
-    /// already the default, and never asked (or the preview override).
+    /// THE RULE, pure: a bundle that claims mailto:, a verified connection,
+    /// nothing else on screen, not already the default, and never asked (or
+    /// the preview override).
     nonisolated static func shouldAsk(
-        verified: Bool, blocked: Bool, isDefault: Bool, asked: Bool, forced: Bool
+        declaresMailto: Bool, verified: Bool, blocked: Bool, isDefault: Bool, asked: Bool,
+        forced: Bool
     ) -> Bool {
-        verified && !blocked && !isDefault && (forced || !asked)
+        declaresMailto && verified && !blocked && !isDefault && (forced || !asked)
+    }
+
+    /// Whether an Info.plist's CFBundleURLTypes names the mailto: scheme.
+    nonisolated static func declaresMailto(_ info: [String: Any]?) -> Bool {
+        guard let types = info?["CFBundleURLTypes"] as? [[String: Any]] else { return false }
+        return types.contains { type in
+            (type["CFBundleURLSchemes"] as? [String] ?? []).contains { $0.lowercased() == "mailto" }
+        }
     }
 
     /// The default handler's bundle id against this app's, both lowercased.
@@ -99,42 +128,32 @@ final class DefaultMailApp {
 
     var asked: Bool { defaults.bool(forKey: Self.askedKey) }
 
-    /// The inbox has loaded. `after` the delay, reads `conditions` (whether
-    /// the connection is verified, and whether another one-time card is up)
-    /// and asks if the rule says so, stamping first. Nil `after` decides now.
-    /// The completion says whether it asked.
+    /// The inbox has loaded. DECIDES NOW, from `verified` and `blocked`
+    /// (another one-time card up), and when the rule says ask: stamps, holds
+    /// the other cards for the launch, and makes the request `after` the
+    /// delay (nil: at once). Returns whether it will ask.
+    @discardableResult
     func askIfNeverAsked(
-        after delay: Duration? = DefaultMailApp.askDelay,
-        conditions: @escaping () -> (verified: Bool, blocked: Bool),
-        done: ((Bool) -> Void)? = nil
-    ) {
-        guard !FixtureMode.isEnabled || isForced, !pending else {
-            done?(false)
-            return
-        }
-        guard let delay else {
-            done?(decide(conditions()))
-            return
-        }
-        pending = true
-        Task { @MainActor in
-            try? await Task.sleep(for: delay)
-            self.pending = false
-            let asked = self.decide(conditions())
-            done?(asked)
-        }
-    }
-
-    /// The rule over this install, and the stamp written before the request.
-    private func decide(_ now: (verified: Bool, blocked: Bool)) -> Bool {
+        verified: Bool, blocked: Bool, after delay: Duration? = DefaultMailApp.askDelay
+    ) -> Bool {
+        guard !FixtureMode.isEnabled || isForced, !askedThisLaunch else { return false }
         refresh()
         guard
             Self.shouldAsk(
-                verified: now.verified, blocked: now.blocked, isDefault: isDefault,
-                asked: asked, forced: isForced)
+                declaresMailto: declaresMailto(), verified: verified, blocked: blocked,
+                isDefault: isDefault, asked: asked, forced: isForced)
         else { return false }
+        // The stamp BEFORE the request: a crash or a refusal never asks again.
         if !isForced { defaults.set(true, forKey: Self.askedKey) }
-        request()
+        askedThisLaunch = true
+        guard let delay else {
+            request()
+            return true
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: delay)
+            self.request()
+        }
         return true
     }
 

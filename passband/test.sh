@@ -995,8 +995,10 @@ run_suite mailto \
   Sources/Passband/Lib/Mailto.swift \
   Tests/MailtoTests.swift
 
-# When Passband asks once to be the default mail app: only after a send, never
-# when it already is, never twice, and never on top of another card.
+# When Passband asks macOS once to make it the default mail app: the first
+# verified inbox, new install or update, never from a bundle without mailto:,
+# never when it already is, never twice, never beside another card, and the
+# cards it holds for the rest of that launch.
 run_suite default-mail-app \
   Sources/Passband/Lib/DefaultMailApp.swift \
   Tests/DefaultMailAppTests.swift

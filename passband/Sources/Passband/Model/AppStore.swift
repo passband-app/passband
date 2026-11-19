@@ -5266,10 +5266,7 @@ final class AppStore {
         // its close saves nothing a question could promise. Put away through
         // `closeCompose` all the same, so a typed-then-cleared composer's
         // pending blank save still deletes its row.
-        let writing =
-            (DraftSaver.shared.isTouched(.compose) && DraftSaver.hasContent(open))
-            || !open.attachments.isEmpty
-        guard writing else {
+        guard composeHasWriting(open) else {
             closeCompose()
             openMailto(link)
             return
@@ -5287,6 +5284,12 @@ final class AppStore {
         mailtoAsk = MailtoAsk(
             link: link, composerId: open.id,
             keepsDraft: open.replyToMessageId != nil || draftsV2Available)
+    }
+
+    /// What the person typed into this composer, not what it opened holding.
+    private func composeHasWriting(_ open: ComposeState) -> Bool {
+        (DraftSaver.shared.isTouched(.compose) && DraftSaver.hasContent(open))
+            || !open.attachments.isEmpty
     }
 
     func cancelMailtoAsk() {
@@ -5315,17 +5318,15 @@ final class AppStore {
     #if os(macOS)
         /// The inbox has loaded: ask macOS, once ever, to make Passband the
         /// default mail app (`DefaultMailApp`). Called at the first sync of
-        /// every launch (an install from before the ask) and at the end of a
-        /// first look (a new install). Blocked by any other one-time card,
-        /// read a second later when the ask would go; blocked waits for the
-        /// next launch, not behind the card.
-        func askDefaultMailIfNeverAsked() {
-            DefaultMailApp.shared.askIfNeverAsked { [weak self] in
-                guard let self else { return (verified: false, blocked: true) }
-                return (
-                    verified: self.connStatus == .connected && self.connectionVerified,
-                    blocked: AgentNudge.othersShowing(self) || AgentNudge.shared.showingNudge)
-            }
+        /// every launch (an install from before the ask), before What's New
+        /// and the agent ad, and at the end of a first look (a new install).
+        /// Blocked by any other one-time card on screen now; blocked waits
+        /// for the next launch, not behind the card.
+        @discardableResult
+        func askDefaultMailIfNeverAsked() -> Bool {
+            DefaultMailApp.shared.askIfNeverAsked(
+                verified: connStatus == .connected && connectionVerified,
+                blocked: AgentNudge.othersShowing(self) || AgentNudge.shared.showingNudge)
         }
     #endif
 
@@ -5360,14 +5361,21 @@ final class AppStore {
     /// stands. Called on every change that can move it: a link arriving,
     /// `connStatus`, the connection verified, a composer closing, the timer.
     func settleMailtoInbox(now: Date = Date()) {
-        let free = mailtoInboxComposer == nil || compose?.id != mailtoInboxComposer
-        let (href, dropped) = mailtoInbox.settle(
+        // The composer the last held link opened, if it is still the one up:
+        // left as it opened, the next link replaces it; written in, it stays
+        // and the next link waits, and says so.
+        var occupant = MailtoInbox.Occupant.none
+        if let open = compose, open.id == mailtoInboxComposer {
+            occupant = composeHasWriting(open) || open.sending ? .writing : .untouched
+        }
+        let (href, dropped, waiting) = mailtoInbox.settle(
             connected: connStatus == .connected && connectionVerified,
-            free: free,
+            occupant: occupant,
             gate: connStatus == .disconnected,
             now: now)
         // One toast, however many went: they went for the same reason.
         if let first = dropped.first { pushToast(MailtoInbox.copy(first), .error) }
+        if waiting { pushToast(MailtoInbox.waitingCopy) }
         if let href {
             openComposeMailto(href)
             mailtoInboxComposer = compose?.id

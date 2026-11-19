@@ -33,7 +33,8 @@ struct Mailto: Equatable, Sendable {
     }
 
     /// The link read into fields, or nil for anything that is not a mailto:
-    /// link, is too long to be one, or asks for nothing at all. A link with a
+    /// link, is too long to be one, or names only addresses that were all
+    /// refused. A bare `mailto:` is a blank message. A link with a
     /// subject or body and nobody to write to is fine (RFC 6068 allows it):
     /// the person picks the recipient.
     init?(_ url: String) {
@@ -77,8 +78,12 @@ struct Mailto: Equatable, Sendable {
         self.to = keep(to)
         self.cc = keep(cc)
         self.bcc = keep(bcc)
+        // A bare `mailto:` (nothing after the colon, or only a `?`) is a
+        // request for a blank message, as Mail opens one. A link that named
+        // an address and had every one refused is not.
         guard !(self.to.isEmpty && self.cc.isEmpty && self.bcc.isEmpty)
             || !subject.isEmpty || !body.isEmpty
+            || path.trimmingCharacters(in: .whitespaces).isEmpty && query.isEmpty
         else { return nil }
     }
 
@@ -179,39 +184,58 @@ struct MailtoInbox: Sendable {
         case full
     }
 
-    private(set) var held: [(href: String, at: Date)] = []
+    private(set) var held: [(href: String, at: Date, told: Bool)] = []
 
     var isEmpty: Bool { held.isEmpty }
 
     /// Hold a link. Nil when held; the reason when it was turned away.
     mutating func add(_ href: String, at now: Date) -> Drop? {
         guard held.count < Self.capacity else { return .full }
-        held.append((href, now))
+        held.append((href, now, false))
         return nil
     }
 
-    /// What to do now. `connected` is a VERIFIED connection; `free` is that
-    /// no composer a held link opened is still up; `gate` is the Connect
-    /// screen.
+    /// The composer the last held link opened, if it is still up.
+    enum Occupant: Equatable, Sendable {
+        /// None up: the next link's turn.
+        case none
+        /// Up, and nothing written in it: the next link replaces it, as a
+        /// second click on a link in a message would.
+        case untouched
+        /// Up, with the person's writing in it: kept, and the next link
+        /// waits, said out loud (`waiting`).
+        case writing
+    }
+
+    /// What to do now. `connected` is a VERIFIED connection; `occupant` is
+    /// the composer the last held link opened; `gate` is the Connect screen.
     ///   * the Connect screen: every link goes, `.noMailbox`;
-    ///   * connected and free: the oldest link opens, the rest wait their
-    ///     turn (no clock on them now: they wait on the person, not on us);
+    ///   * connected, no occupant or an untouched one: the oldest link opens,
+    ///     the rest wait their turn;
+    ///   * connected, writing in the occupant: the links wait (no clock: they
+    ///     wait on the person), and `waiting` is true the first time each
+    ///     one is held this way, for the toast that says so;
     ///   * not connected: links held past `holdFor` go, `.expired`.
     mutating func settle(
-        connected: Bool, free: Bool, gate: Bool, now: Date
-    ) -> (open: String?, dropped: [Drop]) {
+        connected: Bool, occupant: Occupant, gate: Bool, now: Date
+    ) -> (open: String?, dropped: [Drop], waiting: Bool) {
         if gate {
             let dropped = held.map { _ in Drop.noMailbox }
             held.removeAll()
-            return (nil, dropped)
+            return (nil, dropped, false)
         }
         if connected {
-            guard free, !held.isEmpty else { return (nil, []) }
-            return (held.removeFirst().href, [])
+            guard !held.isEmpty else { return (nil, [], false) }
+            if occupant == .writing {
+                let untold = held.contains { !$0.told }
+                for i in held.indices { held[i].told = true }
+                return (nil, [], untold)
+            }
+            return (held.removeFirst().href, [], false)
         }
         let expired = held.filter { now.timeIntervalSince($0.at) >= Self.holdFor }.count
         held.removeAll { now.timeIntervalSince($0.at) >= Self.holdFor }
-        return (nil, Array(repeating: .expired, count: expired))
+        return (nil, Array(repeating: .expired, count: expired), false)
     }
 
     /// When the oldest held link expires, for the timer that drops it.
@@ -225,4 +249,7 @@ struct MailtoInbox: Sendable {
         case .full: "Couldn't open that email link. Too many are waiting."
         }
     }
+
+    /// The toast for a link held behind the person's own writing.
+    static let waitingCopy = "That email link will open when you send or close this message."
 }

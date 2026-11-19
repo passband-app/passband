@@ -38,9 +38,39 @@ impl CredentialStore for BrokenCreds {
     }
 }
 
-/// A mock Gmail that answers every request with `status` and records them.
+/// What the mock Gmail answers.
+#[derive(Clone, Default)]
+struct Mock {
+    /// The status of every insert (POST).
+    post: u16,
+    /// The status of every labels read (GET) not otherwise configured.
+    get: u16,
+    /// Message ids the labels read reports in the trash.
+    trashed: Vec<&'static str>,
+    /// Message ids the labels read answers 404 for.
+    missing: Vec<&'static str>,
+}
+
+/// A mock Gmail that answers every insert with `status`, reports every
+/// message still in the inbox, and records the inserts.
 async fn mock_gmail(
     status: u16,
+) -> (
+    String,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    mock_gmail_with(Mock {
+        post: status,
+        get: 200,
+        ..Default::default()
+    })
+    .await
+}
+
+/// [`mock_gmail`], configured. Only inserts are recorded.
+async fn mock_gmail_with(
+    mock: Mock,
 ) -> (
     String,
     Arc<std::sync::Mutex<Vec<String>>>,
@@ -57,10 +87,29 @@ async fn mock_gmail(
             };
             let mut buf = vec![0u8; 65536];
             let n = sock.read(&mut buf).await.unwrap();
-            log.lock()
-                .unwrap()
-                .push(String::from_utf8_lossy(&buf[..n]).to_string());
-            let body = r#"{"id":"filed-1","threadId":"t-filed"}"#;
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let line = req.lines().next().unwrap_or_default().to_string();
+            let (status, body) = if line.starts_with("GET ") {
+                let id = line
+                    .split("/messages/")
+                    .nth(1)
+                    .and_then(|r| r.split(['?', ' ']).next())
+                    .unwrap_or_default()
+                    .to_string();
+                if mock.missing.iter().any(|m| *m == id) {
+                    (404, "{}".to_string())
+                } else if mock.trashed.iter().any(|m| *m == id) {
+                    (mock.get, format!(r#"{{"id":"{id}","labelIds":["TRASH"]}}"#))
+                } else {
+                    (mock.get, format!(r#"{{"id":"{id}","labelIds":["INBOX"]}}"#))
+                }
+            } else {
+                log.lock().unwrap().push(req);
+                (
+                    mock.post,
+                    r#"{"id":"filed-1","threadId":"t-filed"}"#.to_string(),
+                )
+            };
             let resp = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -279,6 +328,110 @@ async fn a_refused_insert_stays_stamped() {
         LapsedOutcome::AlreadyDone
     );
     assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// Mail deleted, trashed or in spam since triage saw it is never listed:
+/// the store never hears of a deletion, so Gmail is asked first.
+#[tokio::test]
+async fn mail_gone_from_gmail_is_not_listed() {
+    let (base, seen, _h) = mock_gmail_with(Mock {
+        post: 200,
+        get: 200,
+        trashed: vec!["g-0"],
+        missing: vec!["g-1"],
+    })
+    .await;
+    let (state, _store, _acct) = setup(5, &base);
+    assert_eq!(
+        run_lapsed_pass(&state, later()).await.unwrap(),
+        LapsedOutcome::Filed(3)
+    );
+    let req = seen.lock().unwrap()[0].clone();
+    let body = &req[req.find("\r\n\r\n").unwrap() + 4..];
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    use base64::Engine as _;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(v["raw"].as_str().unwrap())
+        .unwrap();
+    let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+    let text = parsed.body_text(0).unwrap();
+    assert!(!text.contains("Your receipt 0") && !text.contains("Your receipt 1"));
+    for n in 2..5 {
+        assert!(text.contains(&format!("Your receipt {n}")), "{text}");
+    }
+}
+
+/// Too few left once the gone ones are dropped: nothing filed or stamped.
+#[tokio::test]
+async fn gone_mail_can_leave_too_few() {
+    let (base, seen, _h) = mock_gmail_with(Mock {
+        post: 200,
+        get: 200,
+        trashed: vec!["g-0"],
+        missing: vec![],
+    })
+    .await;
+    let (state, store, acct) = setup(3, &base);
+    assert_eq!(
+        run_lapsed_pass(&state, later()).await.unwrap(),
+        LapsedOutcome::TooFew(2)
+    );
+    assert!(stamp(&store, acct).is_none());
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// A check that cannot finish files nothing and stamps nothing.
+#[tokio::test]
+async fn a_failed_mailbox_check_files_nothing() {
+    let (base, seen, _h) = mock_gmail_with(Mock {
+        post: 200,
+        get: 500,
+        ..Default::default()
+    })
+    .await;
+    let (state, store, acct) = setup(4, &base);
+    assert_eq!(
+        run_lapsed_pass(&state, later()).await.unwrap(),
+        LapsedOutcome::CheckFailed
+    );
+    assert!(stamp(&store, acct).is_none());
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// Refusals that prove nothing was filed lift the stamp; a 5xx keeps it.
+#[tokio::test]
+async fn an_insert_that_never_reached_google_is_retried_later() {
+    for (status, outcome, stamped) in [
+        (401, LapsedOutcome::Deferred, false),
+        (429, LapsedOutcome::Deferred, false),
+        (500, LapsedOutcome::Failed, true),
+    ] {
+        let (base, _seen, _h) = mock_gmail(status).await;
+        let (state, store, acct) = setup(4, &base);
+        assert_eq!(
+            run_lapsed_pass(&state, later()).await.unwrap(),
+            outcome,
+            "{status}"
+        );
+        assert_eq!(stamp(&store, acct).is_some(), stamped, "{status}");
+    }
+}
+
+/// Somebody who uses Passband only through an assistant: the Mac idle for
+/// twenty days, the agent door used yesterday. Not lapsed.
+#[tokio::test]
+async fn an_owner_using_the_agent_door_gets_nothing() {
+    let (base, seen, _h) = mock_gmail(200).await;
+    let (state, store, acct) = setup(4, &base);
+    store
+        .note_agent_door_use(acct, later() - Duration::days(1))
+        .unwrap();
+    assert_eq!(
+        run_lapsed_pass(&state, later()).await.unwrap(),
+        LapsedOutcome::Active
+    );
+    assert!(stamp(&store, acct).is_none());
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 /// The note, synced back from Gmail as a fresh arrival, is recognised: stored

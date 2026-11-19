@@ -1843,6 +1843,25 @@ impl ServerHandler for SquelchServer {
         .with_instructions(instructions)
     }
 
+    /// Every tool call, through the router as the macro would route it, after
+    /// stamping that the agent door was used
+    /// ([`SqliteStore::note_agent_door_use`]): the presence fact that keeps
+    /// somebody who uses Passband only through an assistant from reading as
+    /// gone to the lapsed-user note. On both auth modes, since a call that
+    /// reaches here was let through. Time only, coalesced to one write per
+    /// few minutes, and never allowed to fail the call.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
+        let _ = self
+            .store
+            .note_agent_door_use(self.account_id, chrono::Utc::now());
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
     /// The tool list, MINUS the mail-writing tools the owner has not allowed.
     /// Hand-written (the macro only fills this in when it is missing) so that
     /// an agent on a mailbox with writing off is not shown a `send_email` it

@@ -26,6 +26,9 @@
 //! - NOTHING THE OWNER ALREADY OPENED in a Passband client.
 //! - NOTHING FROM A KNOWN CONTACT (`sent_count > 0`): a friend's mail is never
 //!   "mail you shouldn't have had to open", whatever triage called it.
+//! - NOTHING WHOSE SENDER LOOKS OFF (#639 `sender_signals`): a display name
+//!   that spells another address, replies that go to another organization,
+//!   or a `Sender:` other than From. The note must never vouch for a scam.
 //!
 //! Whether the owner opened it in Gmail is not stored locally, so it is not a
 //! test here.
@@ -60,6 +63,9 @@ impl NoteKind {
 /// One message the note may list. Facts only, straight off the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteCandidate {
+    /// The provider's id for the message (`messages.gmail_msg_id`), for the
+    /// check that it is still in the mailbox.
+    pub provider_id: String,
     pub from_addr: String,
     pub from_name: Option<String>,
     pub subject: String,
@@ -70,7 +76,8 @@ pub struct NoteCandidate {
 }
 
 const CANDIDATES_SQL: &str = concat!(
-    "SELECT m.from_addr, m.from_name, m.subject, m.received_at, d.decision_json, m.snippet
+    "SELECT m.from_addr, m.from_name, m.subject, m.received_at, d.decision_json, m.snippet,
+            m.gmail_msg_id, m.sender_signals
      FROM messages m
      LEFT JOIN triage t ON t.message_id = m.id
      JOIN agent_message_decisions d ON d.account_id = m.account_id AND d.message_id = m.id
@@ -148,6 +155,15 @@ fn kind_of(decision_json: &str) -> Option<NoteKind> {
     None
 }
 
+/// Does the stored #639 reading say this sender is not who From claims?
+/// A name that spells another address, a `Sender:` other than From, or
+/// replies that leave From's organization. `via` and the envelope domain
+/// alone are what every mail service leaves, so they do not count.
+fn suspicious_sender(signals: Option<&str>) -> bool {
+    crate::types::SenderSignals::from_column(signals)
+        .is_some_and(|s| s.name_spoof.is_some() || s.sender.is_some() || s.reply_to.is_some())
+}
+
 impl SqliteStore {
     /// The mail the lapsed-user note may list: received at or after `since`,
     /// newest first, at most [`MAX_CANDIDATES`]. See the module docs for what
@@ -170,15 +186,28 @@ impl SqliteStore {
                         dt(r, 3)?,
                         r.get::<_, String>(4)?,
                         r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, Option<String>>(7)?,
                     ))
                 },
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
+            .filter(|row| !suspicious_sender(row.7.as_deref()))
             .filter_map(
-                |(from_addr, from_name, subject, received_at, decision, snippet)| {
+                |(
+                    from_addr,
+                    from_name,
+                    subject,
+                    received_at,
+                    decision,
+                    snippet,
+                    provider_id,
+                    _,
+                )| {
                     Some(NoteCandidate {
+                        provider_id,
                         kind: kind_of(&decision)?,
                         from_addr,
                         from_name,
@@ -222,6 +251,25 @@ mod tests {
         assert_eq!(j(r#"{"kinds":["receipt"]}"#), Some(NoteKind::Receipt));
         assert_eq!(j(r#"{"kinds":["promotional"]}"#), None);
         assert_eq!(j("not json"), None);
+    }
+
+    #[test]
+    fn a_sender_that_looks_off_is_suspicious() {
+        assert!(!suspicious_sender(None));
+        assert!(!suspicious_sender(Some("{}")));
+        assert!(!suspicious_sender(Some(r#"{"via":"mailer.example"}"#)));
+        assert!(!suspicious_sender(Some(
+            r#"{"envelope_domain":"bounce.example"}"#
+        )));
+        assert!(suspicious_sender(Some(
+            r#"{"name_spoof":"support@bank.example"}"#
+        )));
+        assert!(suspicious_sender(Some(
+            r#"{"reply_to":"x@elsewhere.example"}"#
+        )));
+        assert!(suspicious_sender(Some(
+            r#"{"sender":"x@elsewhere.example"}"#
+        )));
     }
 
     #[test]

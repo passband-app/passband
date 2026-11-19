@@ -15,7 +15,9 @@ use squelch_core::sync::{GMAIL_API_BASE, GmailMessage, LABEL_INBOX, LABEL_SPAM};
 use squelch_core::types::AccountId;
 
 use super::mime::{OUTBOX_HEADER, bare_message_id, outbox_token};
-use super::{FetchedRaw, MailWriter, ParentHeaders, SentRef, WriteError, send_budget};
+use super::{
+    FetchedRaw, InsertFailure, MailWriter, ParentHeaders, SentRef, WriteError, send_budget,
+};
 
 /// The modify JSON body. Empty arrays are still sent (harmless no-ops) so the
 /// shape is uniform.
@@ -379,15 +381,56 @@ impl MailWriter for GmailWriteClient {
     /// `gmail.modify` and `gmail.insert` scopes), so it needs no grant the
     /// account does not already hold. `internalDateSource` is left at its
     /// default, the time Gmail files it.
-    async fn insert_into_inbox(&self, raw: &[u8]) -> Result<SentRef, WriteError> {
+    ///
+    /// Spelled out rather than through `post_json`, because the caller needs
+    /// to know whether the request can have reached Google ([`InsertFailure`]).
+    async fn insert_into_inbox(&self, raw: &[u8]) -> Result<SentRef, InsertFailure> {
+        let unsent = |error| InsertFailure {
+            error,
+            reached: false,
+        };
         let url = format!("{}/messages", self.base);
-        let v = self.post_json(&url, &insert_body(raw)).await?;
+        let token = self.write_token().await.map_err(unsent)?;
+        self.admit("POST", &url).await.map_err(unsent)?;
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&insert_body(raw))
+            .send()
+            .await
+            .map_err(|e| InsertFailure {
+                // A refused connection or an unresolvable host never carried
+                // a byte; anything later (a timeout mid-request) might have.
+                reached: !(e.is_connect() || e.is_builder()),
+                error: WriteError::Transport(format!("gmail request failed: {e}")),
+            })?;
+        let status = resp.status().as_u16();
+        let resp = self.settle(resp).await.map_err(|error| InsertFailure {
+            error,
+            // Refused before anything was done: the token, or the rate.
+            reached: !matches!(status, 401 | 429),
+        })?;
+        // Filed. A body that will not decode costs the ids, never the note.
+        let v = resp.json::<Value>().await.unwrap_or_default();
         Ok(SentRef {
             id: v["id"].as_str().map(str::to_string),
             thread_id: v["threadId"].as_str().map(str::to_string),
             warning: None,
             raw: None,
         })
+    }
+
+    /// `messages.get?format=minimal`: ids and labels, no headers, no body.
+    /// Booked against the mailbox's Gmail budget as a message read. A 404
+    /// is the mailbox no longer having it.
+    async fn current_labels(&self, gmail_msg_id: &str) -> Result<Option<Vec<String>>, WriteError> {
+        let url = format!("{}/messages/{gmail_msg_id}?format=minimal", self.base);
+        match self.get_json::<GmailMessage>(&url).await {
+            Ok(msg) => Ok(Some(msg.label_ids)),
+            Err(WriteError::Api { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Read a just-sent message with the WRITE token, to echo it into the local
@@ -760,7 +803,57 @@ mod tests {
         let c = client(base);
         let err = c.insert_into_inbox(b"x").await.unwrap_err();
         handle.await.unwrap();
-        assert!(matches!(err, WriteError::Api { status: 403, .. }), "{err}");
+        assert!(
+            matches!(err.error, WriteError::Api { status: 403, .. }),
+            "{}",
+            err.error
+        );
+        assert!(
+            err.reached,
+            "a refusal of the message itself may not be retried"
+        );
+    }
+
+    /// Refusals that prove nothing was filed say so; ambiguous ones do not.
+    #[tokio::test]
+    async fn an_insert_failure_says_whether_it_reached_google() {
+        for (status, reached) in [(401, false), (429, false), (500, true), (503, true)] {
+            let (base, handle) = mock_once(status, "{}").await;
+            let err = client(base).insert_into_inbox(b"x").await.unwrap_err();
+            handle.await.unwrap();
+            assert_eq!(err.reached, reached, "{status}");
+        }
+        // Nothing listening: the connection is refused, nothing was sent.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = client(format!("http://{addr}"))
+            .insert_into_inbox(b"x")
+            .await
+            .unwrap_err();
+        assert!(!err.reached, "connection refused never reached Google");
+        assert!(matches!(err.error, WriteError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn current_labels_reads_minimal_and_a_404_is_gone() {
+        let (base, handle) =
+            mock_once(200, "{\"id\":\"m1\",\"labelIds\":[\"TRASH\",\"UNREAD\"]}").await;
+        let labels = client(base).current_labels("m1").await.unwrap();
+        let req = handle.await.unwrap();
+        assert!(req.starts_with("GET /messages/m1?format=minimal "), "{req}");
+        assert_eq!(
+            labels,
+            Some(vec!["TRASH".to_string(), "UNREAD".to_string()])
+        );
+
+        let (base, handle) = mock_once(404, "{}").await;
+        assert_eq!(client(base).current_labels("m1").await.unwrap(), None);
+        handle.await.unwrap();
+
+        let (base, handle) = mock_once(500, "{}").await;
+        assert!(client(base).current_labels("m1").await.is_err());
+        handle.await.unwrap();
     }
 
     #[tokio::test]

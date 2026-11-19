@@ -252,3 +252,41 @@ fn the_owners_own_mail_is_out() {
         .unwrap();
     assert_eq!(subjects(&store, acct), vec![CONTROL]);
 }
+
+/// A scam receipt can pass DMARC; the stored sender signals still give it
+/// away, and the note never lists it.
+#[test]
+fn a_sender_that_looks_off_is_out() {
+    let (store, acct) = store();
+    receipt(&store, acct, CONTROL, SHOP, 2);
+    let spoof = receipt(&store, acct, "spoof", SHOP, 1);
+    let via = receipt(&store, acct, "via", SHOP, 1);
+    let conn = store.lock().unwrap();
+    conn.execute(
+        "UPDATE messages SET sender_signals = '{\"name_spoof\":\"help@bank.example\"}' WHERE id = ?1",
+        [spoof],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE messages SET sender_signals = '{\"via\":\"mailer.example\"}' WHERE id = ?1",
+        [via],
+    )
+    .unwrap();
+    drop(conn);
+    let mut got = subjects(&store, acct);
+    got.sort();
+    assert_eq!(
+        got,
+        vec![CONTROL.to_string(), "via".to_string()],
+        "a mail service is fine"
+    );
+}
+
+/// The candidate carries the provider id the liveness check asks about.
+#[test]
+fn a_candidate_names_its_provider_id() {
+    let (store, acct) = store();
+    receipt(&store, acct, "g-id", SHOP, 1);
+    let got = store.lapsed_note_candidates(acct, week_ago()).unwrap();
+    assert_eq!(got[0].provider_id, "g-id");
+}

@@ -67,10 +67,31 @@ pub fn is_filed_passband_note(msg: &mail_parser::Message) -> bool {
     marked
         && !msg.headers().iter().any(|h| {
             let name = h.name.as_str();
-            name.eq_ignore_ascii_case("Received")
-                || name.eq_ignore_ascii_case(AUTH_RESULTS_HEADER)
+            name.eq_ignore_ascii_case(AUTH_RESULTS_HEADER)
                 || name.eq_ignore_ascii_case("ARC-Authentication-Results")
+                || (name.eq_ignore_ascii_case("Received")
+                    && !gmail_api_received(h, &msg.raw_message))
         })
+}
+
+/// Is this `Received` the line Gmail's API writes when it files a message
+/// (`by gmailapi.google.com with HTTPREST`)? A sender can write one of these
+/// into a mail too, but a delivered mail always gains the receiving server's
+/// own `Received` above it, which is not one, so "every `Received` is this"
+/// still holds only for mail filed through the API.
+fn gmail_api_received(header: &mail_parser::Header, raw_message: &[u8]) -> bool {
+    let Some(value) = raw_message
+        .get(header.offset_start as usize..header.offset_end as usize)
+        .and_then(|b| std::str::from_utf8(b).ok())
+    else {
+        return false;
+    };
+    let tokens: Vec<String> = value
+        .split_whitespace()
+        .map(|t| t.trim_end_matches([';', ',']).to_ascii_lowercase())
+        .collect();
+    let pair = |a: &str, b: &str| tokens.windows(2).any(|w| w[0] == a && w[1] == b);
+    pair("by", "gmailapi.google.com") && pair("with", "httprest")
 }
 
 /// Crudely flatten HTML to text: drop tags, decode common entities, collapse
@@ -1414,6 +1435,19 @@ mod tests {
         assert!(is_note(&note_bytes("", "X-Passband-Note:  Lapsed-Digest ")));
         assert!(!is_note(&note_bytes("", "X-Passband-Note: other")));
         assert!(!is_note(&note_bytes("", "X-Other: lapsed-digest")));
+        // What Gmail's insert writes, alone or twice: still the note.
+        let api = "Received: from 123456789012\r\n        named unknown\r\n        by gmailapi.google.com\r\n        with HTTPREST;\r\n        Tue, 17 Nov 2026 10:00:00 -0800\r\n";
+        assert!(is_note(&note_bytes(api, marker)));
+        assert!(is_note(&note_bytes(&format!("{api}{api}"), marker)));
+        // THE SPOOF: a sender writes the API's line into their mail; the
+        // receiving MX prepends its own above it. Not the note.
+        let mx = "Received: by 2002:a05:6400:1:b0:1:1 with SMTP id x;\r\n        Tue, 17 Nov 2026 10:00:01 -0800\r\n";
+        assert!(!is_note(&note_bytes(&format!("{mx}{api}"), marker)));
+        // The API's words in the wrong places are not the API's line.
+        assert!(!is_note(&note_bytes(
+            "Received: from gmailapi.google.com by mx.example with HTTPREST;\r\n",
+            marker
+        )));
         for hop in [
             "Received: from mail.attacker.example by mx.google.com; Tue, 17 Nov 2026 10:00:00 +0000\r\n",
             "Authentication-Results: mx.google.com; dkim=pass\r\n",

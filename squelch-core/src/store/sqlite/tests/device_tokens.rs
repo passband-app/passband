@@ -1282,6 +1282,30 @@ fn unnamed_client_use_is_read_only_from_unnamed_tokens() {
     );
 }
 
+/// Agent-door use is a time, written at most once per five minutes.
+#[test]
+fn agent_door_use_is_stamped_and_coalesced() {
+    use super::super::device_tokens::AGENT_USE_STAMP_SECS;
+    let (store, acct) = store();
+    assert_eq!(store.agent_door_last_used_at(acct).unwrap(), None);
+    let t0 = Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).single().unwrap();
+    store.note_agent_door_use(acct, t0).unwrap();
+    assert_eq!(store.agent_door_last_used_at(acct).unwrap(), Some(t0));
+    store
+        .note_agent_door_use(acct, t0 + Duration::seconds(60))
+        .unwrap();
+    assert_eq!(
+        store.agent_door_last_used_at(acct).unwrap(),
+        Some(t0),
+        "coalesced"
+    );
+    let later = t0 + Duration::seconds(AGENT_USE_STAMP_SECS);
+    store.note_agent_door_use(acct, later).unwrap();
+    assert_eq!(store.agent_door_last_used_at(acct).unwrap(), Some(later));
+    let other = store.ensure_account("other@example.com").unwrap();
+    assert_eq!(store.agent_door_last_used_at(other).unwrap(), None);
+}
+
 // ---- the owner's zone (#526) ------------------------------------------
 
 fn zoned(header: &str, zone: &str) -> ClientTag {

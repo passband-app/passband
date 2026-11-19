@@ -413,3 +413,34 @@ async fn no_read_tool_serves_the_relationship_ledger() {
         );
     }
 }
+
+/// A served tool call is agent-door presence (the lapsed-user note reads it);
+/// listing the tools is not use, and records nothing.
+#[tokio::test]
+async fn a_tool_call_stamps_agent_door_presence() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let account = store.ensure_account(ACCOUNT).expect("account");
+    let door = agent_door_router(
+        store.clone(),
+        ACCOUNT,
+        Default::default(),
+        Default::default(),
+        CancellationToken::new(),
+        &AgentDoorAuth::Open,
+        None,
+        Default::default(),
+        Default::default(),
+    )
+    .expect("router");
+    let mut session = Session::open(door, HOST, None).await;
+    let _ = session.tool_names().await;
+    assert_eq!(store.agent_door_last_used_at(account).unwrap(), None);
+
+    let before = Utc::now();
+    let _ = session.tool("list_sender_rules", json!({})).await;
+    let stamped = store
+        .agent_door_last_used_at(account)
+        .unwrap()
+        .expect("stamped");
+    assert!(stamped >= before - chrono::Duration::seconds(1));
+}

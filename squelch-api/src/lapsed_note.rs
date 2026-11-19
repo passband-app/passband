@@ -12,23 +12,30 @@
 //! the tenant. Passband is never a mail server.
 //!
 //! WHO. Only a lapsed owner ([`is_lapsed`]): a client was paired at least
-//! once, and no client has been present for [`IDLE_DAYS`]. Present means the
-//! app was OPEN, not only that it acted: an owner who opens the app every day
-//! and never taps anything is reading it, and a note telling them what they
-//! missed would be wrong. A mailbox that never paired a client is never
-//! written to.
+//! once, and nothing has been present for [`IDLE_DAYS`]. Present is any
+//! pairing, any app being OPEN (not only acting: an owner who opens the app
+//! every day and never taps anything is reading it), any use of a token
+//! whose client never names itself, and any tool call served by the agent
+//! door, so somebody who uses Passband only through an assistant is not
+//! "gone". A mailbox that never paired a client is never written to.
 //!
 //! WHAT. Facts triage already stored ([`SqliteStore::lapsed_note_candidates`]),
-//! never a model call. The words are a fixed template ([`compose`]); the list
-//! is sender, kind, date and subject. Fewer than [`MIN_ITEMS`] and nothing is
-//! filed and nothing is stamped, so a later check (while the owner is still
-//! away) can try again.
+//! never a model call. The store never learns of a deletion, so the newest
+//! [`MAX_CHECKED`] are each asked of Gmail first (labels only) and anything
+//! gone, trashed or in spam is dropped; if that check cannot finish, nothing
+//! is filed or stamped. The words are a fixed template ([`compose`]); each
+//! row is sender, kind, date, subject and the stored snippet with links,
+//! addresses and long numbers taken out ([`scrub_snippet`]), so the note
+//! never hands the owner a callback number or a code. Fewer than
+//! [`MIN_ITEMS`] and nothing is filed and nothing is stamped, so a later
+//! check (while the owner is still away) can try again.
 //!
 //! ONCE EVER, AT MOST ONCE. A stamp in `app_settings` ([`STAMP_KEY`]) is
 //! written BEFORE the insert, so a crash between the two costs the note,
 //! never a second copy. It is lifted again only when the request provably
-//! never reached Google (no credential, or the mailbox's Gmail budget held
-//! it); any other failure keeps it.
+//! never reached Google ([`crate::write::InsertFailure`]: no credential, the
+//! mailbox's Gmail budget held it, the connection never opened, or a 401 or
+//! 429); anything ambiguous (a timeout after sending, a 5xx) keeps it.
 //!
 //! WHICH MAILBOXES. Gmail only, for now. Graph can make a non-draft message
 //! only through an undocumented extended property (`PR_MESSAGE_FLAGS`), and
@@ -37,8 +44,8 @@
 //!
 //! IT NEVER SURFACES IN PASSBAND. The note is From "Passband"
 //! <[`FROM_ADDR`]> and carries `X-Passband-Note: lapsed-digest`. A filed
-//! message crosses no mail server, so it has no `Received` and no
-//! `Authentication-Results`, and with the header that is what ingest
+//! message crosses no mail server, so it has no `Received` but Gmail API's
+//! own and no `Authentication-Results`, and with the header that is what ingest
 //! recognises (`squelch_core::sync::ingest::is_filed_passband_note`): it is
 //! stored like an archive row, never triaged, never placed in For your eyes
 //! or Reading, never pushed, and never listed by a later note. Mail that
@@ -107,6 +114,10 @@ pub const LINK: &str = "https://passband.app/download";
 /// The button's words.
 pub const BUTTON: &str = "Open Passband";
 
+/// How many of the newest candidates are checked against Gmail (one
+/// labels-only read each). Only checked mail is listed or counted.
+pub const MAX_CHECKED: usize = 24;
+
 /// Longest a sender, subject or snippet runs in the list before it is cut.
 const SENDER_CAP: usize = 40;
 const SUBJECT_CAP: usize = 90;
@@ -117,13 +128,15 @@ pub const PALETTE: [&str; 8] = [
     "#5b8def", "#c27c3e", "#3a9d7a", "#9b6bd6", "#d0587e", "#4a9fb5", "#b5893a", "#6b7bd6",
 ];
 
-/// The newest moment any client was present: a pairing, an app open
-/// (`last_seen_at`), an action (`last_action_at`), or a use by a client that
-/// never names itself (`unnamed_used_at`, see
-/// [`SqliteStore::unnamed_client_last_used_at`]).
+/// The newest moment anything was present: any pairing (the mailbox's first
+/// and each platform's), an app open (`last_seen_at`), an action
+/// (`last_action_at`), or `other_used_at`, the newer of a use by a client
+/// that never names itself ([`SqliteStore::unnamed_client_last_used_at`])
+/// and a tool call on the agent door
+/// ([`SqliteStore::agent_door_last_used_at`]).
 pub fn last_presence(
     activity: &ClientActivity,
-    unnamed_used_at: Option<DateTime<Utc>>,
+    other_used_at: Option<DateTime<Utc>>,
 ) -> Option<DateTime<Utc>> {
     let platforms = activity.platforms.values().flat_map(|p| {
         [Some(p.first_paired_at), p.last_seen_at, p.last_action_at]
@@ -133,7 +146,7 @@ pub fn last_presence(
     activity
         .first_paired_at
         .into_iter()
-        .chain(unnamed_used_at)
+        .chain(other_used_at)
         .chain(platforms)
         .max()
 }
@@ -143,13 +156,13 @@ pub fn last_presence(
 /// `now`. Never paired is never lapsed.
 pub fn is_lapsed(
     activity: &ClientActivity,
-    unnamed_used_at: Option<DateTime<Utc>>,
+    other_used_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> bool {
     if activity.first_paired_at.is_none() {
         return false;
     }
-    last_presence(activity, unnamed_used_at)
+    last_presence(activity, other_used_at)
         .is_some_and(|last| now - last >= chrono::Duration::days(IDLE_DAYS))
 }
 
@@ -188,7 +201,7 @@ impl NoteLine {
             kind: c.kind.label(),
             sender: clip(name, SENDER_CAP),
             subject: clip(&c.subject, SUBJECT_CAP),
-            snippet: clip(&c.snippet, SNIPPET_CAP),
+            snippet: clip(&scrub_snippet(&c.snippet), SNIPPET_CAP),
             date: format!("{} {}", month(local.month()), local.day()),
             initial: avatar_initial(name),
             colour: avatar_colour(&c.from_addr),
@@ -220,6 +233,89 @@ fn month(m: u32) -> &'static str {
     [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][(m.clamp(1, 12) - 1) as usize]
+}
+
+/// A snippet with what a reader could tap taken out: links (anything with
+/// `://`, a `www.` or a bare domain), email addresses, and any run of six or
+/// more digits, separators allowed between them, which covers phone numbers
+/// as well as codes, PINs and locker numbers. The snippet is the start of a
+/// stranger's body, and the note says Passband handled these: it must never
+/// hand the owner a callback number.
+pub fn scrub_snippet(raw: &str) -> String {
+    let words: Vec<&str> = raw
+        .split_whitespace()
+        .filter(|w| !looks_like_link(w))
+        .collect();
+    strip_long_numbers(&words.join(" "))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn looks_like_link(word: &str) -> bool {
+    let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != ':');
+    let lower = w.to_ascii_lowercase();
+    if lower.contains("://") || lower.starts_with("www.") || lower.contains('@') {
+        return true;
+    }
+    // A bare domain: `name.tld` or `name.tld/path`, the TLD two or more
+    // letters. `e.g.` and a sentence's full stop are not.
+    let host = lower.split('/').next().unwrap_or("");
+    let mut parts = host.rsplitn(2, '.');
+    match (parts.next(), parts.next()) {
+        (Some(tld), Some(name)) => {
+            tld.len() >= 2
+                && tld.chars().all(|c| c.is_ascii_alphabetic())
+                && !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+                && name.chars().any(|c| c.is_ascii_alphabetic())
+                && name.len() >= 2
+        }
+        _ => false,
+    }
+}
+
+/// Remove every span of digits and phone-style separators (space, `-`,
+/// `.`, `(`, `)`, `+`, `/`) that starts and ends with a digit and holds six
+/// or more digits.
+fn strip_long_numbers(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let sep = |c: char| matches!(c, ' ' | '-' | '.' | '(' | ')' | '+' | '/');
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if !(c.is_ascii_digit() || c == '+' || c == '(') {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // The widest span from here of digits and separators, cut back to
+        // its last digit.
+        let mut j = i;
+        let mut last_digit = None;
+        let mut digits = 0;
+        while j < chars.len() && (chars[j].is_ascii_digit() || sep(chars[j])) {
+            if chars[j].is_ascii_digit() {
+                digits += 1;
+                last_digit = Some(j);
+            }
+            j += 1;
+        }
+        match last_digit {
+            Some(end) if digits >= 6 => {
+                out.push(' ');
+                i = end + 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// One line of untrusted text (a sender's name, a subject), control
@@ -414,6 +510,9 @@ pub enum LapsedOutcome {
     TooFew(usize),
     /// The request never reached Google; the stamp was lifted.
     Deferred,
+    /// Asking Gmail whether the listed mail is still there did not finish;
+    /// nothing filed, nothing stamped.
+    CheckFailed,
     /// Filed: this many qualifying messages (listed or counted).
     Filed(usize),
     /// Google refused it, or the answer was lost. Stamped for good.
@@ -434,8 +533,10 @@ pub async fn run_lapsed_pass(
         if activity.first_paired_at.is_none() {
             return Ok(Err(LapsedOutcome::NeverPaired));
         }
-        let unnamed = store.unnamed_client_last_used_at(account)?;
-        if !is_lapsed(&activity, unnamed, now) {
+        let other = store
+            .unnamed_client_last_used_at(account)?
+            .max(store.agent_door_last_used_at(account)?);
+        if !is_lapsed(&activity, other, now) {
             return Ok(Err(LapsedOutcome::Active));
         }
         let zone = store.owner_zone(account)?;
@@ -467,27 +568,41 @@ pub async fn run_lapsed_pass(
         ))
     })
     .await?;
-    let lines: Vec<NoteLine> = candidates
-        .iter()
-        .map(|c| NoteLine::from_candidate(c, zone))
-        .collect();
+    if candidates.len() < MIN_ITEMS {
+        return Ok(LapsedOutcome::TooFew(candidates.len()));
+    }
+
+    // A disconnected account (a revoked grant, a refresh that fails) is
+    // skipped before anything is asked or stamped.
+    if creds.token(state.account_id).await.is_err() {
+        return Ok(LapsedOutcome::NoCredential);
+    }
+    let writer = match write_client(state).await {
+        Ok(w) => w,
+        Err(_) => return Ok(LapsedOutcome::NoCredential),
+    };
+
+    // STILL THERE? The store never hears of a deletion, so each of the
+    // newest is asked of Gmail (labels only). Gone, trashed or spam is
+    // dropped; read is kept. A check that cannot finish files nothing.
+    let mut lines: Vec<NoteLine> = Vec::new();
+    for c in candidates.iter().take(MAX_CHECKED) {
+        match writer.current_labels(&c.provider_id).await {
+            Ok(Some(labels)) if still_there(&labels) => {
+                lines.push(NoteLine::from_candidate(c, zone));
+            }
+            Ok(_) => {}
+            Err(_) => return Ok(LapsedOutcome::CheckFailed),
+        }
+    }
     let Some(note) = compose(&lines) else {
         return Ok(LapsedOutcome::TooFew(lines.len()));
     };
 
-    // A disconnected account (a revoked grant, a refresh that fails) is
-    // skipped before anything is stamped.
-    if creds.token(state.account_id).await.is_err() {
-        return Ok(LapsedOutcome::NoCredential);
-    }
     let message_id = crate::scheduled_send::mint_message_id()?;
     let raw = match build_rfc822(&note, &mailbox, &message_id, now) {
         Ok(raw) => raw,
         Err(_) => return Ok(LapsedOutcome::Unsupported),
-    };
-    let writer = match write_client(state).await {
-        Ok(w) => w,
-        Err(_) => return Ok(LapsedOutcome::NoCredential),
     };
 
     // STAMP FIRST, under one store call that re-reads it: at most once.
@@ -505,7 +620,7 @@ pub async fn run_lapsed_pass(
 
     match writer.insert_into_inbox(&raw).await {
         Ok(_) => Ok(LapsedOutcome::Filed(lines.len())),
-        Err(WriteError::Paced { .. } | WriteError::MissingCredential(_)) => {
+        Err(failure) if !failure.reached => {
             store_call(state, |store, account| {
                 store.delete_app_setting(account, STAMP_KEY)
             })
@@ -516,6 +631,12 @@ pub async fn run_lapsed_pass(
     }
 }
 
+/// A message Gmail still has where the owner would see it: not in the
+/// trash, not in spam. Read or unread does not matter.
+fn still_there(labels: &[String]) -> bool {
+    !labels.iter().any(|l| l == "TRASH" || l == "SPAM")
+}
+
 fn log(outcome: &Result<LapsedOutcome, ApiError>) {
     // Outcomes and a count only: never a sender, a subject or an address.
     match outcome {
@@ -524,6 +645,9 @@ fn log(outcome: &Result<LapsedOutcome, ApiError>) {
         }
         Ok(LapsedOutcome::Failed) => eprintln!("squelchd: lapsed note insert failed (not retried)"),
         Ok(LapsedOutcome::Deferred) => eprintln!("squelchd: lapsed note deferred"),
+        Ok(LapsedOutcome::CheckFailed) => {
+            eprintln!("squelchd: lapsed note deferred (mailbox check did not finish)")
+        }
         Ok(_) => {}
         Err(_) => eprintln!("squelchd: a lapsed note pass failed"),
     }
@@ -642,6 +766,54 @@ mod tests {
         };
         assert!(is_lapsed(&a, None, at(NOW)));
         assert!(!is_lapsed(&a, Some(at("2026-11-17T00:00:00Z")), at(NOW)));
+    }
+
+    /// Somebody who uses Passband only through an assistant: the app idle
+    /// for weeks, the agent door used yesterday. Not gone.
+    #[test]
+    fn agent_door_use_is_presence() {
+        let a = activity("2026-09-01T00:00:00Z", Some("2026-10-01T00:00:00Z"), None);
+        assert!(is_lapsed(&a, None, at(NOW)));
+        assert!(!is_lapsed(&a, Some(at("2026-11-17T12:00:00Z")), at(NOW)));
+    }
+
+    #[test]
+    fn trash_and_spam_are_gone_read_is_not() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(still_there(&l(&["INBOX", "UNREAD"])));
+        assert!(still_there(&l(&[])), "read and archived is still there");
+        assert!(!still_there(&l(&["TRASH"])));
+        assert!(!still_there(&l(&["SPAM", "UNREAD"])));
+    }
+
+    /// Nothing tappable survives: links, addresses, phone numbers, codes.
+    #[test]
+    fn snippets_lose_links_numbers_and_addresses() {
+        let cases = [
+            (
+                "Questions? Call 1-800-555-0199 or visit https://help.shop.example/x now",
+                "Questions? Call or visit now",
+            ),
+            ("Call (415) 555 0123 today", "Call today"),
+            ("Your code is 482913.", "Your code is ."),
+            ("Locker PIN 12 34 56 at the door", "Locker PIN at the door"),
+            (
+                "Track at shop.example/track or www.shop.example",
+                "Track at or",
+            ),
+            ("Write help@shop.example for help", "Write for help"),
+            (
+                "Order 12345 of 3 items, total 42.50",
+                "Order 12345 of 3 items, total 42.50",
+            ),
+            (
+                "Thanks e.g. for the order. See you",
+                "Thanks e.g. for the order. See you",
+            ),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(scrub_snippet(raw), want, "{raw}");
+        }
     }
 
     #[test]
@@ -812,6 +984,7 @@ mod tests {
     #[test]
     fn untrusted_text_is_escaped_and_folded() {
         let c = NoteCandidate {
+            provider_id: "g-1".into(),
             from_addr: "x@shop.example".into(),
             from_name: Some("<b>Shop</b>\r\nBcc: someone@else.example".into()),
             subject: "Order <script>alert(1)</script>\nshipped".into(),
@@ -826,17 +999,39 @@ mod tests {
         assert!(!note.html.contains("<script>") && !note.html.contains("<b>Shop"));
         assert!(note.html.contains("&lt;script&gt;"));
         assert!(!note.html.contains("evil.example\">"), "no stranger's link");
-        assert!(
-            note.html
-                .contains("Click &lt;a href=&quot;https://evil.example&quot;&gt;")
-        );
+        // The link inside the markup went with the scrub; the markup left is
+        // escaped, never live.
+        assert!(!note.html.contains("evil.example"), "no stranger's link");
+        assert!(note.html.contains("Click &lt;a now &amp; &quot;save&quot;"));
         assert!(note.html.contains("now &amp; &quot;save&quot;"));
         assert_eq!(note.html.matches("<a ").count(), 1, "only our button links");
+    }
+
+    /// The scrub reaches both parts of the note, not just the helper.
+    #[test]
+    fn a_rendered_snippet_carries_no_callback_number_or_link() {
+        let c = NoteCandidate {
+            provider_id: "g-1".into(),
+            from_addr: "billing@shop.example".into(),
+            from_name: Some("Shop".into()),
+            subject: "Your receipt".into(),
+            snippet: "Problem? Call +1 (800) 555-0199 or go to https://pay.shop.example/now".into(),
+            received_at: at("2026-11-12T20:00:00Z"),
+            kind: NoteKind::Receipt,
+        };
+        let l = NoteLine::from_candidate(&c, Tz::UTC);
+        assert_eq!(l.snippet, "Problem? Call or go to");
+        let note = compose(&[l.clone(), l.clone(), l]).unwrap();
+        for part in [&note.text, &note.html] {
+            assert!(!part.contains("555"), "{part}");
+            assert!(!part.contains("pay.shop.example"), "{part}");
+        }
     }
 
     #[test]
     fn a_long_snippet_is_clipped() {
         let c = NoteCandidate {
+            provider_id: "g-1".into(),
             from_addr: "orders@shop.example".into(),
             from_name: Some("Shop".into()),
             subject: "s".into(),
@@ -853,6 +1048,7 @@ mod tests {
     fn a_line_names_the_sender_kind_and_owner_local_date() {
         let la: Tz = "America/Los_Angeles".parse().unwrap();
         let c = NoteCandidate {
+            provider_id: "g-1".into(),
             from_addr: "orders@shop.example".into(),
             from_name: None,
             subject: "  Your   receipt ".into(),

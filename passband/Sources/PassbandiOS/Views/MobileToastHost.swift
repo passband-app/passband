@@ -22,6 +22,12 @@ struct MobileToastHost: View {
     /// tab; the store's `showsSitrepCorner` does not (its `activeView` only
     /// follows the two tabs that have one).
     var sitrepShowing = false
+    /// The host's width, read OUTSIDE the `fixedSize` stack (which sees none).
+    /// Caps the toast and the undo chip, which hug their text up to it.
+    @State private var width: CGFloat = 0
+
+    /// Widest a chip may get: the screen less the stack's 16pt gutters.
+    private var cap: CGFloat { max(0, width - 32) }
 
     var body: some View {
         // The Spacers + fixedSize are load-bearing exactly as they are on the
@@ -33,6 +39,7 @@ struct MobileToastHost: View {
             stack.fixedSize()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .allowsHitTesting(
             !store.toasts.isEmpty || !store.undos.isEmpty || violation != nil || showsTray
                 || receipt != nil)
@@ -86,12 +93,15 @@ struct MobileToastHost: View {
                 // as Text only, never as markup.
                 ForEach(store.toasts) { toast in
                     Button { store.dismissToast(toast.id) } label: {
-                        Text(toast.text)
-                            .font(Typo.rowSub)
-                            .foregroundStyle(tone(toast.tone))
-                            .multilineTextAlignment(.leading)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
+                        WidthCap(max: cap) {
+                            Text(toast.text)
+                                .font(Typo.rowSub)
+                                .foregroundStyle(tone(toast.tone))
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(3)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                        }
                     }
                     .buttonStyle(.plain)
                     .glassEffect(
@@ -117,11 +127,17 @@ struct MobileToastHost: View {
     /// Mac's whole chip is the undo because a pointer aims, and a thumb landing
     /// anywhere on a five-second chip would undo things it meant to read.
     private func undoChip(_ undo: PendingUndo) -> some View {
+        WidthCap(max: cap) { undoChipBody(undo) }
+    }
+
+    private func undoChipBody(_ undo: PendingUndo) -> some View {
         HStack(spacing: 12) {
             Text(undo.label)
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.ink)
                 .lineLimit(1)
+                // A long subject gives way; the Undo button never does.
+                .layoutPriority(-1)
             Button {
                 Haptics.commit()
                 Task { await store.fireUndo(undo.id) }
@@ -150,5 +166,31 @@ struct MobileToastHost: View {
         case .success: Palette.positive
         case .info: Palette.inkDim
         }
+    }
+}
+
+/// Hands its one child a width of at most `max` where the parent offered none.
+///
+/// THE STACK IS `fixedSize`, so every chip in it is asked for its ideal size,
+/// and a one-line label's ideal is the whole sentence: a long subject ran the
+/// undo chip off both edges of the screen. A `.frame(maxWidth:)` does not help
+/// there, because it forwards the empty proposal untouched. This proposes a real
+/// width, so short labels still hug and long ones truncate or wrap.
+private struct WidthCap: Layout {
+    let max: CGFloat
+
+    private func capped(_ proposal: ProposedViewSize) -> ProposedViewSize {
+        guard max > 0 else { return proposal }
+        return ProposedViewSize(width: min(proposal.width ?? max, max), height: proposal.height)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        subviews.first?.sizeThatFits(capped(proposal)) ?? .zero
+    }
+
+    func placeSubviews(
+        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
     }
 }

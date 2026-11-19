@@ -22,6 +22,19 @@
 //! touches an invite code again: invites provision tenants, and this flow is for
 //! people whose tenant already exists.
 //!
+//! THE FIRST APP HOP AFTER A SIGNUP ASKS ONE QUESTION INSTEAD OF GOING TO
+//! GOOGLE. A signup that finishes leaves a signed handoff cookie (see
+//! [`cookie::HandoffClaim`]): one-shot, two hours, bound to this host and to
+//! `/app`, naming the tenant row and the address it was set up with. When the
+//! newly installed app opens `/app/auth` in that browser, the page asks
+//! whether to continue as that mailbox, and the person confirms with a
+//! same-origin press (`POST /app/handoff`) before the nonce is spent and the
+//! same pairing page comes back. "Use a different account" is the ordinary
+//! Google sign-in. Anything else about the cookie (absent, forged, expired,
+//! already spent, a tenant that is no longer that row) falls through to Google
+//! as if it had never been sent: the handoff is a shortcut, never a new way to
+//! be refused.
+//!
 //! THE AGENT HOP is the fourth, and it is the app hop run on somebody else's
 //! behalf. WorkOS AuthKit is the OAuth authorization server agents use to reach
 //! a tenant's `/mcp`, in "Standalone Connect" mode: it runs the OAuth dance with
@@ -819,10 +832,224 @@ pub async fn console_auth(
 /// NO RETURN URL, and no parameter that could become one, exactly as next door.
 /// The only place it can send anybody is a `passband://` link built from this
 /// deployment's own base domain.
-pub async fn app_auth(State(state): State<ControlState>, RawQuery(query): RawQuery) -> Response {
+///
+/// RIGHT AFTER A SIGNUP, ONE QUESTION INSTEAD OF GOOGLE. The browser that just
+/// finished a signup holds a handoff cookie naming the tenant it created. A
+/// valid, unspent one for a tenant that is still exactly that tenant is
+/// answered with a page asking "continue as {mailbox}?" (see
+/// [`app_handoff_offer`]). Nothing is minted or spent here: that is
+/// [`app_handoff`], on the page's same-origin POST. The page's other link is
+/// this route with `skip_handoff=1`, which is the ordinary Google sign-in for
+/// that one request. It leaves the cookie where it is: this is a GET that any
+/// site can send a browser to, so it must not be a way to wipe a handoff, and
+/// the cookie ends with the browser session or its two hours anyway.
+///
+/// The handoff wins over `?provider=`, because it names the tenant just made
+/// whichever company that mailbox is at, and the page names the mailbox so a
+/// person who meant another account can take the other link. A cookie that
+/// cannot be used goes on to Google below, unchanged, and is cleared.
+pub async fn app_auth(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let secure = !state.config().is_insecure();
+    let query = query.as_deref();
+    let presented = if param(query, "skip_handoff").as_deref() == Some("1") {
+        false
+    } else {
+        match usable_handoff(&state, &headers).await {
+            Handoff::Usable(claim) => return app_handoff_offer(&state, &claim, query),
+            Handoff::Unusable => true,
+            Handoff::Absent => false,
+        }
+    };
+    let resp = app_auth_at_google(&state, query);
+    if presented {
+        with_cleared_handoff(resp, secure)
+    } else {
+        resp
+    }
+}
+
+/// What [`usable_handoff`] made of the request's handoff cookie.
+enum Handoff {
+    /// No cookie. Google, as always.
+    Absent,
+    /// A cookie that cannot be used, for whatever reason. Google, and the
+    /// cookie is cleared so it is not presented again.
+    Unusable,
+    /// Valid, unspent, and naming a tenant that is still exactly that tenant.
+    Usable(cookie::HandoffClaim),
+}
+
+/// The raw handoff cookie on a request, if there is one.
+fn handoff_cookie_value(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(cookie::handoff_from_header)
+}
+
+/// Whether the handoff a finished signup left in this browser can be offered.
+///
+/// THREE CHECKS, every failure the same [`Handoff::Unusable`], a store that
+/// will not answer included: the MAC and window ([`cookie::verify_handoff`]);
+/// the tenant row the claim names is still active at that label for that
+/// address (one query, so a label purged and signed up again is a different
+/// row and never matches); and the nonce is not spent yet. The handoff is a
+/// shortcut, never a new way to be refused.
+///
+/// PRIVACY: the label and an outcome. Never the nonce, the address, or the
+/// cookie value.
+async fn usable_handoff(state: &ControlState, headers: &HeaderMap) -> Handoff {
+    let Some(value) = handoff_cookie_value(headers) else {
+        return Handoff::Absent;
+    };
+    let Some(claim) = cookie::verify_handoff(
+        &state.config().cookie_key,
+        value,
+        chrono::Utc::now().timestamp(),
+    ) else {
+        tracing::info!("app login handoff did not verify; on to Google");
+        return Handoff::Unusable;
+    };
+    let label = &claim.label;
+
+    match state
+        .store()
+        .handoff_tenant_is_live(claim.tid, label, &claim.email)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(label = %label, "app login handoff names no live tenant; on to Google");
+            return Handoff::Unusable;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "app login handoff tenant lookup failed; on to Google");
+            return Handoff::Unusable;
+        }
+    }
+
+    match state.store().handoff_spent(&claim.nonce).await {
+        Ok(false) => Handoff::Usable(claim),
+        Ok(true) => {
+            tracing::info!(label = %label, "app login handoff already spent; on to Google");
+            Handoff::Unusable
+        }
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "app login handoff spend check failed; on to Google");
+            Handoff::Unusable
+        }
+    }
+}
+
+/// The page that offers the handoff: the mailbox by name, a Continue button
+/// that POSTs to [`app_handoff`] with a token only this page carries, and the
+/// ordinary Google sign-in as the other choice. Mints nothing and spends
+/// nothing, so a page elsewhere that sends somebody here has caused one page
+/// view.
+fn app_handoff_offer(
+    state: &ControlState,
+    claim: &cookie::HandoffClaim,
+    query: Option<&str>,
+) -> Response {
+    let csrf = cookie::handoff_csrf(&state.config().cookie_key, &claim.nonce);
+    tracing::info!(label = %claim.label, "app login handoff offered");
+    no_store(pages::app_handoff_confirm(
+        &claim.email,
+        &csrf,
+        &other_account_href(query),
+    ))
+}
+
+/// The "use a different account" link: this route, told to ignore the
+/// handoff, keeping the two parameters it honours. Built from fixed strings
+/// only; nothing the caller sent is echoed into it.
+fn other_account_href(query: Option<&str>) -> String {
+    let mut href = String::from("/app/auth?skip_handoff=1");
+    if param(query, "provider").as_deref() == Some("microsoft") {
+        href.push_str("&provider=microsoft");
+    }
+    match param(query, "theme").as_deref() {
+        Some("light") => href.push_str("&theme=light"),
+        Some("dark") => href.push_str("&theme=dark"),
+        _ => {}
+    }
+    href
+}
+
+/// `POST /app/handoff` — the Continue button on [`app_handoff_offer`]'s page.
+///
+/// THE ONLY PLACE A HANDOFF IS SPENT, and only on a request that is plainly
+/// that page's own press: the origin is this deployment
+/// ([`crate::admin::same_origin`]), the cookie is a usable handoff (and
+/// `SameSite=Lax` keeps it off any cross-site POST to begin with), and the
+/// form carries the token derived from that cookie's nonce. Then the nonce is
+/// spent in the store, which is the one-shot check across every control task,
+/// and only then does the warden mint.
+///
+/// Every refusal is a 303 back to `/app/auth`, which shows the page again or,
+/// for a handoff that is gone, goes on to Google. Never an error page of its
+/// own.
+pub async fn app_handoff(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !crate::admin::same_origin(&state, &headers) {
+        tracing::warn!(outcome = "origin_refused", "app login handoff refused");
+        return back_to_app_auth();
+    }
+    let Handoff::Usable(claim) = usable_handoff(&state, &headers).await else {
+        return back_to_app_auth();
+    };
+    let label = &claim.label;
+    if !cookie::handoff_csrf_ok(
+        &state.config().cookie_key,
+        &claim.nonce,
+        &field(&body, "csrf"),
+    ) {
+        tracing::warn!(outcome = "csrf_refused", label = %label, "app login handoff refused");
+        return back_to_app_auth();
+    }
+
+    match state.store().spend_handoff(&claim.nonce, label).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(label = %label, "app login handoff already spent");
+            return back_to_app_auth();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "spending the app login handoff failed");
+            return back_to_app_auth();
+        }
+    }
+
+    let resp = finish_app_login(&state, label, &claim.email, "app login via handoff").await;
+    with_cleared_handoff(resp, !state.config().is_insecure())
+}
+
+/// Where every refused handoff press goes: back to the app login, which
+/// decides afresh between the offer and Google.
+fn back_to_app_auth() -> Response {
+    (StatusCode::SEE_OTHER, [(header::LOCATION, "/app/auth")]).into_response()
+}
+
+/// Attach the handoff-clearing header to a response.
+fn with_cleared_handoff(mut resp: Response, secure: bool) -> Response {
+    if let Ok(value) = header::HeaderValue::from_str(&cookie::clear_handoff_cookie(secure)) {
+        resp.headers_mut().append(header::SET_COOKIE, value);
+    }
+    resp
+}
+
+/// The app login's trip to Google: the whole of `/app/auth` before the handoff
+/// existed, and still what every request without a usable one gets.
+fn app_auth_at_google(state: &ControlState, query: Option<&str>) -> Response {
     let config = state.config();
-    let Some(provider) = provider_choice(&state, param(query.as_deref(), "provider").as_deref())
-    else {
+    let Some(provider) = provider_choice(state, param(query, "provider").as_deref()) else {
         return app_unavailable();
     };
 
@@ -836,7 +1063,7 @@ pub async fn app_auth(State(state): State<ControlState>, RawQuery(query): RawQue
 
     // Flow::Console: identity alone, online, no refresh token. An app login asks
     // Google exactly what a console login asks, because it is the same question.
-    let consent = match endpoints_for(&state, provider)
+    let consent = match endpoints_for(state, provider)
         .ok_or(oauth::OAuthError::Config("no microsoft app".into()))
         .and_then(|e| oauth::consent_url(&e, csrf_state, Flow::Console))
     {
@@ -1772,7 +1999,8 @@ pub async fn oauth_callback(
     // the same address is still reserved for this mailbox.
     //
     // The warden answers with a pairing code, and the success page no longer
-    // shows it: the app's own onboarding pairs through /app/auth. The code is
+    // shows it: the app pairs through /app/auth, on the handoff this signup
+    // leaves behind. The code is
     // one-shot and lapses after the daemon's pairing TTL. A route that installs
     // the credential WITHOUT minting one, like reconnect_credentials, is the
     // real fix and is a warden API change (tracked separately).
@@ -1956,10 +2184,46 @@ pub async fn oauth_callback(
     tracing::info!(label = %label, "tenant provisioned");
     state.alert(alert::signup_provisioned(&label));
 
-    // No pairing code on this page: the app's own onboarding signs in and
-    // pairs through /app/auth, which is also where the analytics id joins the
-    // app.
-    done(pages::success(&config.tenant_url(&label)))
+    // No pairing code on this page: the app pairs through /app/auth, which is
+    // also where the analytics id joins the app. What this page leaves behind
+    // is the HANDOFF, so that the first /app/auth from this browser can offer
+    // to continue as this mailbox instead of sending the person back to Google
+    // minutes after they were there. See `cookie::HandoffClaim` for the model.
+    //
+    // Bound to the tenant ROW as recorded, re-read here rather than assumed:
+    // without a row id there is nothing to bind to, and no handoff is simply
+    // an app login through Google, which is what every signup before this got.
+    let mut resp = done(pages::success(&config.tenant_url(&label)));
+    let handle = match state.store().active_tenant_handle(&label).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "tenant lookup for the app login handoff failed; no handoff");
+            None
+        }
+    };
+    match (handle, random_token()) {
+        (Some((tid, email)), Ok(nonce)) => {
+            let claim = cookie::HandoffClaim::new(
+                tid,
+                &label,
+                &email,
+                nonce,
+                chrono::Utc::now().timestamp(),
+            );
+            let value = cookie::set_handoff_cookie(
+                &cookie::sign_handoff(&config.cookie_key, &claim),
+                !config.is_insecure(),
+            );
+            if let Ok(value) = header::HeaderValue::from_str(&value) {
+                resp.headers_mut().append(header::SET_COOKIE, value);
+            }
+        }
+        (None, _) => {}
+        (_, Err(_)) => {
+            tracing::error!(label = %label, "the system random source failed; no app login handoff")
+        }
+    }
+    resp
 }
 
 /// The console login's half of the callback: prove who is signed in, hold it
@@ -2393,10 +2657,34 @@ async fn app_login(
         }
     };
 
+    // What the page names: Google's verified address, or, for Microsoft
+    // (whose address is only a label), the mailbox the tenant was set up as.
+    let account_email = match identity.microsoft_id {
+        None => identity.email.clone(),
+        Some(_) => match state.store().active_tenant_email(&label).await {
+            Ok(Some(email)) => email,
+            _ => identity.email.clone(),
+        },
+    };
+
+    finish_app_login(state, &label, &account_email, "app login complete").await
+}
+
+/// The end both app logins share, once the tenant is known: mint the pairing
+/// code, find the analytics id, and render the page that opens the app.
+/// Reached from [`app_login`] after Google, and from [`app_handoff`]
+/// after a finished signup's handoff was spent. `done` is the line logged once
+/// the code exists, which is how the two are told apart in the logs.
+async fn finish_app_login(
+    state: &ControlState,
+    label: &str,
+    account_email: &str,
+    done: &'static str,
+) -> Response {
     // THE TICKET, exactly as next door: an ordinary pairing code for an ordinary
     // device, one-shot and ten minutes, which the tenant's own daemon claims into
     // a device token. No new credential type and no new revocation story.
-    let pairing = match state.warden().pair(&label).await {
+    let pairing = match state.warden().pair(label).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, label = %label, "minting the app pairing code failed");
@@ -2406,14 +2694,14 @@ async fn app_login(
 
     // PRIVACY: the label and never the code, which is live for ten minutes and is
     // the whole credential. The mailbox is not logged either, here as everywhere.
-    tracing::info!(label = %label, "app login complete");
+    tracing::info!(label = %label, "{done}");
 
     // The person's analytics id, re-issued IDENTICALLY on every sign-in: that
     // stability is what lets a reinstall (or a second device) re-adopt the
     // same PostHog identity. Fail-soft — a lookup error is an aid-less link,
     // never a refused login — and `Ok(None)` is simply a tenant that predates
     // the funnel.
-    let analytics_id = match state.store().analytics_id_for_label(&label).await {
+    let analytics_id = match state.store().analytics_id_for_label(label).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, label = %label, "analytics id lookup failed");
@@ -2424,18 +2712,9 @@ async fn app_login(
     // The page builds the `passband://` link itself, from this deployment's own
     // tenant URL and the warden's code. Nothing a caller sent is in it, because
     // this route accepted nothing a caller sent.
-    // What the page names: Google's verified address, or, for Microsoft
-    // (whose address is only a label), the mailbox the tenant was set up as.
-    let account_email = match identity.microsoft_id {
-        None => identity.email.clone(),
-        Some(_) => match state.store().active_tenant_email(&label).await {
-            Ok(Some(email)) => email,
-            _ => identity.email.clone(),
-        },
-    };
     let page = pages::app_signed_in(
-        &account_email,
-        &state.config().tenant_url(&label),
+        account_email,
+        &state.config().tenant_url(label),
         &pairing.pair_code,
         PAIRING_MINUTES,
         analytics_id.as_deref(),

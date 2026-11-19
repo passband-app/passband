@@ -906,9 +906,17 @@ const NO_PASSWORD_MANAGER: &str =
 /// The end of the signup flow: the tenant exists and the daemon is running.
 ///
 /// ONE BUTTON, THE DOWNLOAD. Somebody arriving from an invite email has no app
-/// yet, and the app's own onboarding signs in with Gmail and pairs itself
-/// through [`app_signed_in`], so this page carries no deep link and no pairing
-/// code: a second connect path here was a step the app already does.
+/// yet, and the app pairs itself through [`app_signed_in`], so this page
+/// carries no deep link and no pairing code: a second connect path here was a
+/// step the app already does.
+///
+/// "PRESS SIGN IN" IS TRUE EITHER WAY. The handler sets a one-shot handoff
+/// cookie beside this response, and the app's first sign-in from this browser
+/// within two hours offers to continue as this mailbox instead of going back
+/// to Google (see [`crate::cookie::HandoffClaim`]). From another browser, or
+/// later, it is one ordinary Google sign-in, which is what everybody got
+/// before. The copy names the button the app shows and promises nothing about
+/// which of the two follows.
 ///
 /// THE IPHONE IS THE SECOND THING, NOT A SECOND BUTTON. Under the download sits
 /// a quiet block with a QR code for the TestFlight alpha: this page is almost
@@ -924,7 +932,7 @@ pub fn success(tenant_url: &str) -> Response {
         "Your mailbox is ready",
         &format!(
             r#"<h1>Your mailbox is ready</h1>
-<p class="lead">{host} is live. Get the app, then sign in to finish.</p>
+<p class="lead">{host} is live. Get the app and press Sign in.</p>
 <a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>
 <section class="phone" aria-labelledby="phone-label">
 {qr}<div>
@@ -1006,6 +1014,32 @@ pub fn app_signed_in(
         response.headers_mut().insert(header::REFRESH, refresh);
     }
     response
+}
+
+/// Where an app login lands right after a signup in the same browser: one
+/// question, "continue as this mailbox?", before anything is minted.
+///
+/// THE PERSON CHOOSES, as Google's account chooser would have had them do. The
+/// mailbox is named (escaped) so somebody who meant another account sees it,
+/// and the quiet link under the button is the ordinary Google sign-in. The
+/// button is a same-origin POST carrying `csrf`, so a page elsewhere can show
+/// this but cannot press it.
+pub fn app_handoff_confirm(mailbox: &str, csrf: &str, other_account_href: &str) -> Response {
+    page(
+        StatusCode::OK,
+        "Continue to Passband",
+        &format!(
+            r#"<h1>Continue as {mailbox}?</h1>
+<p class="lead">You just set up this mailbox in this browser. Continue to connect it to Passband.</p>
+<form method="post" action="/app/handoff"><input type="hidden" name="csrf" value="{csrf}">
+<button type="submit">Continue <span class="arrow" aria-hidden="true">→</span></button>
+</form>
+<p class="alt"><a href="{other}">Use a different account</a></p>"#,
+            mailbox = escape_html(mailbox),
+            csrf = escape_html(csrf),
+            other = escape_html(other_account_href),
+        ),
+    )
 }
 
 /// The reconnect status page, one arm per [`ReconnectView`]. The states the
@@ -1666,12 +1700,15 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"));
     }
 
-    /// The signup's last page is the download and nothing else: the app's own
-    /// onboarding signs in and pairs, so no code and no deep link ride here.
+    /// The signup's last page is the download and nothing else: the app pairs
+    /// on the handoff this signup leaves, so no code and no deep link ride
+    /// here, and the page no longer tells anybody a sign-in is still owed.
     #[tokio::test]
     async fn the_success_page_is_the_download_and_nothing_else() {
         let html = document_of(success("https://ada.passband.email")).await;
         assert!(html.contains("ada.passband.email"), "{html}");
+        assert!(html.contains("Get the app and press Sign in."), "{html}");
+        assert!(!html.contains("sign in to finish"), "{html}");
         assert!(
             html.contains(&format!(r#"href="{DOWNLOAD_URL}""#)),
             "{html}"

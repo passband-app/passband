@@ -20,7 +20,7 @@ enum Actions {
 
     /// WHICH PAGE a verb was input on. Together with `Via` this says where
     /// triage actually happens: on the sitrep, in the list, or inside the reader.
-    enum Surface: String, Sendable { case sitrep, emails, reader }
+    enum Surface: String, Sendable { case sitrep, emails, reader, quickClear = "quick_clear" }
 
     // EVERY VERB BELOW FENCES ITS ANSWER ON THE EPOCH. The request was built
     // for the account on screen when the key was pressed; by the time it

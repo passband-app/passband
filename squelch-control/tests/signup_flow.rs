@@ -1553,6 +1553,80 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     assert_eq!(rec.status_lookups, vec!["ada".to_string()]);
 }
 
+/// ONE GOOGLE TRIP, NOT TWO. A finished signup leaves a handoff cookie scoped
+/// to the app login, and the app's first `/app/auth` from the same browser
+/// comes straight back with a pairing code for the tenant just made. The same
+/// cookie a second time is an ordinary trip to Google.
+#[tokio::test]
+async fn a_finished_signup_signs_the_app_in_without_a_second_google_trip() {
+    let h = Harness::new().await;
+    let (consent, cookie) = h.start_signup("ada").await;
+    let (status, headers, body) = h
+        .get(
+            &format!(
+                "/oauth/callback?code=the-auth-code&state={}",
+                state_param(&consent)
+            ),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Get the app and press Sign in."), "{body}");
+
+    let handoff = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .find(|c| c.starts_with("pb_handoff="))
+        .expect("the signup leaves a handoff");
+    assert!(handoff.contains("Path=/app;"), "{handoff}");
+    assert!(handoff.contains("HttpOnly"), "{handoff}");
+    assert!(handoff.contains("SameSite=Lax"), "{handoff}");
+    // A browser-session cookie: the two hours are enforced on the server.
+    assert!(!handoff.contains("Max-Age"), "{handoff}");
+    let pair = handoff.split(';').next().unwrap().to_string();
+
+    // The app login asks first, naming the mailbox, and mints nothing yet.
+    let (status, headers, body) = h.get("/app/auth", Some(&pair)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(headers.get(header::LOCATION).is_none());
+    assert!(body.contains("Continue as ada@example.com?"), "{body}");
+    assert!(!body.contains("ABCD-EFGH"), "{body}");
+    let start = body.find(r#"name="csrf" value=""#).unwrap() + 19;
+    let csrf = body[start..].split('"').next().unwrap().to_string();
+
+    // The press signs the app in.
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/app/handoff")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &pair)
+                .body(axum::body::Body::from(format!("csrf={csrf}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body =
+        String::from_utf8_lossy(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).to_string();
+    assert!(body.contains("ABCD-EFGH"), "{body}");
+    assert!(body.contains("passband://pair"), "{body}");
+
+    // Spent: the next app login is the ordinary trip to Google.
+    let (status, headers, _) = h.get("/app/auth", Some(&pair)).await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert!(
+        headers[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("/authorize")
+    );
+}
+
 /// THE OTHER DOOR, and the case that made `account_email` a column: an invite
 /// MAILED to one address, redeemed by a Google account that is a different
 /// address. A bearer code cannot promise otherwise, and before this the board

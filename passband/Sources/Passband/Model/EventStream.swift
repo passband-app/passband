@@ -375,6 +375,15 @@ final class EventStream {
             // the moment) is dropped by the open_draft freshness rule.
             guard renotify.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
             Notifier.shared.postRenotify(renotify, accountId: accountId)
+        } else if let quick = QuickClearSignal.parse(frame.data) {
+            // A quick clear offer (QuickClearBanner.swift), on renotify's
+            // terms: no id, no cursor, not an event, and a late one dropped.
+            // Mac only: the frame rides the Mac stream, and a phone has no
+            // sprint to open.
+            guard quick.isFresh(now: Int(Date().timeIntervalSince1970)) else { return }
+            #if os(macOS)
+                Notifier.shared.postQuickClear(quick, accountId: accountId)
+            #endif
         } else if let reminder = CalendarReminderSignal.parse(frame.data) {
             // An event reminder (CalendarReminder.swift), on renotify's
             // terms: no id, no cursor, and a late one is dropped.
@@ -411,6 +420,11 @@ final class EventStream {
         // phone never does. An agent's draft is only ever opened on the Mac.
         #if os(macOS)
             query.append(URLQueryItem(name: "opens", value: "1"))
+            // AND THAT IT CAN SHOW A QUICK CLEAR (`QuickClearSignal`). The
+            // daemon sends one only while a stream that said so is open; an
+            // older app, which would drop the frame, keeps getting its
+            // "still waiting" banner instead.
+            query.append(URLQueryItem(name: "quick_clear", value: "1"))
         #endif
         if !query.isEmpty { comps.queryItems = query }
         guard let url = comps.url else { return nil }

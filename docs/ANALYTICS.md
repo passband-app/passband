@@ -238,6 +238,9 @@ named.
 | `notification_opened` (M) | `has_thread` | Banner taps. |
 | `renotify_shown` (M) | `trigger`: `client_online` `meeting_end`; `items`, `due_soon`, `foreground` | A smart re-notify banner posted (docs/RENOTIFY.md). `items` is how many messages it named; `due_soon` is whether any of them came back because its due date is near; `foreground` is that the app was frontmost with its window up, so the system filed it into Notification Center with no banner. Posted, not seen: Focus and Do Not Disturb are invisible from here. A frame dropped as stale is not counted. |
 | `renotify_opened` (M) | `trigger`, `items` | A re-notify banner tapped. Kept apart from `notification_opened` so that one still means first banners only; the open it leads to is `thread_opened` with `source: notification`. |
+| `quick_clear_shown` (M) | `trigger`: `client_online` `meeting_end`; `items`, `open`, `smart_clear`, `budget_secs`, `foreground` | A quick clear offer posted (docs/RENOTIFY.md, "Quick clear: the Mac app"). `items` is the queue's length, `open` how many the daemon said are waiting in all, `smart_clear` the expired promos and past events it offered to sweep first, `budget_secs` the time the banner promised. `foreground` as for `renotify_shown`. Posted, not seen. A frame dropped as stale is not counted. |
+| `quick_clear_opened` (M) | `trigger`, `items` | The offer tapped: the sprint opened. Kept apart from `notification_opened` and `renotify_opened`. |
+| `quick_clear_finished` (M) | `outcome`: `emptied` `time_up` `closed`; `cleared`, `smart_cleared`, `skipped`, `items`, `left`, `elapsed_secs`, `kept_going` | The sprint left, once, by any route. `outcome` is why: the queue ran out, the budget was spent with items left, or it was closed early. `cleared` is the items marked done or parked from the sprint and still that way, plus `smart_cleared` (what the sweep step actually cleared); `skipped` is how many were passed over; `left` is how many were still unhandled; `kept_going` is that the owner pressed "Keep going" past the end card. Counts and seconds only. Items done from the sprint also count as `email_done` with `surface: quick_clear`. |
 | `calendar_reminder_shown` (M) | `lead_minutes`, `all_day`, `has_line`, `has_ticket`, `ghost` | An event reminder posted by the app off its event feed: the Mac, or a phone without push (docs/CALENDAR.md, "Reminders and tickets"). `lead_minutes` is the plan's lead (0 when the daemon sent none); `has_line` is that the banner carried the model's line, `has_ticket` that it carried "Show tickets", `ghost` that it was for an event guessed from mail. Posted, not seen. Shown over the app too, unlike mail banners. A frame dropped as stale, or for a mailbox whose switch is off, is not counted. The phone's pushed reminders are drawn by its notification extension and are not counted at all. |
 | `calendar_reminder_opened` (M) | `target`: `attachment` `mail` `event` `none`; `show_tickets` | A reminder tapped, on either platform. `target` is what it opened (an attachment in Quick Look, the email in the reader, the event on the Calendar page, or nothing but the app); `show_tickets` is that the "Show tickets" action was pressed rather than the banner. |
 
@@ -249,11 +252,12 @@ card in the ask bar), `deeper_search` (the reader's search strip), `groups`
 (a group's send history), `notification` (banner or push), `reply` (`r` on a
 row: opens the reader on its composer), `reader` (the walk from one queued
 thread to the next: an open the reader made, not the person; subtract it from
-"threads people chose to open").
+"threads people chose to open"), `quick_clear` (Enter on an item in the quick
+clear sprint).
 
 **`via` / `surface`** on the verbs (`Actions.Via`, `Actions.Surface`):
 `via` is how the verb was input: `key`, `click`, `swipe` (a phone rail), `assistant` (an agent tool; no surface). `surface` is
-the page: `sitrep`, `emails`, `reader`. Keyboard adoption is
+the page: `sitrep`, `emails`, `reader`, `quick_clear` (the sprint). Keyboard adoption is
 `via = key` over all verbs; where triage happens is `surface`.
 
 ### Compose

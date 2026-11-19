@@ -142,6 +142,10 @@ enum Analytics {
         // tapped. A trigger word, a message count and one bool (a deadline
         // was a reason); never who or what.
         "renotify_shown", "renotify_opened",
+        // Quick clear (docs/RENOTIFY.md, "Quick clear"): the offer posted,
+        // tapped, and the sprint it opened left. Counts, seconds, a trigger
+        // word and an outcome word; never who, what, or a message id.
+        "quick_clear_shown", "quick_clear_opened", "quick_clear_finished",
         // Event reminders (docs/CALENDAR.md, "Reminders and tickets"): a
         // banner posted, and tapped. The lead in minutes and a few bools; the
         // tap says only which kind of thing it opened. Never the event.
@@ -216,6 +220,8 @@ enum Analytics {
         // Whether the second banner earns its interruption is the "does it
         // work" question for re-notify, so both ride with the first banner's.
         "renotify_shown", "renotify_opened",
+        // Whether a quick clear offer is taken up and kept, the same way.
+        "quick_clear_shown", "quick_clear_opened", "quick_clear_finished",
         // And whether a reminder is worth its interruption, the same way.
         "calendar_reminder_shown", "calendar_reminder_opened",
         "connect_succeeded", "connection_lost", "connection_restored",
@@ -314,8 +320,12 @@ enum Analytics {
             // its QR row off, "onboarding" the card shortly after a first look
             // that had no veil (TestFlightNudge).
             "first_load", "onboarding",
-            // renotify_* triggers: the daemon's closed Trigger set.
+            // renotify_* triggers: the daemon's closed Trigger set (quick
+            // clear's too).
             "client_online", "meeting_end",
+            // quick_clear_finished outcomes (QuickClearQueue.Outcome), and
+            // the sprint as a thread_opened source and a verb surface.
+            "emptied", "time_up", "closed", "quick_clear",
             // calendar_reminder_opened targets: what the tap showed.
             // "event" and "none" are named here; nothing else says them.
             "attachment", "mail", "event", "none",

@@ -287,6 +287,40 @@ final class Notifier {
             sender: signal.items.count == 1 ? signal.items[0].sender : "")
     }
 
+    /// Post a quick clear banner (QuickClearBanner.swift) for one account.
+    /// Built like `postRenotify`: identity is the batch, account-prefixed,
+    /// and the foreground rule files it into Notification Center rather than
+    /// over a window the owner is already looking at. No sender tile: the
+    /// banner is about a queue, and one sender's face would misread as all of
+    /// it being theirs. No chime: it is an offer.
+    func postQuickClear(_ signal: QuickClearSignal, accountId: UUID) {
+        let account = accountId.uuidString
+        let copy = EventBanner.quickClearCopy(for: signal)
+        let content = UNMutableNotificationContent()
+        content.title = copy.title
+        content.body = copy.body
+        content.threadIdentifier = "\(account).\(copy.threadIdentifier)"
+        content.userInfo = EventBanner.quickClearUserInfo(signal, account: accountId)
+        #if os(macOS)
+            let foreground = NSApp.isActive && MainWindow.find()?.isVisible == true
+        #else
+            let foreground = false
+        #endif
+        // Counts and bools only: never a sender, a subject or an id.
+        var props: [String: Any] = [
+            "items": signal.items.count,
+            "open": signal.open,
+            "smart_clear": signal.smartClears,
+            "budget_secs": signal.budget,
+            "foreground": foreground,
+        ]
+        if let trigger = signal.knownTrigger { props["trigger"] = trigger.rawValue }
+        Analytics.capture("quick_clear_shown", props)
+        send(
+            content, identifier: EventBanner.quickClearIdentifier(account: accountId, batch: signal.quick_clear),
+            sender: "")
+    }
+
     /// Post an event reminder (CalendarReminder.swift) for one account. Its
     /// identity is the FIRE, account-prefixed: one banner per start instant,
     /// which a second frame for the same fire replaces rather than stacks.
@@ -442,6 +476,7 @@ final class Notifier {
     private enum TapTarget {
         case thread(String?)
         case renotify(EventBanner.RenotifyTap)
+        case quickClear(EventBanner.QuickClearTap)
         case message(Int)
         case event(Int)
         case auth
@@ -482,6 +517,15 @@ final class Notifier {
         if let trigger = tap.trigger { props["trigger"] = trigger.rawValue }
         Analytics.capture("renotify_opened", props)
         deliver(.renotify(tap), accountId: accountId)
+    }
+
+    /// A tap on a quick clear banner: the sprint queue it promised, in the
+    /// account it came from. Its own event, like re-notify's.
+    func handleQuickClearTap(_ tap: EventBanner.QuickClearTap, accountId: UUID?) {
+        var props: [String: Any] = ["items": tap.items]
+        if let trigger = tap.trigger { props["trigger"] = trigger.rawValue }
+        Analytics.capture("quick_clear_opened", props)
+        deliver(.quickClear(tap), accountId: accountId)
     }
 
     /// A tap on "your agent left a draft": the composer, holding that draft,
@@ -618,6 +662,15 @@ final class Notifier {
             // so the shared client is that mailbox's daemon.
             AppStore.shared.openMessage(tap.messageId, from: .notification)
             Task { await APIClient.shared.reportRenotifyOpened(batch: tap.batch, messageId: tap.messageId) }
+        case .quickClear(let tap):
+            // THE QUEUE, NOT THE INBOX: the banner promised these items, and
+            // a tap that opened anything else would make it clickbait. A
+            // payload that does not parse (a build that wrote something
+            // else) leaves the app fronted on whatever it was showing.
+            if let signal = QuickClearSignal.parse(tap.payload) {
+                AppStore.shared.openQuickClear(signal)
+            }
+            Task { await APIClient.shared.reportQuickClearOpened(batch: tap.batch) }
         case .event(let eventId):
             let store = AppStore.shared
             let epoch = store.epoch
@@ -832,6 +885,8 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                 Notifier.shared.handleAuthTap(accountId: accountId)
             case .renotify(let tap):
                 Notifier.shared.handleRenotifyTap(tap, accountId: accountId)
+            case .quickClear(let tap):
+                Notifier.shared.handleQuickClearTap(tap, accountId: accountId)
             case .calendarReminder(let tap):
                 Notifier.shared.handleCalendarReminderTap(tap, showTickets: showTickets)
             case .calendarReminderPush(let push):

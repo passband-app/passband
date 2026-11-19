@@ -240,6 +240,18 @@ pub fn llm_auto_topup_anchored_late(label: &str) -> String {
     )
 }
 
+/// A late grant carried more than one month into the window it landed in, and
+/// bringing it down to one month failed. The window is still counted as
+/// topped up; the extra is the operator's to take off by hand.
+pub fn llm_auto_topup_cap_failed(label: &str) -> String {
+    format!(
+        ":warning: *LLM budget late top-up not capped:* `{label}`\n\
+         A top-up that landed in the next window carries more than one month, and \
+         bringing it down failed. Lower it by hand: \
+         `squelch-control llm topup {label} --usd <one month>`"
+    )
+}
+
 /// A new address landed on the waitlist. Carries the name they typed, when
 /// there is one, and NEVER the address: the admin page is where that lives.
 /// Sent only for a NEW row, so resubmitting the form cannot page anybody.
@@ -377,6 +389,7 @@ mod tests {
             llm_auto_topup_unconfirmed("ethan", 1),
             llm_auto_topup_covered("ethan"),
             llm_auto_topup_anchored_late("ethan"),
+            llm_auto_topup_cap_failed("ethan"),
         ];
         for m in &msgs {
             assert!(m.contains("`ethan`"), "{m}");
@@ -396,6 +409,7 @@ mod tests {
         assert!(!msgs[6].contains("llm topup"), "{}", msgs[6]);
         assert!(msgs[7].contains("no auto top-up left"), "{}", msgs[7]);
         assert!(msgs[8].contains("next window"), "{}", msgs[8]);
+        assert!(msgs[9].contains("not capped"), "{}", msgs[9]);
         // No keys minted, no orphan line.
         assert!(!signup_incomplete("ethan", &err, None, None).contains("Orphaned"));
 

@@ -79,13 +79,12 @@ pub enum Decision {
         cycle: String,
         target_usd: f64,
     },
-    /// An earlier window's claim landed in THIS window (the write crossed the
-    /// reset and its confirmation never came back). Record this window as
-    /// topped up, and if what landed carries more than one month (the earlier
-    /// window's stack), bring it down to `cap_to_usd`, one month.
+    /// The previous window's claim landed in THIS window (the write crossed
+    /// the reset and its confirmation never came back): `sent_usd` is live
+    /// here. Recorded as this window's top-up; see [`land_late`].
     LandedLate {
         cycle: String,
-        cap_to_usd: Option<f64>,
+        sent_usd: f64,
     },
 }
 
@@ -101,8 +100,10 @@ pub enum Skip {
     /// later window than `last_reset` names, or the window ends within
     /// [`BOUNDARY_MARGIN`]. The next pass reads it settled.
     WindowInFlux,
-    /// A hand-set permanent override. The operator owns this key's limit.
-    ForeverOverride,
+    /// A hand-set override this poller would clobber: `forever`, or one
+    /// covering more than this window (every write here is one cycle, and an
+    /// override replaces). The operator owns this key's limit.
+    OperatorOverride,
     /// A zero limit, or one that will not parse: not a key a top-up can help.
     NoLimit,
     /// This window already had its top-up.
@@ -210,8 +211,8 @@ pub fn decide(
     if anchor_offset.is_some_and(|o| o >= 1) || window_closing(budget, now) {
         return Decision::Skip(Skip::WindowInFlux);
     }
-    if budget.override_mode == "forever" {
-        return Decision::Skip(Skip::ForeverOverride);
+    if budget.override_mode == "forever" || budget.override_cycles_remaining > 1 {
+        return Decision::Skip(Skip::OperatorOverride);
     }
     let base = budget.max_limit;
     if !(base.is_finite() && base > 0.0) {
@@ -219,27 +220,28 @@ pub fn decide(
     }
     // A stored window this one or later (an unreadable one counts as later:
     // the safe reading is "done").
-    let in_this_window_or_later = |stamp: &str| {
-        DateTime::parse_from_rfc3339(stamp)
-            .map(|t| window_offset(budget, t.with_timezone(&Utc)).is_none_or(|o| o >= 0))
-            .unwrap_or(true)
-    };
-    if history.last_applied.is_some_and(in_this_window_or_later) {
+    if history
+        .last_applied
+        .is_some_and(|stamp| stamp_offset(budget, stamp).is_none_or(|o| o >= 0))
+    {
         return Decision::Skip(Skip::AlreadyTopped);
     }
     let cycle = cycle_key(opened);
     let existing = live_override(budget);
-    // An EARLIER window's claim whose amount is what this window carries,
+    // The PREVIOUS window's claim, whose amount is what this window carries,
     // granted in this window: the write crossed the reset. It is this
-    // window's top-up, whatever the confirmation said at the time.
+    // window's top-up, whatever the confirmation said at the time. Only the
+    // window just before: an older claim cannot have crossed into this one.
     if let Some((claimed_window, claimed_usd)) = history.pending
-        && !in_this_window_or_later(claimed_window)
+        && stamp_offset(budget, claimed_window) == Some(-1)
         && anchor_offset == Some(0)
         && existing > 0.0
         && (existing - claimed_usd).abs() <= 0.005
     {
-        let cap_to_usd = (existing > base + 0.005).then_some(round_up_cents(base));
-        return Decision::LandedLate { cycle, cap_to_usd };
+        return Decision::LandedLate {
+            cycle,
+            sent_usd: existing,
+        };
     }
     let limit = base + existing;
     if !(budget.current_usage.is_finite() && budget.current_usage >= TOPUP_THRESHOLD * limit) {
@@ -249,6 +251,14 @@ pub fn decide(
         cycle,
         target_usd: round_up_cents(existing + base),
     }
+}
+
+/// [`window_offset`] of a store stamp; `None` when either will not read.
+pub fn stamp_offset(budget: &BudgetState, stamp: &str) -> Option<i64> {
+    let t = DateTime::parse_from_rfc3339(stamp)
+        .ok()?
+        .with_timezone(&Utc);
+    window_offset(budget, t)
 }
 
 /// Rounded up to the cent, as `llm topup` rounds, so a read-back compares
@@ -338,7 +348,6 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
             continue;
         };
         let label = c.label.as_str();
-        let base = budget.max_limit;
         let history = History {
             last_applied: c.last_applied_cycle.as_deref(),
             pending: c.pending_cycle.as_deref().zip(c.pending_target_usd),
@@ -346,11 +355,24 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
         // The clock is read per tenant, not once per pass: the writes ahead
         // of this one take time, and the boundary margin is measured from
         // when this one is decided.
-        let (cycle, target) = match decide(c.active, budget, history, Utc::now()) {
+        let decision = decide(c.active, budget, history, Utc::now());
+        // A pending claim from a window that has ended is done with, whether
+        // it just landed late (below) or never landed: closed, so it can
+        // never be mistaken for anything again.
+        if let Some((claimed_window, _)) = history.pending
+            && stamp_offset(budget, claimed_window).is_some_and(|o| o < 0)
+            && let Err(e) = state
+                .store()
+                .close_auto_topup(c.tenant_id, claimed_window)
+                .await
+        {
+            tracing::error!(error = %e, %label, "budget top-up: could not close an old claim");
+        }
+        let (cycle, target) = match decision {
             Decision::TopUp { cycle, target_usd } => (cycle, target_usd),
-            Decision::LandedLate { cycle, cap_to_usd } => {
+            Decision::LandedLate { cycle, sent_usd } => {
                 attempted += 1;
-                land_late(state, bifrost, c, &cycle, cap_to_usd, base, now).await;
+                land_late(state, bifrost, c, &cycle, sent_usd, now).await;
                 continue;
             }
             Decision::Skip(Skip::UnknownWindow) => {
@@ -418,8 +440,7 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
                     .filter(|a| window_offset(budget, *a).is_some_and(|o| o >= 1))
                 {
                     Some(anchor) => {
-                        let cap = (amount > base + 0.005).then_some(round_up_cents(base));
-                        land_late(state, bifrost, c, &cycle_key(anchor), cap, base, now).await;
+                        land_late(state, bifrost, c, &cycle_key(anchor), amount, now).await;
                     }
                     None => {
                         tracing::info!(%label, vk_id = %c.vk_id, "budget top-up: auto top-up applied");
@@ -476,16 +497,18 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
     applied
 }
 
-/// A top-up that landed in a later window than it was claimed for: record
-/// that window as topped up, so it gets no second one, and if the grant
-/// carried the earlier window's stack, bring it down to one month.
+/// A top-up of `sent_usd` that landed in a later window than it was claimed
+/// for. That window is recorded as topped up, so it gets no second one. If
+/// the grant carried more than one month (the earlier window's stack), it is
+/// brought down to one month, but only if the key still shows exactly that
+/// grant in that window: anything else means a person has touched it since,
+/// and it is theirs.
 async fn land_late(
     state: &ControlState,
     bifrost: &crate::bifrost::BifrostClient,
     c: &crate::store::TopupCandidate,
     cycle: &str,
-    cap_to_usd: Option<f64>,
-    base: f64,
+    sent_usd: f64,
     now: DateTime<Utc>,
 ) {
     let label = c.label.as_str();
@@ -493,18 +516,36 @@ async fn land_late(
     // top-up and must not be given another.
     if let Err(e) = state
         .store()
-        .record_auto_topup_applied(c.tenant_id, cycle, cap_to_usd.unwrap_or(base), now)
+        .record_auto_topup_applied(c.tenant_id, cycle, sent_usd, now)
         .await
     {
         tracing::error!(error = %e, %label, "budget top-up: late grant not recorded");
     }
-    if let Some(cap) = cap_to_usd
-        && let Err(e) = bifrost.top_up_key(&c.vk_id, cap).await
-    {
-        tracing::error!(error = %e, %label, vk_id = %c.vk_id, "budget top-up: late grant not capped to one month");
-    }
     tracing::warn!(%label, vk_id = %c.vk_id, "budget top-up: applied in the next window");
     state.alert(crate::alert::llm_auto_topup_anchored_late(label));
+
+    let reread = bifrost.list_virtual_keys().await.map(|keys| {
+        keys.into_iter()
+            .find(|k| k.id == c.vk_id)
+            .and_then(|k| k.budgets.into_iter().next())
+    });
+    // Gone or unreadable: nothing to lower.
+    let Ok(Some(b)) = reread else { return };
+    let anchored = b.override_anchor_reset.and_then(|a| window_offset(&b, a));
+    // Another amount, or granted in another window: a person has touched
+    // it since, and it is theirs. One month or less: nothing to take off.
+    let base = b.max_limit;
+    if (b.override_amount - sent_usd).abs() > 0.005
+        || anchored.is_none()
+        || anchored != stamp_offset(&b, cycle)
+        || sent_usd <= base + 0.005
+    {
+        return;
+    }
+    if let Err(e) = bifrost.top_up_key(&c.vk_id, round_up_cents(base)).await {
+        tracing::error!(error = %e, %label, vk_id = %c.vk_id, "budget top-up: late grant not capped to one month");
+        state.alert(crate::alert::llm_auto_topup_cap_failed(label));
+    }
 }
 
 #[cfg(test)]
@@ -701,24 +742,24 @@ mod tests {
         assert_eq!(d(true, &b, None), top_up(75.0));
     }
 
-    /// A multi-cycle override keeps the anchor of the window it was granted
-    /// in (the gateway derives what is left from that anchor), so an anchor
-    /// before `last_reset` with cycles remaining is LIVE: it counts toward the
-    /// threshold and is kept in the target, never dropped from it.
+    /// An override covering more than this window was granted by hand, and a
+    /// one-cycle write from here would replace it and cut it short. The key
+    /// is the operator's: never topped up, whatever it has spent.
     #[test]
-    fn a_multi_cycle_override_from_an_earlier_window_is_live() {
-        let b = BudgetState {
-            override_amount: 300.0,
-            override_cycles_remaining: 2,
-            override_anchor_reset: Some(at("2026-10-03T09:15:00.4Z")),
-            ..with_signup_allowance(300.0)
-        };
-        assert_eq!(d(true, &b, None), Decision::Skip(Skip::BelowThreshold));
-        let b = BudgetState {
-            current_usage: 357.0,
-            ..b
-        };
-        assert_eq!(d(true, &b, None), top_up(375.0));
+    fn a_multi_cycle_override_is_the_operators() {
+        for usage in [0.0, 357.0, 1000.0] {
+            let b = BudgetState {
+                override_amount: 300.0,
+                override_cycles_remaining: 2,
+                override_anchor_reset: Some(at("2026-10-03T09:15:00.4Z")),
+                ..with_signup_allowance(usage)
+            };
+            assert_eq!(
+                d(true, &b, None),
+                Decision::Skip(Skip::OperatorOverride),
+                "{usage}"
+            );
+        }
     }
 
     /// An anchor and `last_reset` are compared by WINDOW. A `last_reset` that
@@ -760,10 +801,10 @@ mod tests {
             decide(true, &landed, history, mid_window()),
             Decision::LandedLate {
                 cycle: cycle_key(at(WINDOW)),
-                cap_to_usd: Some(75.0),
+                sent_usd: 150.0,
             }
         );
-        // One month landed: recorded, nothing to cap.
+        // One month landed: still this window's top-up.
         let one_month = BudgetState {
             override_amount: 75.0,
             ..landed.clone()
@@ -776,7 +817,7 @@ mod tests {
             decide(true, &one_month, history, mid_window()),
             Decision::LandedLate {
                 cycle: cycle_key(at(WINDOW)),
-                cap_to_usd: None,
+                sent_usd: 75.0,
             }
         );
         // A different amount is somebody else's override, and a pending claim
@@ -800,6 +841,31 @@ mod tests {
         );
     }
 
+    /// A STALE claim, from two or more windows back, cannot have crossed into
+    /// this one. If an operator's top-up happens to match its amount, that is
+    /// still the operator's, not a late landing to record or cap.
+    #[test]
+    fn a_claim_from_two_windows_back_is_not_a_late_landing() {
+        let operator = BudgetState {
+            override_amount: 150.0,
+            override_anchor_reset: Some(at(WINDOW)),
+            ..with_signup_allowance(10.0)
+        };
+        for back in ["2026-09-03T09:15:00.4Z", "2026-05-03T09:15:00.4Z"] {
+            let stale = cycle_key(at(back));
+            assert!(stamp_offset(&operator, &stale).unwrap() <= -2, "{back}");
+            let history = History {
+                last_applied: None,
+                pending: Some((&stale, 150.0)),
+            };
+            assert_eq!(
+                decide(true, &operator, history, mid_window()),
+                Decision::Skip(Skip::BelowThreshold),
+                "{back}"
+            );
+        }
+    }
+
     /// A window recorded from a late grant's anchor may be a few seconds off
     /// the `last_reset` the listing later shows. It still counts.
     #[test]
@@ -818,7 +884,7 @@ mod tests {
             override_amount: 10.0,
             ..budget(84.0)
         };
-        assert_eq!(d(true, &b, None), Decision::Skip(Skip::ForeverOverride));
+        assert_eq!(d(true, &b, None), Decision::Skip(Skip::OperatorOverride));
     }
 
     #[test]

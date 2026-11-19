@@ -157,6 +157,14 @@ struct Recorder {
     /// commits the override before reloading the key, and a failed reload
     /// answers 500 for a write that landed.
     bifrost_500_after_write: bool,
+    /// How many virtual-key listings the mock has answered.
+    bifrost_lists: usize,
+    /// When the listing count reaches the first value, every override the
+    /// mock holds becomes the second: an operator's `llm topup` landing
+    /// between two reads.
+    bifrost_operator_on_list: Option<(usize, f64)>,
+    /// Override PUTs from this one on (counting from 1) are refused.
+    bifrost_fail_puts_from: Option<usize>,
     /// Bearer values the warden saw, on every route.
     warden_bearers: Vec<String>,
     /// Labels asked about via `GET /v1/tenants/{label}`.
@@ -734,6 +742,14 @@ async fn spawn_bifrost(rec: Shared) -> String {
                 |AxumState(rec): AxumState<Shared>, headers: HeaderMap| async move {
                     let mut r = rec.lock().unwrap();
                     r.bifrost_auths.push(bearer_of(&headers));
+                    r.bifrost_lists += 1;
+                    if let Some((at, usd)) = r.bifrost_operator_on_list
+                        && r.bifrost_lists == at
+                    {
+                        for key in r.bifrost_minted.iter_mut().filter(|k| k.1 > 0.0) {
+                            key.1 = usd;
+                        }
+                    }
                     let window = r.bifrost_window.clone().unwrap_or_else(|| bifrost_window(0));
                     let keys: Vec<Value> = r
                         .bifrost_minted
@@ -773,7 +789,8 @@ async fn spawn_bifrost(rec: Shared) -> String {
                     r.bifrost_auths.push(bearer_of(&headers));
                     let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
                     r.bifrost_overrides.push((id.clone(), budget, body.clone()));
-                    if r.bifrost_fail_override {
+                    let nth = r.bifrost_overrides.len();
+                    if r.bifrost_fail_override || r.bifrost_fail_puts_from.is_some_and(|n| nth >= n) {
                         return StatusCode::BAD_REQUEST;
                     }
                     if r.bifrost_ignore_override {
@@ -2688,6 +2705,87 @@ async fn a_top_up_anchored_in_the_next_window_is_that_windows_one() {
     );
 }
 
+/// A late grant is only brought down to one month if the key still shows
+/// exactly that grant. An operator's top-up landing between the write and the
+/// cap's re-read is theirs: left alone, and the window still counts as done.
+#[tokio::test]
+async fn a_late_grant_an_operator_has_since_changed_is_not_capped() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    alerts_after(&h.rec, 1).await;
+    let triage = vk_id_for("tenant-ada");
+    let b = DEFAULT_LLM_BUDGET_USD;
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_usage.insert(triage.clone(), 2.0 * b);
+        r.bifrost_anchor_on = Some(bifrost_window(1));
+        // The pass's listing, the top-up's read, its read-back, then the
+        // cap's re-read: the operator lands just before that fourth.
+        let at = r.bifrost_lists + 4;
+        r.bifrost_operator_on_list = Some((at, 4.0 * b));
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 1);
+    assert_eq!(
+        h.rec.lock().unwrap().bifrost_overrides.len(),
+        2,
+        "no cap written over the operator's"
+    );
+    assert_eq!(mock_override(&h, &triage), 4.0 * b);
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_window = Some(bifrost_window(1));
+        r.bifrost_anchor_on = None;
+        r.bifrost_usage.insert(triage.clone(), 10.0 * b);
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    assert_eq!(h.rec.lock().unwrap().bifrost_overrides.len(), 2);
+}
+
+/// A cap that fails leaves the window counted (no second grant) and tells the
+/// operator, distinctly, that the extra is theirs to take off by hand.
+#[tokio::test]
+async fn a_failed_cap_keeps_the_window_and_says_so() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    alerts_after(&h.rec, 1).await;
+    let triage = vk_id_for("tenant-ada");
+    let b = DEFAULT_LLM_BUDGET_USD;
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_usage.insert(triage.clone(), 2.0 * b);
+        r.bifrost_anchor_on = Some(bifrost_window(1));
+        // The allowance was PUT 1 and the late write is 2: refuse the cap.
+        r.bifrost_fail_puts_from = Some(3);
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 1);
+    assert_eq!(h.rec.lock().unwrap().bifrost_overrides.len(), 3);
+    assert_eq!(mock_override(&h, &triage), 2.0 * b, "still the stack");
+    let alerts = alerts_after(&h.rec, 3).await;
+    assert!(
+        alerts
+            .iter()
+            .any(|a| a.contains("late top-up not capped:* `ada`")),
+        "{alerts:?}"
+    );
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_window = Some(bifrost_window(1));
+        r.bifrost_anchor_on = None;
+        r.bifrost_fail_puts_from = None;
+        r.bifrost_usage.insert(triage.clone(), 10.0 * b);
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    assert_eq!(
+        h.rec.lock().unwrap().bifrost_overrides.len(),
+        3,
+        "no regrant"
+    );
+}
+
 /// The same crossing, but the confirmation never comes back (the gateway
 /// commits and then answers 500). Once the listing shows the new window
 /// carrying exactly what the pending claim sent, that is the new window's
@@ -2734,6 +2832,9 @@ async fn an_unconfirmed_write_that_landed_late_is_the_next_windows_one() {
     // And that is the window's one: no second grant.
     assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
     assert_eq!(h.rec.lock().unwrap().bifrost_overrides.len(), 3);
+    // The old window's claim is closed for good, never offered again.
+    let c = h.state.store().auto_topup_candidates(10).await.unwrap();
+    assert_eq!(c[0].pending_cycle, None, "{c:?}");
 }
 
 /// Claims another attempt holds do not count against a pass's batch. With a

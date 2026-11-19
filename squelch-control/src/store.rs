@@ -352,7 +352,7 @@ CREATE TABLE IF NOT EXISTS llm_auto_topups (
     cycle_start  TEXT COLLATE \"C\" NOT NULL,
     target_usd   DOUBLE PRECISION NOT NULL,
     status       TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'applied')),
+        CHECK (status IN ('pending', 'applied', 'closed')),
     attempts     INTEGER NOT NULL DEFAULT 1,
     attempted_at TEXT COLLATE \"C\" NOT NULL,
     applied_at   TEXT COLLATE \"C\",
@@ -2383,6 +2383,22 @@ impl ControlStore {
         Ok(())
     }
 
+    /// Close a pending claim for good: its window has ended, and what it was
+    /// for either landed late (and was recorded in the window it landed in)
+    /// or never landed. A closed claim is never retried or read again.
+    pub async fn close_auto_topup(&self, tenant_id: i64, cycle: &str) -> Result<bool> {
+        let n = self
+            .client()
+            .await?
+            .execute(
+                "UPDATE llm_auto_topups SET status = 'closed'
+                  WHERE tenant_id = $1 AND cycle_start = $2 AND status = 'pending'",
+                &[&tenant_id, &cycle],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+
     /// Record that the window's top-up landed and was read back. `true` when a
     /// pending claim took it.
     pub async fn mark_auto_topup_applied(
@@ -3714,6 +3730,24 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
             s.claim_auto_topup(ada, jan, 75.0, t5, t5).await.unwrap(),
             None
         );
+        // A pending claim closed for good is never offered or retried again.
+        let feb = "2027-02-01T09:15:00.000Z";
+        s.claim_auto_topup(ada, feb, 75.0, t5, t5)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(s.close_auto_topup(ada, feb).await.unwrap());
+        assert!(!s.close_auto_topup(ada, feb).await.unwrap(), "closed once");
+        let later = t5 + chrono::Duration::days(1);
+        assert_eq!(
+            s.claim_auto_topup(ada, feb, 75.0, later, later)
+                .await
+                .unwrap(),
+            None
+        );
+        s.set_tenant_vk("ada", "vk-ada").await.unwrap();
+        let c = s.auto_topup_candidates(10).await.unwrap();
+        assert_eq!(c[0].pending_cycle, None, "{c:?}");
         // Next month is its own window.
         let dec = "2026-12-02T09:15:00.000Z";
         assert_eq!(

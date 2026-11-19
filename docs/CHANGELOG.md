@@ -19,6 +19,7 @@ Retention Update
 ### Mac
 
 - Back at your desk, a banner says how much of your mail five minutes would clear, and opens just those
+- Passband can be your default mail app
 - Copying a sign-in code closes the code panel
 - New accounts are named after their address
 - In the sitrep, t teaches Passband about all your mail

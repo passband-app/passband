@@ -277,6 +277,7 @@ enum ReleaseNotes {
             headline: "Retention Update",
             items: [
                 ReleaseItem(.app, "Back at your desk, a banner says how much of your mail five minutes would clear, and opens just those"),
+                ReleaseItem(.app, "Passband can be your default mail app"),
                 ReleaseItem(.app, "Copying a sign-in code closes the code panel"),
                 ReleaseItem(.app, "New accounts are named after their address"),
                 ReleaseItem(.app, "In the sitrep, t teaches Passband about all your mail"),

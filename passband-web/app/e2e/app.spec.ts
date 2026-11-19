@@ -1,7 +1,9 @@
 // The web client end to end, in a production-shaped build (shipping CSP and
 // Trusted Types), against a real daemon serving the invented `--rich` inbox:
 //
-//   spike_seed <db> --rich
+//   spike_seed <db> --rich      (a FRESH db: the seed's dates are relative to
+//                                when it ran, so an old one drifts out of the
+//                                windows these tests read)
 //   SPIKE_SEED=<target/debug/examples/spike_seed> SPIKE_DB=<db> npm run e2e
 //
 // with `squelch-api` serving that db on 127.0.0.1:8849 and
@@ -70,7 +72,8 @@ test("sign in with nothing typed: the sitrep, a thread, done and undo, sign out"
   await expect(page.getByText(/^Good (morning|afternoon|evening), Sam$/)).toBeVisible();
   const eyes = page.getByRole("region", { name: "For your eyes" });
   await expect(eyes.locator("li.eye")).toHaveCount(5);
-  await expect(eyes.getByText(/past due/i)).toBeVisible();
+  // At least one row is overdue (more become so as the seed ages).
+  await expect(eyes.getByText(/past due/i).first()).toBeVisible();
   await expect(page.getByRole("region", { name: "Reading" }).locator(".tile")).toHaveCount(6);
   await expect(page.getByRole("region", { name: "Shipments" }).getByText("out for delivery")).toBeVisible();
   await expect(page.getByRole("region", { name: "Receipts" }).getByText("$6.50")).toBeVisible();
@@ -213,4 +216,56 @@ test("sender logos come through the daemon, and a miss is just the initials", as
   // Asked once per domain, and never for a person's address.
   expect(new Set(asked).size).toBe(asked.length);
   expect(asked.every((d) => !/gmail|outlook|icloud|yahoo/.test(d))).toBe(true);
+});
+
+test("live updates: an event reaches the board without a reload", async ({ page }) => {
+  const violations = await watchViolations(page);
+  const db = process.env.SPIKE_DB!;
+  const lastId = execFileSync("python3", [
+    "-I",
+    "-c",
+    "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select coalesce(max(id),0) from events').fetchone()[0])",
+    db,
+  ])
+    .toString()
+    .trim();
+  // A returning browser: the stream resumes from the cursor it saved last time.
+  await page.addInitScript(
+    ([server, id]) => localStorage.setItem(`passband.events.lastSeen.${server}`, id),
+    [DAEMON, lastId] as const,
+  );
+  await signIn(page);
+  // "Live" shows once the daemon answers the stream, which can take a few seconds.
+  await expect(page.getByText("Live", { exact: true })).toBeVisible({ timeout: 20_000 });
+
+  const refreshes: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().includes("/client/v2/feed?destination=fye")) refreshes.push(r.url());
+  });
+  execFileSync("python3", ["-I", "e2e/tools/add_events.py", db, "1"]);
+  // The daemon wakes a stream for its own writes; this one came from outside,
+  // so do what a tab coming back does: reconnect from the cursor.
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow")));
+
+  await expect(page.getByText(/^New for you · /)).toBeVisible({ timeout: 20_000 });
+  await expect.poll(() => refreshes.length).toBeGreaterThan(0);
+  expect(violations).toEqual([]);
+});
+
+test("search: / from anywhere, results as you type, Enter opens the thread", async ({ page }) => {
+  const violations = await watchViolations(page);
+  await signIn(page);
+  await page.keyboard.press("/");
+  expect(new URL(page.url()).pathname).toBe("/search");
+  const field = page.getByLabel("Search your mail");
+  await expect(field).toBeFocused();
+  // The "/" that opened search is not typed into it.
+  await expect(field).toHaveValue("");
+  await field.fill("lease renewal");
+  const results = page.getByRole("region", { name: "Search results" });
+  await expect(results.getByText("Harborview Leasing").first()).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Lease renewal: signature needed" })).toBeVisible();
+  expect(violations).toEqual([]);
 });

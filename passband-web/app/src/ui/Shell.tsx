@@ -4,7 +4,7 @@ import { navigate, type Route } from "../app/router";
 import { client, DESKTOP_DOWNLOAD_URL } from "../app/services";
 import { recordDownloadClick } from "./DesktopApp";
 import { cycleTheme, label as themeLabel, useThemeChoice } from "../app/theme";
-import { DownloadIcon, GaugeIcon, MailIcon, SignOutIcon } from "./icons";
+import { DownloadIcon, GaugeIcon, MailIcon, SignOutIcon, SearchIcon } from "./icons";
 import { AutoThemeIcon, MoonIcon, SunIcon } from "./themeIcons";
 import { useKeys } from "./keys";
 
@@ -16,18 +16,22 @@ export function Shell({
   where,
   account,
   onSignedOut,
+  live = false,
   children,
 }: {
   route: Route;
   where: string;
   account?: string;
   onSignedOut: () => void;
+  /** The event stream is open: the board updates itself. */
+  live?: boolean;
   children: ReactNode;
 }) {
   const at = (name: Route["name"]) => route.name === name;
   const theme = useThemeChoice();
   // `\` cycles the theme from anywhere, as on the Mac (never while typing).
-  useKeys({ "\\": cycleTheme });
+  // `/` opens search from anywhere, as on the Mac (never while typing).
+  useKeys({ "\\": cycleTheme, "/": () => navigate({ name: "search" }) });
   return (
     <div className="shell">
       <nav className="rail" aria-label="Passband">
@@ -39,6 +43,15 @@ export function Shell({
           onClick={() => navigate({ name: "home" })}
         >
           <GaugeIcon size={20} />
+        </button>
+        <button
+          className={`rail-btn${at("search") ? " active" : ""}`}
+          aria-label="Search"
+          aria-current={at("search") ? "page" : undefined}
+          title="Search (/)"
+          onClick={() => navigate({ name: "search" })}
+        >
+          <SearchIcon size={20} />
         </button>
         <button
           className={`rail-btn${at("mail") ? " active" : ""}`}
@@ -92,6 +105,11 @@ export function Shell({
             passband<span className="where">{where}</span>
           </span>
           <span className="grow" />
+          {live && (
+            <span className="live-dot" title="Updates as mail arrives">
+              Live
+            </span>
+          )}
           {account && <span className="who">{account}</span>}
           <a
             className="btn"

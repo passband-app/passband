@@ -6,19 +6,22 @@ import { summaryLine, type WalkSummary } from "../app/walk";
 import type { EyesItem } from "../sitrep/model";
 import { DesktopBanner, nudgeLedger } from "./DesktopApp";
 import { useKeys } from "./keys";
+import { usePoll } from "./usePoll";
 import { SitrepView } from "./SitrepView";
 
-const POLL_MS = 30_000;
 
 export function SitrepPage({
   store,
   onSignedOut,
+  pollMs,
   onFlow,
   finished,
   onDismissFinished,
 }: {
   store: SitrepStore;
   onSignedOut: () => void;
+  /** How long between refreshes right now (live updates make it long). */
+  pollMs: () => number;
   /** Space: walk For your eyes from the highlighted row (or the first). */
   onFlow: (eyes: EyesItem[], highlighted?: EyesItem) => void;
   /** The walk that just ended, for the board to celebrate. */
@@ -29,20 +32,7 @@ export function SitrepPage({
   const [sel, setSel] = useState(-1);
   const eyes = s.sitrep.eyes;
 
-  useEffect(() => {
-    void store.refresh();
-    const tick = () => {
-      if (document.visibilityState === "visible") void store.refresh();
-    };
-    const timer = setInterval(tick, POLL_MS);
-    document.addEventListener("visibilitychange", tick);
-    window.addEventListener("focus", tick);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
-      window.removeEventListener("focus", tick);
-    };
-  }, [store]);
+  usePoll(() => store.refresh(), pollMs);
 
   useEffect(() => {
     if (s.signedOut) onSignedOut();

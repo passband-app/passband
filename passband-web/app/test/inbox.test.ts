@@ -119,10 +119,33 @@ describe("verbs", () => {
     expect(inbox.snapshot()).toMatchObject({ signedOut: true, stale: false });
   });
 
-  test("concurrent refreshes share one load", async () => {
+  test("concurrent refreshes cost two loads at most, never one per caller", async () => {
     const c = fakeClient([u()]);
     const inbox = new Inbox(c as unknown as Client, new ToastStore());
     await Promise.all([inbox.refresh(), inbox.refresh(), inbox.refresh()]);
-    expect(c.stats).toHaveBeenCalledTimes(1);
+    expect(c.stats).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("refresh coalescing", () => {
+  test("a refresh asked for during a load runs once more after it, not joined", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const first = new Promise<void>((r) => (release = r));
+    const c = fakeClient([u()]);
+    const stats = c.stats;
+    c.stats = vi.fn(async () => {
+      calls++;
+      if (calls === 1) await first;
+      return stats();
+    });
+    const inbox = new Inbox(c as unknown as Client, new ToastStore());
+    const a = inbox.refresh();
+    const b = inbox.refresh();
+    const d = inbox.refresh();
+    release();
+    await Promise.all([a, b, d]);
+    // The first load, then exactly one more for the two asked for during it.
+    expect(calls).toBe(2);
   });
 });

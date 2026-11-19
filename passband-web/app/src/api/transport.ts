@@ -194,10 +194,14 @@ export class InPageTransport implements Transport {
   private async send(url: string, init: RequestInit, opts: RequestOptions): Promise<Response> {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    // The caller's signal stays linked for the life of the RESPONSE, not just
+    // until its headers: a streamed body (the event stream) is ended by
+    // aborting that signal long after this function has returned.
     const onAbort = () => ctl.abort();
     opts.signal?.addEventListener("abort", onAbort, { once: true });
+    let ok = false;
     try {
-      return await this.fetchImpl(url, {
+      const resp = await this.fetchImpl(url, {
         ...init,
         credentials: "omit",
         redirect: "error",
@@ -205,13 +209,16 @@ export class InPageTransport implements Transport {
         cache: "no-store",
         signal: ctl.signal,
       });
+      ok = true;
+      return resp;
     } catch {
       // Deliberately not the underlying error: it can carry the URL.
       if (ctl.signal.aborted && !opts.signal?.aborted) throw new ApiError("timeout");
       throw new ApiError("network");
     } finally {
+      // The deadline covers getting an answer; the body may take as long as it takes.
       clearTimeout(timer);
-      opts.signal?.removeEventListener("abort", onAbort);
+      if (!ok) opts.signal?.removeEventListener("abort", onAbort);
     }
   }
 }

@@ -2,13 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 import { Inbox } from "../app/inbox";
 import { navigate, useRoute } from "../app/router";
 import { client, transport } from "../app/services";
+import { Live, announce, useLiveStatus } from "../app/live";
 import { SitrepStore } from "../app/sitrep";
+import { toasts } from "../app/toasts";
 import { WalkStore, current, useWalk } from "../app/walk";
 import type { EyesItem } from "../sitrep/model";
 import { Connect } from "./Connect";
 import { nudgeLedger } from "./DesktopApp";
 import { MailPage } from "./MailPage";
 import { Reader, type ReaderWalk } from "./Reader";
+import { SearchPage } from "./SearchPage";
 import { Shell } from "./Shell";
 import { SignIn } from "./SignIn";
 import { SitrepPage } from "./SitrepPage";
@@ -18,6 +21,15 @@ import "./flow.css";
 const inbox = new Inbox(client);
 const sitrep = new SitrepStore(client);
 const walks = new WalkStore();
+const live = new Live({
+  transport,
+  onChange: () => {
+    void sitrep.refresh();
+    void inbox.refresh();
+  },
+  onArrival: (e) => toasts.push(announce(e)),
+});
+const pollMs = () => live.pollMs();
 
 /** Each step of a walk REPLACES the history entry, so Back leaves flow mode. */
 const show = (item: EyesItem | undefined) =>
@@ -56,6 +68,7 @@ const flow = {
 export function App() {
   const route = useRoute();
   const w = useWalk(walks);
+  const liveStatus = useLiveStatus(live);
   const [ready, setReady] = useState(false);
   const [paired, setPaired] = useState(false);
 
@@ -71,6 +84,13 @@ export function App() {
   useEffect(() => {
     if (w.walk && route.name !== "thread") walks.end();
   }, [route.name, w.walk]);
+
+  // The event stream runs while signed in, and stops the moment that ends.
+  useEffect(() => {
+    if (!paired) return;
+    live.start();
+    return () => live.stop();
+  }, [paired]);
 
   const signedOut = useCallback(() => setPaired(false), []);
   const onPaired = useCallback(() => {
@@ -96,10 +116,17 @@ export function App() {
         }
       : undefined;
 
-  const where = route.name === "home" ? "sitrep" : readerWalk ? "flow" : "mail";
+  const where =
+    route.name === "home"
+      ? "sitrep"
+      : route.name === "search"
+        ? "search"
+        : readerWalk
+          ? "flow"
+          : "mail";
   return (
     <>
-      <Shell route={route} where={where} onSignedOut={signedOut}>
+      <Shell route={route} where={where} onSignedOut={signedOut} live={liveStatus === "open"}>
         {route.name === "thread" ? (
           <Reader
             threadId={route.threadId}
@@ -107,12 +134,18 @@ export function App() {
             onSignedOut={signedOut}
             walk={readerWalk}
           />
+        ) : route.name === "search" ? (
+          <SearchPage
+            onOpen={(threadId) => navigate({ name: "thread", threadId })}
+            onSignedOut={signedOut}
+          />
         ) : route.name === "mail" ? (
-          <MailPage inbox={inbox} onSignedOut={signedOut} />
+          <MailPage inbox={inbox} onSignedOut={signedOut} pollMs={pollMs} />
         ) : (
           <SitrepPage
             store={sitrep}
             onSignedOut={signedOut}
+            pollMs={pollMs}
             onFlow={flow.start}
             finished={w.finished}
             onDismissFinished={() => walks.dismissSummary()}

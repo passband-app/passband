@@ -21,6 +21,11 @@ import {
   type Stats,
   type StatusResult,
   type ThreadView,
+  searchPage,
+  senderHit,
+  rows as wireRows,
+  type SearchPage,
+  type SenderHit,
 } from "./wire";
 
 /** Gmail's inbox label: archive's undo puts it back. */
@@ -137,6 +142,46 @@ export class Client {
     } finally {
       await this.transport.forget();
     }
+  }
+
+  /**
+   * One page of search hits, as the Mac's search field asks (`SearchFetch.page`):
+   * `partial` matches the trailing token as a prefix while somebody is typing.
+   */
+  async search(
+    q: string,
+    opts: {
+      limit?: number;
+      cursor?: string;
+      mode?: "keyword" | "semantic" | "hybrid";
+      partial?: boolean;
+      unfinishedFirst?: boolean;
+      includeSent?: boolean;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<SearchPage> {
+    const resp = await this.transport.request("/client/search", {
+      query: {
+        q,
+        limit: opts.limit,
+        cursor: opts.cursor,
+        mode: opts.mode,
+        partial: opts.partial ? "1" : undefined,
+        unfinished_first: opts.unfinishedFirst ? "true" : undefined,
+        include_sent: opts.includeSent ? "true" : undefined,
+      },
+      signal: opts.signal,
+    });
+    return decode(resp, searchPage);
+  }
+
+  /** Senders whose address or name contains `q` (`/client/senders`). */
+  async senders(q: string, limit = 3, signal?: AbortSignal): Promise<SenderHit[]> {
+    const resp = await this.transport.request("/client/senders", {
+      query: { q, limit },
+      signal,
+    });
+    return decode(resp, (v) => (Array.isArray(v) ? wireRows(v, senderHit) : null));
   }
 
   /** An attachment's bytes (also how `cid:` inline images are loaded). */

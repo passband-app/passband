@@ -139,3 +139,9 @@ export const ForwardIcon = (p: P) => (
     <path d="M9.5 5.5L16 12l-6.5 6.5" />
   </Icon>
 );
+export const SearchIcon = (p: P) => (
+  <Icon {...p}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <path d="M15.5 15.5L20.5 20.5" />
+  </Icon>
+);

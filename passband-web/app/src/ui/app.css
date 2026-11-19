@@ -630,3 +630,15 @@ kbd {
 .eye .has-logo { width: 26px; height: 26px; border-radius: 50%; }
 .eye .has-logo img { width: 16px; height: 16px; }
 .tile .logo.has-logo img { width: 30px; height: 30px; }
+
+/* Live updates: the event stream is open. */
+.live-dot {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 10.5px/1 var(--sans); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--positive);
+}
+.live-dot::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--positive);
+  box-shadow: 0 0 0 3px var(--positive-soft);
+}

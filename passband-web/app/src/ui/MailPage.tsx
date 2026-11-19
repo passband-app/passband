@@ -7,27 +7,24 @@ import { avatarSlot, displayName, initials, senderString } from "../sitrep/sende
 import { nudgeLedger } from "./DesktopApp";
 import { ArchiveIcon, CheckIcon, PaperclipIcon } from "./icons";
 import { useKeys } from "./keys";
+import { usePoll } from "./usePoll";
 
-const POLL_MS = 30_000;
 
 /** Everything recent, needs-you first: the full list behind the sitrep. */
-export function MailPage({ inbox, onSignedOut }: { inbox: Inbox; onSignedOut: () => void }) {
+export function MailPage({
+  inbox,
+  onSignedOut,
+  pollMs,
+}: {
+  inbox: Inbox;
+  onSignedOut: () => void;
+  pollMs: () => number;
+}) {
   const s = useInbox(inbox);
   const [cursor, setCursor] = useState(0);
   const rows = useMemo(() => [...s.needsYou, ...s.rest], [s.needsYou, s.rest]);
 
-  useEffect(() => {
-    void inbox.refresh();
-    const tick = () => {
-      if (document.visibilityState === "visible") void inbox.refresh();
-    };
-    const timer = setInterval(tick, POLL_MS);
-    document.addEventListener("visibilitychange", tick);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
-    };
-  }, [inbox]);
+  usePoll(() => inbox.refresh(), pollMs);
 
   useEffect(() => {
     if (s.signedOut) onSignedOut();

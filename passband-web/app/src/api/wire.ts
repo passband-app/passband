@@ -526,3 +526,96 @@ export function fyeHeadline(v: Json): FyeHeadline | null {
   const h = optStr(v.headline);
   return { headline: h && h.trim() ? h : undefined, settled: v.settled !== false };
 }
+
+// ---------------------------------------------------------------- search
+
+/** One hit from `/client/search` (the Mac's `SearchHit`). */
+export interface SearchHit {
+  id: number;
+  thread_id: string;
+  from_addr: string;
+  from_name?: string;
+  subject: string;
+  received_at: string;
+  snippet: string;
+  /** Absent from an older daemon: status unknown, not "unfinished". */
+  is_done?: boolean;
+  subject_matches?: string[];
+  snippet_matches?: string[];
+  from_me?: boolean;
+}
+
+export function searchHit(v: Json): SearchHit | null {
+  if (!isObj(v)) return null;
+  const id = int(v.id);
+  const thread_id = str(v.thread_id);
+  const from_addr = str(v.from_addr);
+  const subject = str(v.subject);
+  const received_at = str(v.received_at);
+  const snippet = str(v.snippet);
+  if (
+    id === null ||
+    thread_id === null ||
+    from_addr === null ||
+    subject === null ||
+    received_at === null ||
+    snippet === null
+  ) {
+    return null;
+  }
+  return {
+    id,
+    thread_id,
+    from_addr,
+    from_name: optStr(v.from_name),
+    subject,
+    received_at,
+    snippet,
+    is_done: optBool(v.is_done),
+    subject_matches: Array.isArray(v.subject_matches) ? strList(v.subject_matches) : undefined,
+    snippet_matches: Array.isArray(v.snippet_matches) ? strList(v.snippet_matches) : undefined,
+    from_me: optBool(v.from_me),
+  };
+}
+
+export interface SearchDiagnostics {
+  strict_hits: number;
+  any_hits: number;
+}
+
+export interface SearchPage {
+  items: SearchHit[];
+  next_cursor?: string;
+  match_kind?: string;
+  diagnostics?: SearchDiagnostics;
+  /** Search covers mail from this date on. */
+  indexed_since?: string;
+}
+
+export function searchPage(v: Json): SearchPage | null {
+  if (!isObj(v) || !Array.isArray(v.items)) return null;
+  const d = isObj(v.diagnostics) ? v.diagnostics : undefined;
+  const strict = d ? int(d.strict_hits) : null;
+  const any = d ? int(d.any_hits) : null;
+  return {
+    items: rows(v.items, searchHit),
+    next_cursor: optStr(v.next_cursor),
+    match_kind: optStr(v.match_kind),
+    diagnostics: strict !== null && any !== null ? { strict_hits: strict, any_hits: any } : undefined,
+    indexed_since: optStr(v.indexed_since),
+  };
+}
+
+/** One row of `/client/senders`: who has written to this account. */
+export interface SenderHit {
+  addr: string;
+  display_name?: string;
+  msg_count: number;
+}
+
+export function senderHit(v: Json): SenderHit | null {
+  if (!isObj(v)) return null;
+  const addr = str(v.addr);
+  if (addr === null) return null;
+  return { addr, display_name: optStr(v.display_name), msg_count: int(v.msg_count) ?? 0 };
+}

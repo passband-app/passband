@@ -97,6 +97,37 @@ describe("failures", () => {
   });
 });
 
+describe("streams", () => {
+  test("the caller's signal still ends a body that is streaming after the headers", async () => {
+    let bodySignal: AbortSignal | undefined;
+    const { t } = harness((_u, init) => {
+      bodySignal = init.signal ?? undefined;
+      return new Response(new ReadableStream({ start() {} }));
+    });
+    const caller = new AbortController();
+    await t.request("/client/events", { signal: caller.signal, timeoutMs: 1000 });
+    expect(bodySignal?.aborted).toBe(false);
+    caller.abort();
+    expect(bodySignal?.aborted).toBe(true);
+  });
+
+  test("the request deadline does not cut a body off once the answer has arrived", async () => {
+    vi.useFakeTimers();
+    try {
+      let bodySignal: AbortSignal | undefined;
+      const { t } = harness((_u, init) => {
+        bodySignal = init.signal ?? undefined;
+        return new Response(new ReadableStream({ start() {} }));
+      });
+      await t.request("/client/events", { timeoutMs: 1000 });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(bodySignal?.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("pairing", () => {
   test("a minted token is kept, and only in the store", async () => {
     const store = new MemoryCredentialStore();

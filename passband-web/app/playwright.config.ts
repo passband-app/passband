@@ -5,7 +5,7 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./e2e",
   // The mail suite needs no daemon and runs under its own config.
-  testIgnore: /mail\.spec\.ts/,
+  testIgnore: /(mail|search)\.spec\.ts/,
   timeout: 30_000,
   // One test at a time: each one mints a pairing code, and minting supersedes
   // the account's previous code, so two tests signing in at once spend each

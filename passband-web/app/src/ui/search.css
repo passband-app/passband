@@ -1,0 +1,63 @@
+/* Search. Built only from app.css tokens, so it follows light and dark. */
+
+.search-page { max-width: 980px; margin: 0 auto; padding-top: var(--s8); }
+
+.search-field {
+  display: flex; align-items: center; gap: var(--s10);
+  height: 48px; padding: 0 var(--s16);
+  margin-bottom: var(--s16);
+  color: var(--ink-faint);
+  border-radius: 14px;
+}
+.search-field:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
+.search-field input {
+  flex: 1; min-width: 0; height: 100%;
+  border: none; outline: none; background: none;
+  font: 400 16px/1 var(--sans); color: var(--ink);
+}
+.search-field input::placeholder { color: var(--ink-faint); }
+.search-field input::-webkit-search-cancel-button { display: none; }
+
+.search-spin {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--hairline); border-top-color: var(--accent);
+  animation: search-spin 700ms linear infinite;
+}
+@keyframes search-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .search-spin { animation: none; } }
+
+.search-results .eye { grid-template-columns: 26px 170px minmax(0, 1fr) auto; }
+.search-results .eye .line .subj { color: var(--ink); }
+.search-results .eye .line .snip { color: var(--ink-faint); }
+.search-results .eye.done .who,
+.search-results .eye.done .subj { color: var(--ink-faint); }
+.search-results .eye .age { color: var(--ink-faint); font-size: 12px; min-width: 32px; text-align: right; }
+.search-results .more { margin: var(--s6) var(--s10) var(--s8); }
+
+/* A matched word: tinted, never bold, so a row of hits stays calm. */
+mark.hl {
+  background: var(--warn-soft);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.search-recent { padding: 0 var(--s4); }
+.search-recent .list-section { display: flex; justify-content: space-between; align-items: center; }
+.search-recent ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.search-recent .recent {
+  display: block; width: 100%; text-align: left;
+  padding: var(--s8) var(--s10); border: none; background: none;
+  border-radius: var(--r-row);
+  color: var(--ink-dim); font-size: 13.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.search-recent .recent:hover,
+.search-recent .recent.selected { background: var(--accent-soft); color: var(--ink); }
+
+.search-note { color: var(--ink-faint); padding: var(--s8) var(--s4); }
+
+@media (max-width: 680px) {
+  .search-results .eye { grid-template-columns: 26px minmax(0, 1fr) auto; }
+  .search-results .eye .line { grid-column: 2 / -1; grid-row: 2; }
+}

@@ -45,6 +45,7 @@ export class SitrepStore {
   private state: SitrepState = { sitrep: EMPTY_SITREP, loading: true, stale: false, signedOut: false };
   private listeners = new Set<() => void>();
   private inflight: Promise<void> | null = null;
+  private again: Promise<void> | null = null;
   private hidden = new Set<number>();
   /** The previous visit, fixed for this page load so a refresh does not empty billing. */
   private billingLastSeen: number | null;
@@ -65,8 +66,21 @@ export class SitrepStore {
   };
   snapshot = () => this.state;
 
+  /**
+   * One load at a time. A refresh asked for DURING a load runs once more after
+   * it, rather than joining it: that load may have read the mailbox before the
+   * change the caller is refreshing for (an undo, a live event) had landed.
+   * Any number of such requests coalesce into that one follow-up load.
+   */
   refresh(): Promise<void> {
-    this.inflight ??= this.load().finally(() => {
+    if (this.inflight) {
+      this.again ??= this.inflight.then(() => {
+        this.again = null;
+        return this.refresh();
+      });
+      return this.again;
+    }
+    this.inflight = this.load().finally(() => {
       this.inflight = null;
     });
     return this.inflight;

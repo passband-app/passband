@@ -9125,6 +9125,11 @@ fn human_inventory(
             // Own mail sits in no zone: a decision left from when it was read
             // as inbound would label it with a page that will not list it.
             placement: placement(decision.as_ref().filter(|_| !row.own), in_fye, is_auth),
+            outreach: decision
+                .as_ref()
+                .filter(|_| !row.own)
+                .and_then(|d| d.outreach.as_ref())
+                .map(|o| o.kind),
             surfaced_at: row.surfaced,
             resolved_at: row.resolved,
             remind_at: row.reminder,

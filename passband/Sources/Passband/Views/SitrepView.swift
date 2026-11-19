@@ -1031,6 +1031,13 @@ private struct ObligationRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                // A stranger's pitch that earned its place here says so,
+                // quietly: the owner should know it is cold before opening.
+                if let cold = update.outreachLabel {
+                    Chip(text: cold, tone: Palette.inkFaint)
+                        .help("A first message from someone you have not written to")
+                        .layoutPriority(3)
+                }
                 if let amount {
                     Label(amount, systemImage: "receipt")
                         .font(Typo.num(11, weight: .medium))

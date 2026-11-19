@@ -256,6 +256,26 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     /// The decision's own `auth.critical`, beside `auth_kinds`.
     var auth_critical: Bool? = nil
 
+    /// The kind of cold pitch (`sales`, `recruiting`, ...) when triage found
+    /// one on first contact. Set by the feed adapter from the decision, and
+    /// by an all-mail listing from a daemon that sends it; nil everywhere else.
+    var outreach: String? = nil
+    /// The row's "cold" chip text, nil when it is not a cold pitch. A pitch in
+    /// For your eyes earned its place, so the chip only names what it is.
+    var outreachLabel: String? {
+        guard let outreach else { return nil }
+        switch outreach {
+        case "sales": return "cold sales"
+        case "recruiting": return "cold recruiting"
+        case "investor": return "cold investor"
+        case "partnership": return "cold partnership"
+        case "press": return "cold press"
+        case "services": return "cold agency"
+        case "favor_ask": return "cold ask"
+        default: return "cold"
+        }
+    }
+
     var hasAttachments: Bool { has_attachments ?? false }
     /// Auth mail by the row's own decision.
     var isAuthRow: Bool { !(auth_kinds ?? []).isEmpty }
@@ -3726,6 +3746,7 @@ struct AgentFeedItem: Codable, Sendable {
             subject: subject, status: .new, surfaced_at: received_at)
         row.auth_kinds = decision.auth?.kinds
         row.auth_critical = decision.auth?.critical
+        row.outreach = decision.outreach?.kind
         return row
     }
 
@@ -3757,6 +3778,25 @@ struct AgentMessageDecision: Codable, Sendable {
     /// `auth`: which auth kinds triage found. Optional throughout so a
     /// decision shaped any other way still decodes.
     var auth: AgentAuthAssessment? = nil
+    /// Cold outreach on first contact (agent-triage-v28). ABSENT from an
+    /// older daemon and on everything that is not a pitch.
+    var outreach: AgentOutreach? = nil
+}
+
+/// core::triage::decision::OutreachAssessment, the one field a row reads.
+/// Forgiving like `AgentAuthAssessment`: a row that cannot decode loses the
+/// whole feed page, and this is presentation, not membership.
+struct AgentOutreach: Codable, Sendable {
+    var kind: String?
+
+    init(kind: String? = nil) {
+        self.kind = kind
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.container(keyedBy: CodingKeys.self)
+        kind = (try? c?.decodeIfPresent(String.self, forKey: .kind)) ?? nil
+    }
 }
 
 /// core::triage::decision::AuthAssessment, the two fields a client reads.

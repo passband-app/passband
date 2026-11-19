@@ -289,6 +289,12 @@ pub struct AttentionUpdate {
     /// has no triage decision yet, and on the legacy band listing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<String>,
+    /// The kind of cold pitch this is (`sales`, `recruiting`, ...), when
+    /// triage found it on first contact (`OutreachAssessment`), so the list
+    /// can say "cold" on a pitch that earned a place. Absent for everything
+    /// else. HUMAN-DOOR ONLY, like `placement`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outreach: Option<crate::triage::decision::OutreachKind>,
     pub surfaced_at: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     /// A PENDING reminder: when the user asked to see this again, `None` when

@@ -1,7 +1,19 @@
 // PASSBAND AS THE MAC'S DEFAULT MAIL APP: whether it is, the one time it asks
 // to be, and the button that makes it so.
 //
-// THE ASK IS EARNED BY A SEND, not by a launch. Somebody who has just sent
+// NEW USERS ARE ASKED DURING ONBOARDING, BY THE SYSTEM ALONE. The moment the
+// first look at a newly connected mailbox ends (FirstLoad.conclude, the inbox
+// on screen, the connection verified), and a beat later so the dialog does
+// not land mid-transition, Passband asks macOS to make it the default. macOS
+// shows its own "change default email reader?" confirmation; there is no
+// card, sheet or step of ours. The stamp is written BEFORE the request, so a
+// crash or a refusal never asks again, and a fresh install therefore never
+// sees the card below.
+//
+// EXISTING USERS (onboarded before this version) never pass through that
+// moment again, so they keep the card, earned by a send:
+//
+// THE CARD IS EARNED BY A SEND, not by a launch. Somebody who has just sent
 // mail from Passband has a reason to want email links to land here; somebody
 // who has only opened the app has not. So the card can only be wanted right
 // after a send from Passband goes out: the first one on a new install, and
@@ -52,11 +64,24 @@ final class DefaultMailApp {
     nonisolated static let forced =
         ProcessInfo.processInfo.environment["PASSBAND_FORCE_DEFAULT_MAIL_NUDGE"] == "1"
 
+    /// `PASSBAND_FORCE_DEFAULT_MAIL_NUDGE=onboarding` runs the onboarding ask
+    /// at the first sync of any launch, past the stamp and without writing
+    /// it, so the system's dialog can be looked at without a fresh install.
+    /// It still skips when Passband is already the default.
+    nonisolated static let forcedOnboarding =
+        ProcessInfo.processInfo.environment["PASSBAND_FORCE_DEFAULT_MAIL_NUDGE"] == "onboarding"
+
+    /// How long after the inbox first shows before the system is asked.
+    nonisolated static let onboardingDelay: Duration = .seconds(1)
+
     private let defaults: UserDefaults
     /// Launch Services' answer: is Passband the app mailto: links open in.
     /// Injected so a suite can answer without the system.
     private let probe: () -> Bool
     private let isForced: Bool
+    /// Asks the system to make Passband the default. Injected so a suite can
+    /// see the call, and what was stamped when it came.
+    private let request: () -> Void
 
     /// Whether the card is WANTED: earned and not yet answered. Whether it is
     /// drawn right now is `drawn(composerOpen:cornerOccupied:)`.
@@ -72,10 +97,12 @@ final class DefaultMailApp {
     init(
         defaults: UserDefaults = .standard,
         forced: Bool = DefaultMailApp.forced,
-        probe: @escaping () -> Bool = DefaultMailApp.systemSaysPassband
+        probe: @escaping () -> Bool = DefaultMailApp.systemSaysPassband,
+        request: (() -> Void)? = nil
     ) {
         self.defaults = defaults
         self.probe = probe
+        self.request = request ?? { DefaultMailApp.shared.makeDefault() }
         self.isForced = forced
         refresh()
         showingNudge = forced
@@ -87,6 +114,15 @@ final class DefaultMailApp {
         sentFromPassband: Bool, isDefault: Bool, asked: Bool, othersShowing: Bool
     ) -> Bool {
         sentFromPassband && !isDefault && !asked && !othersShowing
+    }
+
+    /// THE ONBOARDING RULE, pure: the end of a first-ever onboarding on this
+    /// Mac, over a verified connection, on an install never asked and not
+    /// already the default.
+    nonisolated static func asksDuringOnboarding(
+        firstOnboarding: Bool, verified: Bool, isDefault: Bool, asked: Bool
+    ) -> Bool {
+        firstOnboarding && verified && !isDefault && !asked
     }
 
     /// THE PLACEMENT RULE, pure: a wanted card is drawn only with no composer
@@ -108,6 +144,35 @@ final class DefaultMailApp {
 
     func drawn(composerOpen: Bool, cornerOccupied: Bool) -> Bool {
         Self.drawn(wanted: showingNudge, composerOpen: composerOpen, cornerOccupied: cornerOccupied)
+    }
+
+    /// The first look at a newly connected mailbox just ended. On a first
+    /// onboarding, asks the system (no card), once ever: the stamp is written
+    /// here, before the request, and the request comes `after` later. `forced`
+    /// (the preview override) skips the first-onboarding and stamp checks and
+    /// writes nothing. Returns whether it asked.
+    @discardableResult
+    func askDuringOnboarding(
+        firstOnboarding: Bool, verified: Bool, forced: Bool = false,
+        after delay: Duration? = DefaultMailApp.onboardingDelay
+    ) -> Bool {
+        guard !FixtureMode.isEnabled || forced else { return false }
+        refresh()
+        guard
+            Self.asksDuringOnboarding(
+                firstOnboarding: firstOnboarding || forced, verified: verified,
+                isDefault: isDefault, asked: asked && !forced)
+        else { return false }
+        if !forced { defaults.set(true, forKey: Self.askedKey) }
+        guard let delay else {
+            request()
+            return true
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: delay)
+            self.request()
+        }
+        return true
     }
 
     /// A send from Passband just went out. Wants the card if this is the

@@ -267,6 +267,12 @@ private struct ShellWatchers: View {
                     store.whatsNew.maybeShow()
                     // The agent-door ad waits out both: it checks for them.
                     AgentNudge.shared.askIfEarned(store: store)
+                    // `PASSBAND_FORCE_DEFAULT_MAIL_NUDGE=onboarding`: the
+                    // onboarding ask at the first sync, for looking at.
+                    if DefaultMailApp.forcedOnboarding {
+                        DefaultMailApp.shared.askDuringOnboarding(
+                            firstOnboarding: true, verified: store.connectionVerified, forced: true)
+                    }
                 }
             }
     }

@@ -21,6 +21,7 @@ struct DefaultMailAppTests {
         waitsForTheComposerAndTheCorner()
         theModelStampsOnceWhenDrawn()
         theWiringIsThere()
+        onboardingAsksTheSystemOnce()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -212,6 +213,102 @@ struct DefaultMailAppTests {
         expect(card.contains("model.noteShown()"), "and stamps when drawn")
         let root = read("Sources/Passband/App/RootView.swift")
         expect(root.contains(".overlay { DefaultMailNudgeCard() }"), "the card is mounted")
+    }
+
+    /// New users: macOS is asked once at the end of the first onboarding,
+    /// with the stamp already written when the request goes, and never the
+    /// card after. Existing users: no onboarding ask, the card as before.
+    static func onboardingAsksTheSystemOnce() {
+        // The rule.
+        expect(
+            DefaultMailApp.asksDuringOnboarding(
+                firstOnboarding: true, verified: true, isDefault: false, asked: false),
+            "a first onboarding, verified, not the default: asks")
+        expect(
+            !DefaultMailApp.asksDuringOnboarding(
+                firstOnboarding: false, verified: true, isDefault: false, asked: false),
+            "an install onboarded before never gets the onboarding ask")
+        expect(
+            !DefaultMailApp.asksDuringOnboarding(
+                firstOnboarding: true, verified: false, isDefault: false, asked: false),
+            "not before the connection is verified")
+        expect(
+            !DefaultMailApp.asksDuringOnboarding(
+                firstOnboarding: true, verified: true, isDefault: true, asked: false),
+            "already the default: skipped")
+        expect(
+            !DefaultMailApp.asksDuringOnboarding(
+                firstOnboarding: true, verified: true, isDefault: false, asked: true),
+            "asked once is asked forever")
+
+        // The model: the request is made with the stamp already written.
+        let d = fresh()
+        var requests = 0
+        var stampedAtRequest: Bool?
+        let m = DefaultMailApp(
+            defaults: d, forced: false, probe: { false },
+            request: {
+                requests += 1
+                stampedAtRequest = d.bool(forKey: DefaultMailApp.askedKey)
+            })
+        expect(m.askDuringOnboarding(firstOnboarding: true, verified: true, after: nil), "asked")
+        expect(requests == 1, "the system was asked once")
+        expect(stampedAtRequest == true, "the stamp was written BEFORE the request")
+        expect(!m.showingNudge, "and no card of ours")
+        // Never again: a second first look (a crash, a relaunch) asks nothing.
+        expect(!m.askDuringOnboarding(firstOnboarding: true, verified: true, after: nil), "once")
+        expect(requests == 1, "still one request")
+        // The card never follows an onboarding ask, whatever happens to it.
+        m.noteSent(othersShowing: false)
+        expect(!m.showingNudge, "no card after the onboarding ask")
+
+        // Already the default: no request, no stamp.
+        var r2 = 0
+        let d2 = fresh()
+        let m2 = DefaultMailApp(defaults: d2, forced: false, probe: { true }, request: { r2 += 1 })
+        expect(!m2.askDuringOnboarding(firstOnboarding: true, verified: true, after: nil), "skipped")
+        expect(r2 == 0 && !d2.bool(forKey: DefaultMailApp.askedKey), "nothing asked, nothing stamped")
+
+        // An existing user: the end of a first look that is not their first
+        // onboarding asks nothing, and the send card is still theirs.
+        var r3 = 0
+        let m3 = DefaultMailApp(defaults: fresh(), forced: false, probe: { false }, request: { r3 += 1 })
+        expect(!m3.askDuringOnboarding(firstOnboarding: false, verified: true, after: nil), "no ask")
+        expect(r3 == 0, "no request")
+        m3.noteSent(othersShowing: false)
+        expect(m3.showingNudge, "existing users still get the card after a send")
+
+        // The preview override: asks past the stamp and writes none.
+        var r4 = 0
+        let d4 = fresh()
+        d4.set(true, forKey: DefaultMailApp.askedKey)
+        let m4 = DefaultMailApp(defaults: d4, forced: false, probe: { false }, request: { r4 += 1 })
+        expect(
+            m4.askDuringOnboarding(firstOnboarding: false, verified: true, forced: true, after: nil),
+            "forced asks even on an asked install")
+        expect(r4 == 1, "forced requests")
+        let d5 = fresh()
+        let m5 = DefaultMailApp(defaults: d5, forced: false, probe: { false }, request: {})
+        m5.askDuringOnboarding(firstOnboarding: false, verified: true, forced: true, after: nil)
+        expect(!d5.bool(forKey: DefaultMailApp.askedKey), "forced stamps nothing")
+
+        // The wiring: the end of the first look calls it with the real
+        // first-time flag and the verified signal.
+        let firstLoad = read("Sources/Passband/Model/FirstLoad.swift")
+        let conclude = body(of: "private func conclude(_ store: AppStore) {", in: firstLoad)
+        expect(
+            conclude.contains("DefaultMailApp.shared.askDuringOnboarding(")
+                && conclude.contains("firstOnboarding: firstTime, verified: store.connectionVerified"),
+            "FirstLoad.conclude asks on a first onboarding, verified")
+        let model = read("Sources/Passband/Lib/DefaultMailApp.swift")
+        let ask = body(of: "func askDuringOnboarding(", in: model)
+        let stamp = ask.range(of: "defaults.set(true, forKey: Self.askedKey)")
+        let call = ask.range(of: "request()")
+        expect(
+            stamp != nil && call != nil && stamp!.lowerBound < call!.lowerBound,
+            "the stamp precedes the request in the source too")
+        expect(ask.contains("Task.sleep(for: delay)"), "the request waits a beat")
+        expect(DefaultMailApp.onboardingDelay == .seconds(1), "about a second")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

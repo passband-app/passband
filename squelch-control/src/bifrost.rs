@@ -232,6 +232,11 @@ pub struct BudgetState {
     pub last_reset: Option<DateTime<Utc>>,
     /// `"cycles"`, `"forever"`, or empty when there is no override.
     pub override_mode: String,
+    /// How many windows a cycles override still covers, this one included
+    /// (`override_cycles_remaining`). The gateway re-derives it whenever
+    /// `last_reset` advances and clears the override at zero, so this, not
+    /// the anchor, says whether an override is live.
+    pub override_cycles_remaining: i64,
     /// The window boundary the current override was granted at
     /// (`override_anchor_reset`). An override anchored before `last_reset`
     /// belongs to a window that has already closed.
@@ -429,6 +434,8 @@ struct WireBudget {
     last_reset: Option<String>,
     #[serde(default)]
     override_mode: Option<String>,
+    #[serde(default)]
+    override_cycles_remaining: i64,
     #[serde(default)]
     override_anchor_reset: Option<String>,
     #[serde(default)]
@@ -666,6 +673,7 @@ impl BifrostClient {
                                 override_amount: b.override_amount,
                                 last_reset: gateway_time(b.last_reset.as_deref()),
                                 override_mode: b.override_mode.unwrap_or_default(),
+                                override_cycles_remaining: b.override_cycles_remaining,
                                 override_anchor_reset: gateway_time(
                                     b.override_anchor_reset.as_deref(),
                                 ),
@@ -1699,6 +1707,7 @@ mod tests {
         assert_eq!(b.override_anchor_reset, Some(opened));
         assert_eq!(b.override_mode, "cycles");
         assert_eq!(b.reset_duration, "1M");
+        assert_eq!(b.override_cycles_remaining, 1);
         for k in &keys[1..] {
             let b = &k.budgets[0];
             assert_eq!(b.last_reset, None, "{}", k.name);

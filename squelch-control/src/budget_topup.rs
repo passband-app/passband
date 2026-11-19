@@ -64,10 +64,6 @@ pub const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
 /// the next one. Every attempt is still logged.
 pub const FAILURE_ALERT_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Slack for comparing two window boundaries: they cross JSON with
-/// sub-microsecond noise, and a real window is a month.
-const BOUNDARY_SLACK: chrono::Duration = chrono::Duration::seconds(1);
-
 /// How close to a window's end a key is left alone. The gateway anchors a
 /// grant on ITS clock at the moment the write lands, so a write sent just
 /// before a reset can land just after it, in the next window. Five minutes is
@@ -83,6 +79,14 @@ pub enum Decision {
         cycle: String,
         target_usd: f64,
     },
+    /// An earlier window's claim landed in THIS window (the write crossed the
+    /// reset and its confirmation never came back). Record this window as
+    /// topped up, and if what landed carries more than one month (the earlier
+    /// window's stack), bring it down to `cap_to_usd`, one month.
+    LandedLate {
+        cycle: String,
+        cap_to_usd: Option<f64>,
+    },
 }
 
 /// Why a key was left alone.
@@ -94,10 +98,8 @@ pub enum Skip {
     /// so there is no window to count a top-up against.
     UnknownWindow,
     /// The reading straddles a window boundary: the override was granted in a
-    /// later window than `last_reset` names, or that window should already
-    /// have closed. The listing lags the gateway's own reset by a little, and
-    /// claiming the old window then would let the new one claim again. The
-    /// next pass reads it settled.
+    /// later window than `last_reset` names, or the window ends within
+    /// [`BOUNDARY_MARGIN`]. The next pass reads it settled.
     WindowInFlux,
     /// A hand-set permanent override. The operator owns this key's limit.
     ForeverOverride,
@@ -141,29 +143,58 @@ pub fn reset_duration(spec: &str) -> Option<chrono::Duration> {
     n.checked_mul(secs).map(chrono::Duration::seconds)
 }
 
-/// The override that is live in `budget`'s current window, in dollars.
+/// How many windows after `budget`'s current one the instant `t` falls in:
+/// 0 for the current window, 1 for the next, -1 for the one before.
 ///
-/// An override anchored before the window opened belongs to a window that has
-/// closed and counts for nothing, even if the listing still shows it.
+/// BY WINDOW, NOT BY TIMESTAMP. In v1.6.9 both `last_reset` and an override's
+/// anchor are the same rolling boundary (`TableBudget::WindowStart`), but a
+/// budget can carry a `last_reset` that is the moment a reset ran rather than
+/// the boundary itself, and a timestamp compare would then put an override
+/// granted in this window into the last one. Rounding the distance to whole
+/// windows absorbs any such lag short of half a window.
+pub fn window_offset(budget: &BudgetState, t: DateTime<Utc>) -> Option<i64> {
+    let opened = budget.last_reset?;
+    let length = reset_duration(&budget.reset_duration)?.num_seconds();
+    let diff = (t - opened).num_seconds();
+    Some((diff as f64 / length as f64).round() as i64)
+}
+
+/// The override that is live in `budget`'s current window, in dollars, read
+/// the way the gateway reads it (`TableBudget::HasActiveOverride`): a cycles
+/// override with cycles remaining. The gateway re-derives the remaining count
+/// whenever `last_reset` advances, so an override from a window that has
+/// closed reads zero here, and a multi-cycle one an operator granted reads as
+/// live in every window it covers, whatever its anchor says.
 pub fn live_override(budget: &BudgetState) -> f64 {
-    if !(budget.override_amount.is_finite() && budget.override_amount > 0.0) {
-        return 0.0;
+    let amount = budget.override_amount;
+    if amount.is_finite()
+        && amount > 0.0
+        && budget.override_mode == "cycles"
+        && budget.override_cycles_remaining > 0
+    {
+        amount
+    } else {
+        0.0
     }
-    match (budget.override_anchor_reset, budget.last_reset) {
-        (Some(anchor), Some(opened)) if anchor < opened - BOUNDARY_SLACK => 0.0,
-        _ => budget.override_amount,
-    }
+}
+
+/// What the store remembers about a tenant's top-ups.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct History<'a> {
+    /// The newest window topped up, as a store stamp.
+    pub last_applied: Option<&'a str>,
+    /// The newest claim still pending: its window and the amount it sent.
+    pub pending: Option<(&'a str, f64)>,
 }
 
 /// Decide what to do about one tenant's triage budget at `now`.
 ///
-/// `last_applied_cycle` is the newest window this tenant was automatically
-/// topped up in (from the store). The decision is pure; the store's claim is
-/// what makes "once per window" hold under races.
+/// The decision is pure; the store's claim is what makes "once per window"
+/// hold under races.
 pub fn decide(
     active: bool,
     budget: &BudgetState,
-    last_applied_cycle: Option<&str>,
+    history: History<'_>,
     now: DateTime<Utc>,
 ) -> Decision {
     if !active {
@@ -173,11 +204,10 @@ pub fn decide(
     else {
         return Decision::Skip(Skip::UnknownWindow);
     };
-    if budget
+    let anchor_offset = budget
         .override_anchor_reset
-        .is_some_and(|anchor| anchor > opened + BOUNDARY_SLACK)
-        || window_closing(budget, now)
-    {
+        .and_then(|a| window_offset(budget, a));
+    if anchor_offset.is_some_and(|o| o >= 1) || window_closing(budget, now) {
         return Decision::Skip(Skip::WindowInFlux);
     }
     if budget.override_mode == "forever" {
@@ -187,21 +217,44 @@ pub fn decide(
     if !(base.is_finite() && base > 0.0) {
         return Decision::Skip(Skip::NoLimit);
     }
-    let cycle = cycle_key(opened);
-    // `>=`, not `==`: a stored window newer than the gateway's would mean the
-    // gateway's clock went back, and the safe reading of that is "done".
-    if last_applied_cycle.is_some_and(|last| last >= cycle.as_str()) {
+    // A stored window this one or later (an unreadable one counts as later:
+    // the safe reading is "done").
+    let in_this_window_or_later = |stamp: &str| {
+        DateTime::parse_from_rfc3339(stamp)
+            .map(|t| window_offset(budget, t.with_timezone(&Utc)).is_none_or(|o| o >= 0))
+            .unwrap_or(true)
+    };
+    if history.last_applied.is_some_and(in_this_window_or_later) {
         return Decision::Skip(Skip::AlreadyTopped);
     }
+    let cycle = cycle_key(opened);
     let existing = live_override(budget);
+    // An EARLIER window's claim whose amount is what this window carries,
+    // granted in this window: the write crossed the reset. It is this
+    // window's top-up, whatever the confirmation said at the time.
+    if let Some((claimed_window, claimed_usd)) = history.pending
+        && !in_this_window_or_later(claimed_window)
+        && anchor_offset == Some(0)
+        && existing > 0.0
+        && (existing - claimed_usd).abs() <= 0.005
+    {
+        let cap_to_usd = (existing > base + 0.005).then_some(round_up_cents(base));
+        return Decision::LandedLate { cycle, cap_to_usd };
+    }
     let limit = base + existing;
     if !(budget.current_usage.is_finite() && budget.current_usage >= TOPUP_THRESHOLD * limit) {
         return Decision::Skip(Skip::BelowThreshold);
     }
-    // Rounded up to the cent, as `llm topup` rounds, so the read-back compares
-    // against what the gateway stores.
-    let target_usd = ((existing + base) * 100.0).ceil() / 100.0;
-    Decision::TopUp { cycle, target_usd }
+    Decision::TopUp {
+        cycle,
+        target_usd: round_up_cents(existing + base),
+    }
+}
+
+/// Rounded up to the cent, as `llm topup` rounds, so a read-back compares
+/// against what the gateway stores.
+fn round_up_cents(usd: f64) -> f64 {
+    (usd * 100.0).ceil() / 100.0
 }
 
 /// Whether `budget`'s window has ended, or ends within [`BOUNDARY_MARGIN`] of
@@ -284,17 +337,22 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
         let Some([budget]) = budgets.get(c.vk_id.as_str()).copied() else {
             continue;
         };
+        let label = c.label.as_str();
+        let base = budget.max_limit;
+        let history = History {
+            last_applied: c.last_applied_cycle.as_deref(),
+            pending: c.pending_cycle.as_deref().zip(c.pending_target_usd),
+        };
         // The clock is read per tenant, not once per pass: the writes ahead
         // of this one take time, and the boundary margin is measured from
         // when this one is decided.
-        let decision = decide(
-            c.active,
-            budget,
-            c.last_applied_cycle.as_deref(),
-            Utc::now(),
-        );
-        let (cycle, target) = match decision {
+        let (cycle, target) = match decide(c.active, budget, history, Utc::now()) {
             Decision::TopUp { cycle, target_usd } => (cycle, target_usd),
+            Decision::LandedLate { cycle, cap_to_usd } => {
+                attempted += 1;
+                land_late(state, bifrost, c, &cycle, cap_to_usd, base, now).await;
+                continue;
+            }
             Decision::Skip(Skip::UnknownWindow) => {
                 unknown_window += 1;
                 continue;
@@ -312,12 +370,11 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
             // would let a few stuck tenants starve everyone after them.
             Ok(None) => continue,
             Err(e) => {
-                tracing::error!(error = %e, label = %c.label, "budget top-up: claim failed");
+                tracing::error!(error = %e, %label, "budget top-up: claim failed");
                 continue;
             }
         };
         attempted += 1;
-        let label = c.label.as_str();
         let mark_applied = |cycle: String| async move {
             if let Err(e) = state
                 .store()
@@ -354,20 +411,15 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
                 mark_applied(cycle.clone()).await;
                 applied += 1;
                 // The gateway anchors the grant on its own clock. If it put
-                // this one in a later window, that window has had its top-up
-                // too, and must not get a second.
-                let anchored = after.override_anchor_reset.map(cycle_key);
-                match anchored.filter(|a| *a != cycle) {
-                    Some(late) => {
-                        if let Err(e) = state
-                            .store()
-                            .record_auto_topup_applied(c.tenant_id, &late, amount, now)
-                            .await
-                        {
-                            tracing::error!(error = %e, %label, "budget top-up: late anchor not recorded");
-                        }
-                        tracing::warn!(%label, vk_id = %c.vk_id, "budget top-up: applied in the next window");
-                        state.alert(crate::alert::llm_auto_topup_anchored_late(label));
+                // this one in a later window, that window has had its top-up,
+                // and gets one month of it rather than this window's stack.
+                match after
+                    .override_anchor_reset
+                    .filter(|a| window_offset(budget, *a).is_some_and(|o| o >= 1))
+                {
+                    Some(anchor) => {
+                        let cap = (amount > base + 0.005).then_some(round_up_cents(base));
+                        land_late(state, bifrost, c, &cycle_key(anchor), cap, base, now).await;
                     }
                     None => {
                         tracing::info!(%label, vk_id = %c.vk_id, "budget top-up: auto top-up applied");
@@ -424,6 +476,37 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
     applied
 }
 
+/// A top-up that landed in a later window than it was claimed for: record
+/// that window as topped up, so it gets no second one, and if the grant
+/// carried the earlier window's stack, bring it down to one month.
+async fn land_late(
+    state: &ControlState,
+    bifrost: &crate::bifrost::BifrostClient,
+    c: &crate::store::TopupCandidate,
+    cycle: &str,
+    cap_to_usd: Option<f64>,
+    base: f64,
+    now: DateTime<Utc>,
+) {
+    let label = c.label.as_str();
+    // Recorded FIRST: whatever happens to the cap, this window has had a
+    // top-up and must not be given another.
+    if let Err(e) = state
+        .store()
+        .record_auto_topup_applied(c.tenant_id, cycle, cap_to_usd.unwrap_or(base), now)
+        .await
+    {
+        tracing::error!(error = %e, %label, "budget top-up: late grant not recorded");
+    }
+    if let Some(cap) = cap_to_usd
+        && let Err(e) = bifrost.top_up_key(&c.vk_id, cap).await
+    {
+        tracing::error!(error = %e, %label, vk_id = %c.vk_id, "budget top-up: late grant not capped to one month");
+    }
+    tracing::warn!(%label, vk_id = %c.vk_id, "budget top-up: applied in the next window");
+    state.alert(crate::alert::llm_auto_topup_anchored_late(label));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +527,7 @@ mod tests {
             override_amount: 0.0,
             last_reset: Some(at(WINDOW)),
             override_mode: String::new(),
+            override_cycles_remaining: 0,
             override_anchor_reset: None,
             reset_duration: "1M".into(),
         }
@@ -454,6 +538,7 @@ mod tests {
         BudgetState {
             override_amount: 75.0,
             override_mode: "cycles".into(),
+            override_cycles_remaining: 1,
             override_anchor_reset: Some(at(WINDOW)),
             ..budget(usage)
         }
@@ -472,7 +557,11 @@ mod tests {
     }
 
     fn d(active: bool, b: &BudgetState, last: Option<&str>) -> Decision {
-        decide(active, b, last, mid_window())
+        let history = History {
+            last_applied: last,
+            pending: None,
+        };
+        decide(active, b, history, mid_window())
     }
 
     /// AT A BOUNDARY the listing can still name the old window after the
@@ -505,14 +594,17 @@ mod tests {
             closes - chrono::Duration::minutes(4),
         ] {
             assert_eq!(
-                decide(true, &b, None, now),
+                decide(true, &b, History::default(), now),
                 Decision::Skip(Skip::WindowInFlux),
                 "{now}"
             );
             assert!(window_closing(&b, now));
         }
         let before_margin = closes - chrono::Duration::minutes(6);
-        assert_eq!(decide(true, &b, None, before_margin), top_up(75.0));
+        assert_eq!(
+            decide(true, &b, History::default(), before_margin),
+            top_up(75.0)
+        );
         assert!(!window_closing(&b, before_margin));
         // A length the gateway's own parser would not read is no window.
         let b = BudgetState {
@@ -601,12 +693,122 @@ mod tests {
     /// An override from a window that has closed counts for nothing, so it is
     /// neither added to the threshold nor carried into the new target.
     #[test]
-    fn an_override_from_a_closed_window_counts_for_nothing() {
+    fn an_override_with_no_cycles_left_counts_for_nothing() {
         let b = BudgetState {
-            override_anchor_reset: Some(at("2026-10-03T09:15:00Z")),
+            override_cycles_remaining: 0,
             ..with_signup_allowance(72.0)
         };
         assert_eq!(d(true, &b, None), top_up(75.0));
+    }
+
+    /// A multi-cycle override keeps the anchor of the window it was granted
+    /// in (the gateway derives what is left from that anchor), so an anchor
+    /// before `last_reset` with cycles remaining is LIVE: it counts toward the
+    /// threshold and is kept in the target, never dropped from it.
+    #[test]
+    fn a_multi_cycle_override_from_an_earlier_window_is_live() {
+        let b = BudgetState {
+            override_amount: 300.0,
+            override_cycles_remaining: 2,
+            override_anchor_reset: Some(at("2026-10-03T09:15:00.4Z")),
+            ..with_signup_allowance(300.0)
+        };
+        assert_eq!(d(true, &b, None), Decision::Skip(Skip::BelowThreshold));
+        let b = BudgetState {
+            current_usage: 357.0,
+            ..b
+        };
+        assert_eq!(d(true, &b, None), top_up(375.0));
+    }
+
+    /// An anchor and `last_reset` are compared by WINDOW. A `last_reset` that
+    /// is when a reset ran, a few seconds after the boundary the override was
+    /// anchored on, is still the same window: the override is live and not a
+    /// sign of a later window.
+    #[test]
+    fn an_anchor_a_little_off_last_reset_is_the_same_window() {
+        for skew in [-120, -3, 3, 120] {
+            let b = BudgetState {
+                override_anchor_reset: Some(at(WINDOW) + chrono::Duration::seconds(skew)),
+                ..with_signup_allowance(142.5)
+            };
+            assert_eq!(window_offset(&b, b.override_anchor_reset.unwrap()), Some(0));
+            assert_eq!(d(true, &b, None), top_up(150.0), "{skew}");
+        }
+        let b = with_signup_allowance(0.0);
+        let next = at(WINDOW) + chrono::Duration::days(30) - chrono::Duration::seconds(3);
+        assert_eq!(window_offset(&b, next), Some(1));
+    }
+
+    /// AN UNCONFIRMED WRITE THAT CROSSED THE RESET. The last window's claim is
+    /// still pending, and this window carries exactly what it sent, granted
+    /// in this window: it is this window's top-up. Recorded as such, and the
+    /// last window's stack (base + allowance) is brought down to one month.
+    #[test]
+    fn a_pending_claim_that_landed_in_this_window_is_its_top_up() {
+        let last_window = cycle_key(at("2026-10-03T09:15:00.4Z"));
+        let landed = BudgetState {
+            override_amount: 150.0,
+            override_anchor_reset: Some(at(WINDOW) - chrono::Duration::seconds(2)),
+            ..with_signup_allowance(10.0)
+        };
+        let history = History {
+            last_applied: None,
+            pending: Some((&last_window, 150.0)),
+        };
+        assert_eq!(
+            decide(true, &landed, history, mid_window()),
+            Decision::LandedLate {
+                cycle: cycle_key(at(WINDOW)),
+                cap_to_usd: Some(75.0),
+            }
+        );
+        // One month landed: recorded, nothing to cap.
+        let one_month = BudgetState {
+            override_amount: 75.0,
+            ..landed.clone()
+        };
+        let history = History {
+            last_applied: None,
+            pending: Some((&last_window, 75.0)),
+        };
+        assert_eq!(
+            decide(true, &one_month, history, mid_window()),
+            Decision::LandedLate {
+                cycle: cycle_key(at(WINDOW)),
+                cap_to_usd: None,
+            }
+        );
+        // A different amount is somebody else's override, and a pending claim
+        // for THIS window is just a retry: neither is a late landing.
+        let history = History {
+            last_applied: None,
+            pending: Some((&last_window, 90.0)),
+        };
+        assert_eq!(
+            decide(true, &landed, history, mid_window()),
+            Decision::Skip(Skip::BelowThreshold)
+        );
+        let this_window = cycle_key(at(WINDOW));
+        let history = History {
+            last_applied: None,
+            pending: Some((&this_window, 150.0)),
+        };
+        assert_eq!(
+            decide(true, &landed, history, mid_window()),
+            Decision::Skip(Skip::BelowThreshold)
+        );
+    }
+
+    /// A window recorded from a late grant's anchor may be a few seconds off
+    /// the `last_reset` the listing later shows. It still counts.
+    #[test]
+    fn a_window_recorded_a_little_off_still_counts() {
+        let anchor = cycle_key(at(WINDOW) - chrono::Duration::seconds(2));
+        assert_eq!(
+            d(true, &budget(80.0), Some(&anchor)),
+            Decision::Skip(Skip::AlreadyTopped)
+        );
     }
 
     #[test]

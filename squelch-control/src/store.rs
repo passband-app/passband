@@ -2233,6 +2233,10 @@ pub struct TopupCandidate {
     /// The newest `cycle_start` with an APPLIED top-up, in [`stamp`]'s shape.
     /// A claim that never landed is not counted: it is still owed.
     pub last_applied_cycle: Option<String>,
+    /// The newest claim still PENDING, and the amount it decided on: a write
+    /// that may have landed without being confirmed.
+    pub pending_cycle: Option<String>,
+    pub pending_target_usd: Option<f64>,
 }
 
 impl ControlStore {
@@ -2247,8 +2251,14 @@ impl ControlStore {
             .query(
                 "SELECT t.id, t.label, t.status = $1, t.bifrost_vk_id,
                         (SELECT max(a.cycle_start) FROM llm_auto_topups a
-                          WHERE a.tenant_id = t.id AND a.status = 'applied')
+                          WHERE a.tenant_id = t.id AND a.status = 'applied'),
+                        p.cycle_start, p.target_usd
                    FROM tenants t
+                   LEFT JOIN LATERAL (
+                        SELECT cycle_start, target_usd FROM llm_auto_topups a
+                         WHERE a.tenant_id = t.id AND a.status = 'pending'
+                         ORDER BY cycle_start DESC LIMIT 1
+                   ) p ON true
                   WHERE t.bifrost_vk_id IS NOT NULL
                   ORDER BY t.id
                   LIMIT $2",
@@ -2263,6 +2273,8 @@ impl ControlStore {
                     active: r.try_get(2)?,
                     vk_id: r.try_get(3)?,
                     last_applied_cycle: r.try_get(4)?,
+                    pending_cycle: r.try_get(5)?,
+                    pending_target_usd: r.try_get(6)?,
                 })
             })
             .collect()
@@ -3611,6 +3623,8 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
         );
         assert_eq!(c[0].tenant_id, ada);
         assert_eq!(c[0].last_applied_cycle.as_deref(), Some(oct));
+        assert_eq!(c[0].pending_cycle.as_deref(), Some(nov));
+        assert_eq!(c[0].pending_target_usd, Some(75.0));
         assert_eq!(
             (
                 c[1].label.as_str(),

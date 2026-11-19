@@ -30,6 +30,7 @@ Retention Update
 - Works out which mail is a quick read and which needs real work
 - No sign-in alert for a sign-in you just made with a code you copied
 - If you stop opening Passband, one short note about the mail it handled for you
+- Reaching back through old mail with huge attachments no longer runs out of memory
 - Security and dependency updates
 - Bug fixes
 

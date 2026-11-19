@@ -285,6 +285,7 @@ enum ReleaseNotes {
                 ReleaseItem(.daemon, "Works out which mail is a quick read and which needs real work"),
                 ReleaseItem(.daemon, "No sign-in alert for a sign-in you just made with a code you copied"),
                 ReleaseItem(.daemon, "If you stop opening Passband, one short note about the mail it handled for you"),
+                ReleaseItem(.daemon, "Reaching back through old mail with huge attachments no longer runs out of memory"),
                 ReleaseItem(.daemon, "Security and dependency updates"),
                 ReleaseItem(.daemon, "Bug fixes"),
             ],

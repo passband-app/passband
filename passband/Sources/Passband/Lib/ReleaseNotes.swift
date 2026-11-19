@@ -270,6 +270,27 @@ struct ReleaseCatchUp: Sendable, Equatable {
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
+        // QUIET: retention work, each piece introduces itself, no card.
+        ReleaseNote(
+            version: "0.0.21",
+            date: "2026-11-19",
+            headline: "Retention Update",
+            items: [
+                ReleaseItem(.app, "Back at your desk, a banner says how much of your mail five minutes would clear, and opens just those"),
+                ReleaseItem(.app, "Passband can be your default mail app"),
+                ReleaseItem(.app, "Copying a sign-in code closes the code panel"),
+                ReleaseItem(.app, "New accounts are named after their address"),
+                ReleaseItem(.app, "In the sitrep, t teaches Passband about all your mail"),
+                ReleaseItem(.app, "Passband downloads as a disk image"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Works out which mail is a quick read and which needs real work"),
+                ReleaseItem(.daemon, "No sign-in alert for a sign-in you just made with a code you copied"),
+                ReleaseItem(.daemon, "If you stop opening Passband, one short note about the mail it handled for you"),
+                ReleaseItem(.daemon, "Reaching back through old mail with huge attachments no longer runs out of memory"),
+                ReleaseItem(.daemon, "Security and dependency updates"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ],
+            quiet: true),
         ReleaseNote(
             version: "0.0.20",
             date: "2026-11-11",

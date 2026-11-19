@@ -12,6 +12,29 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.21 (2026-11-19)
+
+Retention Update
+
+### Mac
+
+- Back at your desk, a banner says how much of your mail five minutes would clear, and opens just those
+- Passband can be your default mail app
+- Copying a sign-in code closes the code panel
+- New accounts are named after their address
+- In the sitrep, t teaches Passband about all your mail
+- Passband downloads as a disk image
+- Bug fixes
+
+### Daemon
+
+- Works out which mail is a quick read and which needs real work
+- No sign-in alert for a sign-in you just made with a code you copied
+- If you stop opening Passband, one short note about the mail it handled for you
+- Reaching back through old mail with huge attachments no longer runs out of memory
+- Security and dependency updates
+- Bug fixes
+
 ## 0.0.20 (2026-11-11)
 
 November Update

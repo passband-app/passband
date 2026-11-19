@@ -446,6 +446,8 @@ enum ProductGuide {
 
         New message:
         - c on the Sitrep, the Emails list or the reader, or ⌘N from anywhere.
+        - Clicking an email address link inside an email opens a new message to it.
+        - On the Mac, Passband can be the default mail app, so email links on web pages and in other apps open a new message here, on the account on screen. Settings > Mail > "Default mail app" shows whether it is and has a "Make default" button. Passband asks macOS once, right after the inbox first loads, and macOS may show its own confirmation; it is never asked again, so after a refusal the Settings button is the way. The iPhone cannot be the default mail app.
         - The composer is a pane on the right, and the page beside it stays usable. A corner button turns it into a centred column.
         - The body is markdown, styled as it is typed.
 

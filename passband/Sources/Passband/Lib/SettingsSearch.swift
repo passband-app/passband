@@ -171,9 +171,22 @@ enum SettingsSearch {
         #if os(macOS)
             entries.append(densityEntry)
             entries.append(loginItemEntry)
+            entries.append(defaultMailAppEntry)
         #endif
         return entries
     }()
+
+    /// Mac only, like the row (DefaultMailAppRow, on the Mail card): an
+    /// iPhone's default mail app needs an entitlement Passband does not have.
+    private static let defaultMailAppEntry = SettingsEntry(
+        card: .mail,
+        title: "Default mail app",
+        blurb: "Whether email links on web pages and in other apps open a new message in Passband.",
+        keywords: [
+            "default mail app", "default email app", "default mail", "default email",
+            "default email reader", "default", "mailto", "mail to", "email links",
+            "mail links", "links", "handler", "open links", "apple mail", "mail app",
+        ])
 
     /// Mac only, like the row: the phone has no login items.
     private static let loginItemEntry = SettingsEntry(

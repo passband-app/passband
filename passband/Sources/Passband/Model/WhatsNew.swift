@@ -97,6 +97,9 @@ final class WhatsNew {
         // The iPhone card (often the veil's hand-off) goes first; closing it
         // asks again (TestFlightNudgeModal). Two cards at once is a pile.
         guard !TestFlightNudge.shared.showingNudge else { return }
+        // A launch that asked macOS to make Passband the default mail app
+        // keeps its notes for the next one, away from the system's dialog.
+        guard !DefaultMailApp.holdsCardsThisLaunch else { return }
         guard store.activeView == .sitrep, !store.daemonDown else { return }
         guard let running = runningVersion else { return }
 

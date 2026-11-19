@@ -61,6 +61,9 @@ extension AgentNudge {
     /// the way an agent would, and the audit's one trace of an agent. Both run
     /// only once the free conditions pass (see `askIfEarned`).
     func askIfEarned(store: AppStore) {
+        // Not on a launch that asked to be the default mail app: the ad
+        // would land beside, or just after, the system's dialog.
+        guard !DefaultMailApp.holdsCardsThisLaunch else { return }
         guard store.connStatus == .connected,
             let endpoint = AgentConnect.endpoint(serverURL: store.settings?.serverURL)
         else { return }

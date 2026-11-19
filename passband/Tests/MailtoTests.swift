@@ -15,6 +15,8 @@ struct MailtoTests {
         otherHeadersAreIgnored()
         longFieldsAreCut()
         reviewFindings()
+        aLinkFromAnotherApp()
+        whenALinkFromAnotherAppOpens()
         print("mailto: ok")
     }
 
@@ -54,7 +56,11 @@ struct MailtoTests {
     }
 
     static func junkIsDropped() {
-        precondition(Mailto("mailto:") == nil, "asks for nothing")
+        // A bare mailto: is a blank message, as Mail opens one.
+        let blank = Mailto("mailto:")
+        precondition(blank != nil && blank!.to.isEmpty && blank!.cc.isEmpty && blank!.bcc.isEmpty
+            && blank!.subject.isEmpty && blank!.body.isEmpty, "a bare mailto: opens a blank composer")
+        precondition(Mailto("mailto:?") != nil, "and so does a bare query")
         precondition(Mailto("mailto:not-an-address") == nil)
         let noOne = Mailto("mailto:?subject=hi")
         precondition(noOne?.to == [] && noOne?.subject == "hi", "a subject alone still opens")
@@ -102,5 +108,107 @@ struct MailtoTests {
         let many = (0..<500).map { "u\($0)@x.com" }.joined(separator: ",")
         let big = Mailto("mailto:\(many)?cc=\(many)")
         precondition(big?.to.count == Mailto.recipientLimit && big?.cc == [])
+    }
+
+    /// REGRESSION PIN, not a new path: a link from another app reaches
+    /// `Mailto` as `URL.absoluteString`, and must read exactly as the same
+    /// link inside a message does (the parser is shared; this pins that the
+    /// URL round trip does not change what it sees).
+    static func aLinkFromAnotherApp() {
+        let url = URL(string: "mailto:ada@example.com?cc=bo@example.org&subject=Lunch%20on%20Friday&body=Are%20you%20free%3F")!
+        let m = Mailto(url.absoluteString)
+        precondition(m?.to == ["ada@example.com"])
+        precondition(m?.cc == ["bo@example.org"])
+        precondition(m?.subject == "Lunch on Friday")
+        precondition(m?.body == "Are you free?")
+        precondition(Mailto(URL(string: "MAILTO:ada@example.com")!.absoluteString)?.to == ["ada@example.com"])
+        let sneaky = URL(string: "mailto:ada@example.com?from=boss@example.com&attach=%2Fetc%2Fhosts")!
+        precondition(Mailto(sneaky.absoluteString) == Mailto("mailto:ada@example.com"))
+        precondition(Mailto(URL(string: "mailto:")!.absoluteString)?.to == [], "blank, not refused")
+    }
+
+    /// Links from another app, held for a mailbox: in order, a few at a
+    /// time, one composer at a time, never past a minute without one, and
+    /// never dropped without a reason to show.
+    static func whenALinkFromAnotherAppOpens() {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+        // Connected and verified, nothing open: the link opens at once.
+        var inbox = MailtoInbox()
+        precondition(inbox.add("mailto:a@x.com", at: t0) == nil)
+        var r = inbox.settle(connected: true, occupant: .none, gate: false, now: t0)
+        precondition(r.open == "mailto:a@x.com" && r.dropped.isEmpty && inbox.isEmpty)
+
+        // A cold launch: held while the connection is unverified...
+        inbox = MailtoInbox()
+        _ = inbox.add("mailto:a@x.com", at: t0)
+        r = inbox.settle(connected: false, occupant: .none, gate: false, now: t0.addingTimeInterval(5))
+        precondition(r.open == nil && r.dropped.isEmpty && !inbox.isEmpty, "held, not dropped")
+        precondition(inbox.nextExpiry == t0.addingTimeInterval(MailtoInbox.holdFor))
+        // ...and opened once it is verified.
+        r = inbox.settle(connected: true, occupant: .none, gate: false, now: t0.addingTimeInterval(8))
+        precondition(r.open == "mailto:a@x.com" && inbox.isEmpty)
+
+        // Never verified within the hold: dropped, with a reason.
+        inbox = MailtoInbox()
+        _ = inbox.add("mailto:a@x.com", at: t0)
+        r = inbox.settle(connected: false, occupant: .none, gate: false, now: t0.addingTimeInterval(59))
+        precondition(r.dropped.isEmpty, "a second short is still held")
+        r = inbox.settle(connected: false, occupant: .none, gate: false, now: t0.addingTimeInterval(60))
+        precondition(r.open == nil && r.dropped == [.expired] && inbox.isEmpty, "expired")
+        precondition(inbox.nextExpiry == nil)
+
+        // The Connect screen: no mailbox, every held link dropped.
+        inbox = MailtoInbox()
+        _ = inbox.add("mailto:a@x.com", at: t0)
+        _ = inbox.add("mailto:b@x.com", at: t0)
+        r = inbox.settle(connected: false, occupant: .none, gate: true, now: t0)
+        precondition(r.open == nil && r.dropped == [.noMailbox, .noMailbox] && inbox.isEmpty)
+
+        // FIFO, three deep: a fourth is refused, not swapped in.
+        inbox = MailtoInbox()
+        for (i, h) in ["mailto:a@x.com", "mailto:b@x.com", "mailto:c@x.com"].enumerated() {
+            precondition(inbox.add(h, at: t0.addingTimeInterval(Double(i))) == nil)
+        }
+        precondition(inbox.add("mailto:d@x.com", at: t0) == .full, "a fourth is refused")
+        // One composer at a time, oldest first.
+        r = inbox.settle(connected: true, occupant: .none, gate: false, now: t0)
+        precondition(r.open == "mailto:a@x.com")
+        // Written in: kept, and the waiting links are SAID to wait, once.
+        r = inbox.settle(connected: true, occupant: .writing, gate: false, now: t0.addingTimeInterval(1))
+        precondition(r.open == nil && r.dropped.isEmpty && r.waiting,
+            "a composer with writing in it is kept, and the wait is announced")
+        r = inbox.settle(connected: true, occupant: .writing, gate: false, now: t0.addingTimeInterval(600))
+        precondition(r.open == nil && r.dropped.isEmpty && !r.waiting,
+            "announced once, and no clock runs on a person writing")
+        r = inbox.settle(connected: true, occupant: .none, gate: false, now: t0.addingTimeInterval(601))
+        precondition(r.open == "mailto:b@x.com")
+        r = inbox.settle(connected: true, occupant: .none, gate: false, now: t0.addingTimeInterval(602))
+        precondition(r.open == "mailto:c@x.com" && inbox.isEmpty)
+
+        // Left untouched: the next link replaces it, at once.
+        inbox = MailtoInbox()
+        _ = inbox.add("mailto:a@x.com", at: t0)
+        _ = inbox.add("mailto:b@x.com", at: t0)
+        r = inbox.settle(connected: true, occupant: .none, gate: false, now: t0)
+        precondition(r.open == "mailto:a@x.com")
+        r = inbox.settle(connected: true, occupant: .untouched, gate: false, now: t0)
+        precondition(r.open == "mailto:b@x.com" && !r.waiting && inbox.isEmpty,
+            "an untouched composer is replaced by the next link, never a silent hold")
+        // A link that arrives while writing is told too, even after an
+        // earlier one was.
+        inbox = MailtoInbox()
+        _ = inbox.add("mailto:a@x.com", at: t0)
+        precondition(inbox.settle(connected: true, occupant: .writing, gate: false, now: t0).waiting)
+        _ = inbox.add("mailto:b@x.com", at: t0)
+        precondition(inbox.settle(connected: true, occupant: .writing, gate: false, now: t0).waiting,
+            "a new link held behind writing is announced")
+        precondition(!MailtoInbox.waitingCopy.contains("\u{2014}"))
+
+        // Every drop has words, plain and without an em dash.
+        for d in [MailtoInbox.Drop.noMailbox, .expired, .full] {
+            let line = MailtoInbox.copy(d)
+            precondition(line.hasPrefix("Couldn't open that email link.") && !line.contains("\u{2014}"))
+        }
     }
 }

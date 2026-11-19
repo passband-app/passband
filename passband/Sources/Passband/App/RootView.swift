@@ -80,6 +80,7 @@ struct RootView: View {
         // share ask: it arrives with the first stats and not before.
         .overlay { TestFlightNudgeModal() }
         .onChange(of: store.iosConnected) { _, connected in
+            guard !DefaultMailApp.holdsCardsThisLaunch else { return }
             TestFlightNudge.shared.askIfEarned(
                 iosConnected: connected,
                 othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
@@ -93,6 +94,9 @@ struct RootView: View {
         // once per launch at most: a Mac left open across the two-day mark
         // would otherwise never hear the rule again until it was quit.
         .onReceive(NotificationCenter.default.publisher(for: Platform.didBecomeActiveNotification)) { _ in
+            // Returning from the system's default-mail dialog is not the
+            // moment for the iPhone ad: held for the launch, like the rest.
+            guard !DefaultMailApp.holdsCardsThisLaunch else { return }
             TestFlightNudge.shared.askIfEarned(
                 iosConnected: store.iosConnected,
                 othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
@@ -256,6 +260,14 @@ private struct ShellWatchers: View {
                 // and then reads its progress off each one after.
                 if new != nil { store.firstLoad.observe(store) }
                 if old == nil, new != nil {
+                    // FIRST, once ever, the system's own dialog: whether email
+                    // links open in Passband. Decided before What's New and
+                    // the agent ad are offered, so an updated install is not
+                    // put off a launch by its own release notes; a launch
+                    // that asks holds both until the next (DefaultMailApp).
+                    // A new install is asked when its first look ends, and
+                    // the veil up now blocks this one.
+                    store.askDefaultMailIfNeverAsked()
                     // The first look claims the moment before release notes.
                     store.whatsNew.maybeShow()
                     // The agent-door ad waits out both: it checks for them.

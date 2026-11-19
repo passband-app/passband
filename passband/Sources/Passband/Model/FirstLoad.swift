@@ -230,6 +230,12 @@ final class FirstLoad {
             if firstTime { store.whatsNew.meetNewcomer() }
             // No veil, so no iPhone ad: the corner card, shortly, instead.
             if firstTime, !veilWasShown { TestFlightNudge.shared.askAfterOnboarding(store) }
+            // The inbox is on screen for the first time: macOS is asked,
+            // a second later, to make Passband the default mail app. Its own
+            // dialog, nothing of ours, once ever (DefaultMailApp). Not if the
+            // veil handed its iPhone card off just now: that waits for the
+            // next launch.
+            if firstTime { store.askDefaultMailIfNeverAsked() }
         #endif
     }
 

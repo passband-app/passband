@@ -14,6 +14,7 @@ pub mod ingest;
 pub mod notify_lane;
 mod profile;
 mod relationships;
+mod sender_research;
 pub mod sender_signals;
 mod translate_pass;
 /// Public for `squelch-eval`, which replays triage through the production
@@ -2516,6 +2517,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 // a no-op every round but the first one after the owner's
                 // 03:00, and gated on its feature and its own daily cap.
                 self.profile_pass().await;
+                // Sender research (docs/SENDER-RESEARCH.md): at most one
+                // queued sender a round, under its own daily cap.
+                self.sender_research_pass().await;
 
                 // Per-round, so an embedder attached after startup catches up on
                 // rows ingested before it was ready, no restart needed.

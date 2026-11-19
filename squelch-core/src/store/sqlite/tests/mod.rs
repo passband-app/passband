@@ -27,6 +27,7 @@ mod retention;
 mod rules;
 mod scheduled;
 mod search;
+mod sender_research;
 mod senders;
 mod smart_clear;
 mod smart_clear_guards;

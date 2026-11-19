@@ -153,7 +153,7 @@ pub async fn classify_llm(
     provider: Stage2Provider,
     req: &LlmRequest<'_>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
-    dispatch(http, url, api_key, provider, req, false, None).await
+    dispatch(http, url, api_key, provider, req, None, None).await
 }
 
 /// [`classify_llm`] with the request's own timeout, for a caller whose
@@ -174,7 +174,7 @@ pub async fn classify_llm_within(
         api_key,
         provider,
         req,
-        false,
+        None,
         Some(request_timeout),
     )
     .await
@@ -186,14 +186,91 @@ async fn dispatch(
     api_key: &str,
     provider: Stage2Provider,
     req: &LlmRequest<'_>,
-    tool_submission: bool,
+    submission: Option<&ToolSubmission<'_>>,
     request_timeout: Option<Duration>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     match provider {
         Stage2Provider::Anthropic => {
-            classify_anthropic(http, url, api_key, req, tool_submission, request_timeout).await
+            classify_anthropic(http, url, api_key, req, submission, request_timeout)
+                .await
+                .map(|(outcome, _)| outcome)
         }
         Stage2Provider::OpenAI => classify_openai(http, url, api_key, req, request_timeout).await,
+    }
+}
+
+/// The answer arrives as the input of a client tool rather than through
+/// `output_config.format`: the agent step (whose schema is past the strict
+/// grammar's limits) and any request carrying a SERVER tool. A server tool's
+/// answer cites what it read, and citations and `output_config.format` are
+/// rejected together, so a request that searches the web cannot ask for a
+/// strict JSON body; it asks for this call instead, and the caller validates
+/// what comes back exactly as it would a JSON body.
+pub struct ToolSubmission<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    /// Anthropic server tools sent beside the submission tool (the web search
+    /// tool, for the sender research). Empty for the agent step.
+    pub server_tools: &'a [serde_json::Value],
+}
+
+const AGENT_SUBMISSION: ToolSubmission<'static> = ToolSubmission {
+    name: AGENT_SUBMISSION_TOOL,
+    description: "Submit the next investigation step using the supplied schema.",
+    server_tools: &[],
+};
+
+/// One call with server tools, and how many web searches the provider says it
+/// ran (`usage.server_tool_use.web_search_requests`; zero when unreported).
+/// Searches are billed per request, beside the tokens.
+#[derive(Debug)]
+pub struct ServerToolOutcome {
+    pub outcome: LlmOutcome<String>,
+    pub web_search_requests: u64,
+    /// Every URL the searches returned ([`web_search_result_urls`]).
+    pub result_urls: Vec<String>,
+}
+
+/// The failure kind of a server-tool request on a wire that has none.
+pub const SERVER_TOOLS_UNSUPPORTED: &str = "server_tools_unsupported";
+
+/// [`classify_agent_step`]'s shape with Anthropic server tools beside the
+/// submission tool. ANTHROPIC WIRE ONLY: the OpenAI transport has no such
+/// tools, so it answers [`SERVER_TOOLS_UNSUPPORTED`] WITHOUT a request, and
+/// the caller records the feature as unavailable rather than failed. A
+/// gateway that refuses the tool answers a 4xx, which comes back as the usual
+/// permanent failure ([`is_config_failure`]).
+pub async fn classify_with_server_tools(
+    http: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    provider: Stage2Provider,
+    req: &LlmRequest<'_>,
+    submission: &ToolSubmission<'_>,
+    request_timeout: Duration,
+) -> std::result::Result<ServerToolOutcome, ClassifyError> {
+    match provider {
+        Stage2Provider::Anthropic => {
+            let (outcome, server) = classify_anthropic(
+                http,
+                url,
+                api_key,
+                req,
+                Some(submission),
+                Some(request_timeout),
+            )
+            .await?;
+            Ok(ServerToolOutcome {
+                outcome,
+                web_search_requests: server.web_search_requests,
+                result_urls: server.result_urls,
+            })
+        }
+        Stage2Provider::OpenAI => Ok(ServerToolOutcome {
+            outcome: LlmOutcome::Failed(SERVER_TOOLS_UNSUPPORTED.into(), None),
+            web_search_requests: 0,
+            result_urls: Vec::new(),
+        }),
     }
 }
 
@@ -227,7 +304,7 @@ pub async fn classify_agent_step(
         api_key,
         provider,
         req,
-        true,
+        Some(&AGENT_SUBMISSION),
         Some(request_timeout),
     )
     .await
@@ -466,7 +543,9 @@ impl OpenAiUsage {
     }
 }
 
-/// The subset of the Anthropic response we consume.
+/// The subset of the Anthropic response we consume. `usage` is read raw so
+/// the server-tool count (`server_tool_use.web_search_requests`) can be taken
+/// beside the token split [`Usage`] keeps.
 #[derive(Debug, Deserialize)]
 struct MessagesResponse {
     #[serde(default)]
@@ -474,7 +553,7 @@ struct MessagesResponse {
     #[serde(default)]
     stop_reason: Option<String>,
     #[serde(default)]
-    usage: Option<Usage>,
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -487,6 +566,34 @@ struct ContentBlock {
     kind: String,
     #[serde(default)]
     text: Option<String>,
+    /// A `web_search_tool_result` block's results: a list of
+    /// `web_search_result` objects on success, one error object otherwise.
+    #[serde(default)]
+    content: Option<serde_json::Value>,
+}
+
+/// The URLs the provider's web searches actually returned, in order and
+/// without repeats. What a caller may accept as a source: a URL the model
+/// writes that no search returned is one it made up.
+fn web_search_result_urls(content: &[ContentBlock]) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    for block in content
+        .iter()
+        .filter(|b| b.kind == "web_search_tool_result")
+    {
+        let Some(serde_json::Value::Array(results)) = &block.content else {
+            continue;
+        };
+        for url in results
+            .iter()
+            .filter_map(|r| r.get("url").and_then(serde_json::Value::as_str))
+        {
+            if !urls.iter().any(|u| u == url) {
+                urls.push(url.to_string());
+            }
+        }
+    }
+    urls
 }
 
 /// Token usage — numbers are fine to log. Requests set `cache_control:
@@ -537,9 +644,9 @@ async fn classify_anthropic(
     url: &str,
     api_key: &str,
     req: &LlmRequest<'_>,
-    tool_submission: bool,
+    submission: Option<&ToolSubmission<'_>>,
     request_timeout: Option<Duration>,
-) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
+) -> std::result::Result<(LlmOutcome<String>, ServerToolUse), ClassifyError> {
     let max_tokens = req.max_tokens.unwrap_or(MAX_TOKENS);
 
     let body = MessagesRequest {
@@ -574,16 +681,18 @@ async fn classify_anthropic(
         retryable: false,
         retry_after: None,
     })?;
-    if tool_submission {
+    if let Some(submission) = submission {
         body["output_config"]
             .as_object_mut()
             .expect("output config object")
             .remove("format");
-        body["tools"] = serde_json::json!([{
-            "name": AGENT_SUBMISSION_TOOL,
-            "description": "Submit the next investigation step using the supplied schema.",
+        let mut tools = vec![serde_json::json!({
+            "name": submission.name,
+            "description": submission.description,
             "input_schema": req.schema,
-        }]);
+        })];
+        tools.extend(submission.server_tools.iter().cloned());
+        body["tools"] = serde_json::Value::Array(tools);
         body["tool_choice"] = serde_json::json!({
             "type": "auto", "disable_parallel_tool_use": true,
         });
@@ -608,52 +717,87 @@ async fn classify_anthropic(
     };
     let parsed: MessagesResponse = match send_with_retry(build, req.max_tries).await? {
         SendOk::Body(b) => b,
-        SendOk::PermanentFailure(kind) => return Ok(LlmOutcome::Failed(kind, None)),
+        SendOk::PermanentFailure(kind) => {
+            return Ok((LlmOutcome::Failed(kind, None), ServerToolUse::default()));
+        }
     };
 
-    let usage = parsed.usage;
-    match parsed.stop_reason.as_deref() {
-        Some("refusal") => return Ok(LlmOutcome::Refused(usage)),
+    let searches = parsed
+        .usage
+        .as_ref()
+        .and_then(|u| u.pointer("/server_tool_use/web_search_requests"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let usage = parsed
+        .usage
+        .and_then(|u| serde_json::from_value::<Usage>(u).ok());
+    let server = ServerToolUse {
+        web_search_requests: searches,
+        result_urls: web_search_result_urls(&parsed.content),
+    };
+    let outcome = anthropic_outcome(
+        &parsed.content,
+        parsed.stop_reason.as_deref(),
+        usage,
+        submission,
+    );
+    Ok((outcome, server))
+}
+
+/// What the provider's own tools did on one call.
+#[derive(Debug, Default)]
+struct ServerToolUse {
+    web_search_requests: u64,
+    result_urls: Vec<String>,
+}
+
+/// Read the verdict out of an Anthropic response: the text block, or the one
+/// submission call.
+fn anthropic_outcome(
+    content: &[ContentBlock],
+    stop_reason: Option<&str>,
+    usage: Option<Usage>,
+    submission: Option<&ToolSubmission<'_>>,
+) -> LlmOutcome<String> {
+    match stop_reason {
+        Some("refusal") => return LlmOutcome::Refused(usage),
         Some("max_tokens") => {
-            return Ok(LlmOutcome::Failed("max_tokens_truncation".into(), usage));
+            return LlmOutcome::Failed("max_tokens_truncation".into(), usage);
         }
+        // The server-side tool loop ran out of iterations before the model
+        // answered. Not resumed: one bounded call is the whole budget.
+        Some("pause_turn") => return LlmOutcome::Failed("pause_turn".into(), usage),
         _ => {}
     }
 
-    if tool_submission {
-        let mut calls = parsed
-            .content
-            .iter()
-            .filter(|block| block.kind == "tool_use");
+    if let Some(submission) = submission {
+        // `server_tool_use` blocks are the provider's own calls (the web
+        // searches), not an answer; only a client `tool_use` is.
+        let mut calls = content.iter().filter(|block| block.kind == "tool_use");
         let Some(call) = calls.next() else {
-            return Ok(LlmOutcome::Failed("missing_agent_submission".into(), usage));
+            return LlmOutcome::Failed("missing_agent_submission".into(), usage);
         };
-        if parsed.stop_reason.as_deref() != Some("tool_use")
+        if stop_reason != Some("tool_use")
             || calls.next().is_some()
-            || call.name.as_deref() != Some(AGENT_SUBMISSION_TOOL)
+            || call.name.as_deref() != Some(submission.name)
             || !call
                 .input
                 .as_ref()
                 .is_some_and(serde_json::Value::is_object)
         {
-            return Ok(LlmOutcome::Failed("invalid_agent_submission".into(), usage));
+            return LlmOutcome::Failed("invalid_agent_submission".into(), usage);
         }
-        return Ok(LlmOutcome::Ok(
-            call.input.as_ref().unwrap().to_string(),
-            usage,
-        ));
+        return LlmOutcome::Ok(call.input.as_ref().unwrap().to_string(), usage);
     }
 
-    let text = parsed
-        .content
+    let text = content
         .iter()
         .find(|b| b.kind == "text")
         .and_then(|b| b.text.as_deref());
-    let text = match text {
-        Some(t) => t.to_string(),
-        None => return Ok(LlmOutcome::Failed("no_text_block".into(), usage)),
-    };
-    Ok(LlmOutcome::Ok(text, usage))
+    match text {
+        Some(t) => LlmOutcome::Ok(t.to_string(), usage),
+        None => LlmOutcome::Failed("no_text_block".into(), usage),
+    }
 }
 
 async fn classify_openai(

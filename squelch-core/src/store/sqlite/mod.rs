@@ -619,6 +619,7 @@ mod retention;
 mod rules;
 mod scheduled;
 mod search;
+mod sender_research;
 mod senders;
 pub mod smart_clear;
 mod specialists;
@@ -2396,6 +2397,72 @@ impl Store for SqliteStore {
         tokens: UsageTokens,
     ) -> Result<()> {
         self.extract_bump_usage(account_id, day, category, tokens)
+    }
+
+    fn sender_research(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+    ) -> Result<Option<crate::triage::research::SenderResearchRow>> {
+        self.sender_research_row(account_id, addr)
+    }
+
+    fn queue_sender_research(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+        now: DateTime<Utc>,
+        cache_days: i64,
+    ) -> Result<bool> {
+        self.queue_sender_research_row(account_id, addr, now, cache_days)
+    }
+
+    fn start_sender_research(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+        now: DateTime<Utc>,
+        cache_days: i64,
+    ) -> Result<Option<crate::triage::research::SenderResearchRow>> {
+        self.start_sender_research_row(account_id, addr, now, cache_days)
+    }
+
+    fn claim_sender_research(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        max_age: chrono::Duration,
+    ) -> Result<Option<String>> {
+        self.claim_sender_research_row(account_id, now, max_age)
+    }
+
+    fn finish_sender_research(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+        status: crate::triage::research::ResearchStatus,
+        result: Option<&crate::triage::research::ResearchResult>,
+        failure: Option<&str>,
+        web_searches: u64,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.finish_sender_research_row(
+            account_id,
+            addr,
+            status,
+            result,
+            failure,
+            web_searches,
+            now,
+        )
+    }
+
+    fn research_subject_fields(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+    ) -> Result<crate::triage::research::SubjectFields> {
+        self.research_subject_row(account_id, addr)
     }
 
     fn list_usage_stage1(&self, account_id: AccountId, days: u32) -> Result<Vec<Stage2UsageDay>> {

@@ -472,6 +472,22 @@ actor APIClient {
         try await get("/client/person", query: ["addr": addr])
     }
 
+    /// What sender research has on `addr`. A store read; never runs it. A
+    /// daemon older than the route answers 404, which the card treats as no
+    /// research section at all.
+    func senderResearch(_ addr: String) async throws -> SenderResearch {
+        try await get("/client/person/research", query: ["addr": addr])
+    }
+
+    /// Run sender research on `addr` now and wait for it. A web search or
+    /// two inside one model call, so it gets a long timeout; a result that
+    /// already stands comes straight back.
+    func runSenderResearch(_ addr: String) async throws -> SenderResearch {
+        try await post(
+            "/client/person/research", query: ["addr": addr],
+            timeout: Self.senderResearchTimeout)
+    }
+
     /// The sent page: mail the user WROTE, newest first, already ordered by the
     /// daemon. HUMAN DOOR ONLY, like everything else on this client — the agent
     /// door has no route that enumerates what its principal has sent.
@@ -1072,6 +1088,9 @@ actor APIClient {
     /// seconds; the default idle timer would give up first and report a
     /// clean-up that is still happening as a failure.
     private static let smartClearTimeout: TimeInterval = 45
+    /// Above the daemon's own ceiling for the research call (two minutes)
+    /// and the store writes around it.
+    private static let senderResearchTimeout: TimeInterval = 150
 
     /// Ask the daemon to mark expired and plainly unwanted Reading mail done.
     /// nil when this daemon predates the route.

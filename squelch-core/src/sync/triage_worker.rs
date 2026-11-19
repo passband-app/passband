@@ -781,6 +781,21 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                         if job.arrival_eligible {
                             self.notify_wake.notify_one();
                         }
+                        // A personal cold pitch the owner might want: queue
+                        // research on its sender (docs/SENDER-RESEARCH.md).
+                        // Only the address goes; the refine lane builds the
+                        // rest from stored fields. Best-effort: a decision
+                        // is never failed over it.
+                        if let Err(e) = crate::triage::research::queue_for_decision(
+                            &*self.store,
+                            &self.config.research,
+                            self.account_id,
+                            &context.message.from_addr,
+                            &run.decision,
+                            Utc::now(),
+                        ) {
+                            eprintln!("squelch: sender research not queued ({e})");
+                        }
                     }
                     Ok(AgentCommitOutcome::Stale) => {
                         self.metrics.record_agent(AgentVerdict::Stale);

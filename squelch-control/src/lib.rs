@@ -186,7 +186,17 @@ fn routes(state: ControlState) -> Router {
     // one the callback parked, under a cookie and a CSRF token a stranger does
     // not have), so it is not the cheap-to-loop thing the login bucket
     // rations. Mounted only with WorkOS configured, like `/agent/auth`.
-    let mut callback = Router::new().route("/oauth/callback", get(handlers::oauth_callback));
+    //
+    // `POST /app/handoff` rides it for the same reason: it is the press that
+    // finishes an app login a signup's Google consent already paid for, and it
+    // opens nothing (it can only spend a handoff under its cookie and a token
+    // derived from it).
+    let mut callback = Router::new()
+        .route("/oauth/callback", get(handlers::oauth_callback))
+        .route(
+            "/app/handoff",
+            post(handlers::app_handoff).layer(DefaultBodyLimit::max(handlers::MAX_BODY)),
+        );
     if state.config().workos.is_some() {
         // The GET renders the parked page and the POST answers it. The GET is
         // here for the POST's reason, plus one: it is what a refresh asks for,

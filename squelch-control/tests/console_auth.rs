@@ -250,6 +250,9 @@ async fn spawn(app: Router) -> String {
 /// A whole control plane wired to the two mocks, with one provisioned tenant.
 struct Harness {
     app: Router,
+    /// The state behind `app`, so a test can reach the store the way an
+    /// operator command would.
+    state: ControlState,
     rec: Shared,
     /// One live invite, so this file can prove the SIGNUP consent is unchanged
     /// by everything the console flow does to the shared code around it.
@@ -306,8 +309,10 @@ impl Harness {
         let warden = Arc::new(
             HttpWarden::new(warden_url, "warden-bearer".into(), Duration::from_secs(5)).unwrap(),
         );
+        let state = ControlState::new(config, store, warden).unwrap();
         Self {
-            app: router(ControlState::new(config, store, warden).unwrap()),
+            app: router(state.clone()),
+            state,
             rec,
             invite_code: minted.code,
         }
@@ -1246,4 +1251,324 @@ async fn the_two_login_hops_share_one_budget() {
         }
     }
     assert_eq!(refused, 5, "the shared bucket holds one stated capacity");
+}
+
+// ---- the signup-to-app handoff --------------------------------------------
+
+impl Harness {
+    /// A handoff cookie pair for the harness tenant's CURRENT row, signed with
+    /// the harness key the way a finished signup signs one, issued `age_secs`
+    /// ago.
+    async fn handoff_cookie(&self, nonce: &str, age_secs: i64) -> String {
+        let (tid, email) = self
+            .state
+            .store()
+            .active_tenant_handle(LABEL)
+            .await
+            .unwrap()
+            .unwrap();
+        handoff_cookie_for(tid, LABEL, &email, nonce, age_secs)
+    }
+
+    /// Press Continue: `POST /app/handoff` with this cookie, this token, and
+    /// (when given) this `Origin`.
+    async fn press(
+        &self,
+        cookie: &str,
+        csrf: Option<&str>,
+        origin: Option<&str>,
+    ) -> (StatusCode, HeaderMap, String) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/app/handoff")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie);
+        if let Some(o) = origin {
+            req = req.header(header::ORIGIN, o);
+        }
+        let body = csrf.map(|c| format!("csrf={c}")).unwrap_or_default();
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req.body(axum::body::Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = String::from_utf8_lossy(&to_bytes(resp.into_body(), 1 << 20).await.unwrap())
+            .to_string();
+        (status, headers, body)
+    }
+}
+
+fn handoff_cookie_for(tid: i64, label: &str, email: &str, nonce: &str, age_secs: i64) -> String {
+    let claim = cookie::HandoffClaim::new(
+        tid,
+        label,
+        email,
+        nonce.to_string(),
+        chrono::Utc::now().timestamp() - age_secs,
+    );
+    format!(
+        "{}={}",
+        cookie::HANDOFF_COOKIE_NAME,
+        cookie::sign_handoff(&COOKIE_KEY, &claim)
+    )
+}
+
+/// The token the offer page's form carries, read off the page.
+fn csrf_on(body: &str) -> String {
+    let start = body.find(r#"name="csrf" value=""#).expect("a csrf field") + 19;
+    body[start..].split('"').next().unwrap().to_string()
+}
+
+/// Every `Set-Cookie` on a response.
+fn set_cookies(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect()
+}
+
+/// Whether a response clears the handoff cookie.
+fn clears_handoff(headers: &HeaderMap) -> bool {
+    set_cookies(headers).iter().any(|c| {
+        c.starts_with(&format!("{}=;", cookie::HANDOFF_COOKIE_NAME)) && c.contains("Max-Age=0")
+    })
+}
+
+/// Whether a response is the ordinary trip to Google.
+fn is_google(status: StatusCode, headers: &HeaderMap) -> bool {
+    status == StatusCode::FOUND
+        && headers
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|l| l.contains("/authorize"))
+}
+
+/// Whether a response is the 303 back to the app login.
+fn is_back_to_app_auth(status: StatusCode, headers: &HeaderMap) -> bool {
+    status == StatusCode::SEE_OTHER && headers[header::LOCATION] == "/app/auth"
+}
+
+/// A fresh handoff is OFFERED, not used: the page names the mailbox, carries
+/// a form to `/app/handoff` and a link to the ordinary sign-in, and nothing is
+/// minted or spent, so asking twice shows the same page twice.
+#[tokio::test]
+async fn a_fresh_handoff_asks_before_anything_is_minted() {
+    let h = Harness::new().await;
+    let cookie = h.handoff_cookie("nonce-offer", 60).await;
+
+    for _ in 0..2 {
+        let (status, headers, body) = h.get("/app/auth", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(headers.get(header::LOCATION).is_none(), "{headers:?}");
+        assert!(body.contains("Continue as ada@example.com?"), "{body}");
+        assert!(
+            body.contains(r#"<form method="post" action="/app/handoff">"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"href="/app/auth?skip_handoff=1""#),
+            "{body}"
+        );
+        assert!(!body.contains(PAIR_CODE), "{body}");
+        assert!(!body.contains("passband://"), "{body}");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store, no-cache");
+        assert!(!clears_handoff(&headers));
+    }
+
+    let rec = h.rec.lock().unwrap();
+    assert!(rec.pair_calls.is_empty());
+    assert!(rec.token_form.is_empty(), "nothing was exchanged at Google");
+}
+
+/// THE PRESS: same origin, the page's token, a live handoff. It mints once,
+/// for the tenant the cookie names, and clears the cookie. A second press goes
+/// nowhere, and the app login after it is the ordinary trip to Google.
+#[tokio::test]
+async fn continuing_signs_the_app_in_once() {
+    let h = Harness::new().await;
+    let cookie = h.handoff_cookie("nonce-press", 60).await;
+    let (_, _, page) = h.get("/app/auth", Some(&cookie)).await;
+    let csrf = csrf_on(&page);
+
+    let (status, headers, body) = h
+        .press(&cookie, Some(&csrf), Some("https://signup.passband.test"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let link =
+        format!("passband://pair?url=https%3A%2F%2F{LABEL}.passband.test&amp;code={PAIR_CODE}");
+    assert!(body.contains(&link), "{body}");
+    assert!(body.contains("ada@example.com"), "{body}");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store, no-cache");
+    assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+    assert!(clears_handoff(&headers), "{:?}", set_cookies(&headers));
+    assert_eq!(h.rec.lock().unwrap().pair_calls, vec![LABEL.to_string()]);
+
+    let (status, headers, _) = h
+        .press(&cookie, Some(&csrf), Some("https://signup.passband.test"))
+        .await;
+    assert!(is_back_to_app_auth(status, &headers), "{status}");
+    let (status, headers, _) = h.get("/app/auth", Some(&cookie)).await;
+    assert!(is_google(status, &headers), "{status} {headers:?}");
+    assert!(clears_handoff(&headers));
+
+    let rec = h.rec.lock().unwrap();
+    assert_eq!(rec.pair_calls, vec![LABEL.to_string()]);
+    assert!(rec.token_form.is_empty(), "nothing was exchanged at Google");
+}
+
+/// A press from another origin, or without the page's token, or with another
+/// handoff's token, is sent back to the app login and mints nothing. None of
+/// them burns the handoff: the real press still works afterwards.
+#[tokio::test]
+async fn a_press_from_anywhere_but_the_page_is_refused() {
+    let h = Harness::new().await;
+    let cookie = h.handoff_cookie("nonce-csrf", 60).await;
+    let (_, _, page) = h.get("/app/auth", Some(&cookie)).await;
+    let csrf = csrf_on(&page);
+    let other = cookie::handoff_csrf(&COOKIE_KEY, "some-other-nonce");
+
+    let (status, headers, _) = h
+        .press(&cookie, Some(&csrf), Some("https://evil.example"))
+        .await;
+    assert!(
+        is_back_to_app_auth(status, &headers),
+        "cross origin: {status}"
+    );
+    let (status, headers, _) = h.press(&cookie, None, None).await;
+    assert!(is_back_to_app_auth(status, &headers), "no token: {status}");
+    let (status, headers, _) = h.press(&cookie, Some(&other), None).await;
+    assert!(
+        is_back_to_app_auth(status, &headers),
+        "wrong token: {status}"
+    );
+    assert!(h.rec.lock().unwrap().pair_calls.is_empty());
+
+    let (status, _, body) = h.press(&cookie, Some(&csrf), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.rec.lock().unwrap().pair_calls, vec![LABEL.to_string()]);
+}
+
+/// A handoff that is forged, expired, for a label nobody holds, or not a
+/// handoff at all is never a refusal: it is an ordinary trip to Google, the
+/// cookie is cleared, and a press with it mints nothing.
+#[tokio::test]
+async fn an_unusable_handoff_is_only_ever_a_trip_to_google() {
+    let h = Harness::new().await;
+
+    let fresh = h.handoff_cookie("nonce-tamper", 60).await;
+    let (name_value, mac) = fresh.rsplit_once('.').unwrap();
+    let tampered = format!("{name_value}.{}", mac.chars().rev().collect::<String>());
+    let expired = h
+        .handoff_cookie("nonce-old", cookie::HANDOFF_COOKIE_TTL_SECS + 5)
+        .await;
+    let nobody = handoff_cookie_for(999_999, "nobody", "nobody@example.com", "nonce-nobody", 60);
+    // A perfectly good SESSION claim under the handoff's name is not a handoff.
+    let session = format!(
+        "{}={}",
+        cookie::HANDOFF_COOKIE_NAME,
+        cookie::sign(
+            &COOKIE_KEY,
+            &SessionClaim {
+                sid: "s".repeat(43),
+                label: LABEL.into(),
+                invite: None,
+                app: true,
+                reconnect: false,
+                agent: false,
+                iat: chrono::Utc::now().timestamp(),
+            }
+        )
+    );
+
+    for (what, cookie) in [
+        ("tampered", tampered),
+        ("expired", expired),
+        ("unknown tenant", nobody),
+        ("session claim", session),
+    ] {
+        let (status, headers, body) = h.get("/app/auth", Some(&cookie)).await;
+        assert!(is_google(status, &headers), "{what}: {status} {body}");
+        assert!(clears_handoff(&headers), "{what}");
+        let (status, headers, _) = h.press(&cookie, Some("anything"), None).await;
+        assert!(is_back_to_app_auth(status, &headers), "{what}: {status}");
+    }
+    assert!(h.rec.lock().unwrap().pair_calls.is_empty());
+
+    // And no cookie at all is the old behaviour exactly: nothing to clear.
+    let (status, headers, _) = h.get("/app/auth", None).await;
+    assert!(is_google(status, &headers));
+    assert!(!clears_handoff(&headers));
+}
+
+/// BOUND TO THE ROW, NOT THE LABEL. A handoff for tenant A, then A is purged
+/// and a new tenant is set up at the same label FOR THE SAME ADDRESS, so the
+/// row id is the only thing that differs: the old cookie names a row that no
+/// longer exists, so it is a trip to Google and mints nothing.
+#[tokio::test]
+async fn a_handoff_does_not_follow_its_label_to_a_new_tenant() {
+    let h = Harness::new().await;
+    let cookie = h.handoff_cookie("nonce-purged", 60).await;
+    let (_, _, page) = h.get("/app/auth", Some(&cookie)).await;
+    let csrf = csrf_on(&page);
+
+    let store = h.state.store();
+    let (old_id, old_email) = store.active_tenant_handle(LABEL).await.unwrap().unwrap();
+    store.purge_tenant(LABEL, -1).await.unwrap();
+    store.insert_tenant(LABEL, "ada@example.com").await.unwrap();
+    let (new_id, new_email) = store.active_tenant_handle(LABEL).await.unwrap().unwrap();
+    assert_eq!(new_email, old_email, "only the row id may differ");
+    assert_ne!(new_id, old_id);
+
+    let (status, headers, body) = h.get("/app/auth", Some(&cookie)).await;
+    assert!(is_google(status, &headers), "{status} {body}");
+    let (status, headers, _) = h.press(&cookie, Some(&csrf), None).await;
+    assert!(is_back_to_app_auth(status, &headers), "{status}");
+    assert!(h.rec.lock().unwrap().pair_calls.is_empty());
+}
+
+/// "Use a different account" is the ordinary sign-in for that request: the
+/// route ignores the handoff and goes to Google, and it does NOT clear the
+/// cookie. It is a GET any site can send a browser to, so it must not be a way
+/// to wipe somebody's handoff; the cookie ends on its own.
+#[tokio::test]
+async fn using_a_different_account_is_the_ordinary_google_sign_in() {
+    let h = Harness::new().await;
+    let cookie = h.handoff_cookie("nonce-skip", 60).await;
+
+    let (status, headers, body) = h.get("/app/auth?skip_handoff=1", Some(&cookie)).await;
+    assert!(is_google(status, &headers), "{status} {body}");
+    assert!(!clears_handoff(&headers), "{:?}", set_cookies(&headers));
+    assert!(h.rec.lock().unwrap().pair_calls.is_empty());
+
+    // Neither cleared nor spent: the next plain app login still offers it.
+    let (status, _, body) = h.get("/app/auth", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// The handoff names the tenant just created, whichever company it is at, so
+/// it wins over `?provider=`. This deployment has no Microsoft app, so without
+/// the handoff the same URL is "unavailable"; with it, the person is offered
+/// the mailbox by name, in the theme they asked for, and the other-account
+/// link keeps both parameters.
+#[tokio::test]
+async fn a_handoff_wins_over_the_provider_parameter() {
+    let h = Harness::new().await;
+    let (status, _, _) = h.get("/app/auth?provider=microsoft", None).await;
+    assert_ne!(status, StatusCode::FOUND, "no Microsoft app here");
+
+    let cookie = h.handoff_cookie("nonce-ms", 60).await;
+    let (status, _, body) = h
+        .get("/app/auth?provider=microsoft&theme=dark", Some(&cookie))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Continue as ada@example.com?"), "{body}");
+    assert!(body.contains(r#"data-theme="dark""#), "{body}");
+    assert!(
+        body.contains(r#"href="/app/auth?skip_handoff=1&amp;provider=microsoft&amp;theme=dark""#),
+        "{body}"
+    );
 }

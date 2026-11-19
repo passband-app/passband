@@ -34,6 +34,10 @@ pub struct Candidate {
     subject: String,
     body: String,
     is_known_contact: bool,
+    /// First contact (`AgentContext::first_contact`): a pitch from a stranger
+    /// stays under the push threshold here, and the full decision, which
+    /// knows whether the owner wants it, may push it later.
+    is_first_contact: bool,
     is_bulk: bool,
     sender_preferences: Option<String>,
     /// The owner's general rules (not about one sender), as JSON.
@@ -59,6 +63,7 @@ impl Candidate {
             subject: message.subject.clone(),
             body: crate::text::truncate_chars(&message.body, cfg.max_body_chars.saturating_add(1)),
             is_known_contact: context.sender_is_contact,
+            is_first_contact: context.first_contact,
             is_bulk: message.is_bulk,
             sender_preferences: if context.matched_rules.is_empty() {
                 None
@@ -115,6 +120,9 @@ pub fn candidate(
             cfg.max_body_chars.saturating_add(1),
         ),
         is_known_contact: known_contact(&triaged.message.from_addr),
+        // Not computed on this path. Unknown is "not first contact", which
+        // leaves the lane exactly as it was: the careful answer for a push.
+        is_first_contact: false,
         is_bulk: triaged.message.list_unsubscribe.is_some(),
         sender_preferences,
         general_rules: None,
@@ -284,6 +292,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             subject,
             body,
             is_known_contact,
+            is_first_contact,
             is_bulk,
             sender_preferences,
             general_rules,
@@ -365,6 +374,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             subject: &subject,
             body: &body,
             is_known_contact,
+            is_first_contact,
             is_bulk,
             sender_preferences: sender_preferences.as_deref(),
             general_rules: general_rules.as_deref(),

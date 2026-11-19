@@ -20,6 +20,16 @@ pub struct ContextSnapshot {
     /// mailbox without the flag has always had.
     #[serde(skip)]
     pub understanding: bool,
+    /// The message is first contact: the owner has never written to the
+    /// sender, nobody the owner has written to is on the thread, and the
+    /// owner has not written in it (`store::agent_triage::AgentContext::
+    /// first_contact`). The commit gate for outreach reads it
+    /// (`OutreachAssessment::apply_gate`): the model's assessment survives
+    /// only on first contact. Serialized, so an eval replay gates the same;
+    /// a snapshot stored before it existed reads as not first contact, which
+    /// drops any assessment, the careful answer.
+    #[serde(default)]
+    pub first_contact: bool,
 }
 /// One learned-memory line as the agent reads it (`context.memory`), served by
 /// [`super::memory::StoreMemoryContext`]. `text` is the entry's rendered line,

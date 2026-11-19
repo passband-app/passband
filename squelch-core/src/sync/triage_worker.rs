@@ -363,6 +363,9 @@ pub fn snapshot(
     if let Some(history) = &context.outreach_history {
         initial["outreach_history"] = history.clone();
     }
+    if let Some(organisation) = &context.sender_organisation {
+        initial["sender_organisation"] = organisation.clone();
+    }
     ContextSnapshot {
         account_id: job.account_id,
         message_id: job.message_id,

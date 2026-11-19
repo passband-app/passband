@@ -136,6 +136,11 @@ pub struct AgentContext {
     /// empty, when there is nothing to count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outreach_history: Option<serde_json::Value>,
+    /// What the owner's mail says about the sender's organization
+    /// (`sender_organisation`), attached only on first contact, and only
+    /// for authenticated mail from a domain that names an organization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_organisation: Option<serde_json::Value>,
     /// The relationship ledger's block for the sender (docs/UNDERSTANDING.md
     /// §2.1), ABSENT rather than empty when there is no row or the first-run
     /// backfill has not filled the table. NEVER FILLED BY A CONTEXT LOAD: the

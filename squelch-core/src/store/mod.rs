@@ -3166,6 +3166,67 @@ pub trait Store:
     fn stage2_refund_budget(&self, account_id: AccountId, thread_id: &str, day: &str)
     -> Result<()>;
 
+    // ---- sender research (docs/SENDER-RESEARCH.md) ------------------------
+
+    /// The newest research on `addr` (lowercased), if any.
+    fn sender_research(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+    ) -> Result<Option<crate::triage::research::SenderResearchRow>>;
+
+    /// Queue automatic research on `addr`, unless a row stands against it
+    /// (`SenderResearchRow::blocks`). `true` when it queued.
+    fn queue_sender_research(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+        now: DateTime<Utc>,
+        cache_days: i64,
+    ) -> Result<bool>;
+
+    /// Mark `addr` running for an on-demand request, atomically with the
+    /// check that nothing stands against it: `Some(row)` is the row that
+    /// stood, and nothing was written.
+    fn start_sender_research(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+        now: DateTime<Utc>,
+        cache_days: i64,
+    ) -> Result<Option<crate::triage::research::SenderResearchRow>>;
+
+    /// Claim the oldest queued row (it becomes `running`), dropping queued
+    /// rows older than `max_age` first.
+    fn claim_sender_research(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        max_age: chrono::Duration,
+    ) -> Result<Option<String>>;
+
+    /// Settle a run.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_sender_research(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+        status: crate::triage::research::ResearchStatus,
+        result: Option<&crate::triage::research::ResearchResult>,
+        failure: Option<&str>,
+        web_searches: u64,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// What the store knows about a sender that research may be told: their
+    /// newest display name and the claims of the newest outreach assessment
+    /// on their mail. Never a body or a subject.
+    fn research_subject_fields(
+        &self,
+        account_id: AccountId,
+        addr: &str,
+    ) -> Result<crate::triage::research::SubjectFields>;
+
     /// Bump the Stage-2 usage ledger for `(account_id, day)`: +1 call plus the
     /// response's token counts, after each classify that carried a usage block.
     fn stage2_bump_usage(

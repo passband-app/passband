@@ -45,6 +45,7 @@ struct EventGuestsTests {
         theOneSentenceAboutEmail()
         theWave5WireDecodes()
         thePersonCardsZoneDecodes()
+        theContactCardsResearchDecodes()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -736,6 +737,25 @@ struct EventGuestsTests {
         expect(odd != nil && odd?.timezone?.zone == nil, "a shape this client does not know costs the card nothing")
         let numbered = card(#","timezone":{"zone":5}"#)
         expect(numbered != nil && numbered?.timezone?.zone == nil, "nor a zone that is not a string")
+    }
+
+    /// The contact card's "Who is this?" body, as the daemon serves it: a
+    /// stored result, and the bare state with none.
+    static func theContactCardsResearchDecodes() {
+        let done = #"""
+            {"status":"done","available":true,"researched_at":"2026-06-01T12:00:00+00:00",
+             "result":{"who":"Pat Doe leads partnerships at Lumen Labs.",
+                       "organization":{"name":"Lumen Labs","website":"https://lumen.example/","what_it_does":null,"size_hint":"about 40 people"},
+                       "checks":[{"claim":"Works at Lumen Labs","status":"not_found"}],
+                       "verdict":"plausible","sources":["https://lumen.example/team"]}}
+            """#
+        let r = try? JSONDecoder().decode(SenderResearch.self, from: Data(done.utf8))
+        expect(r?.result?.verdict == .plausible, "the verdict decodes")
+        expect(r?.result?.checks.first?.status == .not_found, "a check's status decodes")
+        expect(r?.result?.organization.what_it_does == nil, "a null field is absent")
+        let none = try? JSONDecoder().decode(
+            SenderResearch.self, from: Data(#"{"status":"none","available":false}"#.utf8))
+        expect(none != nil && none?.result == nil && none?.available == false, "nothing stored decodes")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

@@ -32,6 +32,7 @@ mod pair;
 mod renotify;
 mod scheduled_send;
 mod send_dedupe;
+mod sender_research;
 mod serve;
 mod sharing;
 mod state;
@@ -311,6 +312,13 @@ fn client_router(state: ApiState) -> Router {
         // The reader's contact card: one address, everything known about it.
         // Human door only, for the reason contacts is.
         .route("/client/person", get(handlers::get_person))
+        // "Who is this?" (docs/SENDER-RESEARCH.md): GET reads what research
+        // found on one sender, POST runs it now. Human door only, for the
+        // reason the card is: untrusted model output about a stranger.
+        .route(
+            "/client/person/research",
+            get(sender_research::get_research).post(sender_research::run_research),
+        )
         // The relationship ledger, ranked: who the owner answers and whose
         // mail they ignore. Human door only, for the reason the card is. A
         // store read, so the Local ceiling and the Local latency class, like

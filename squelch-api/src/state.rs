@@ -7,6 +7,7 @@ use squelch_core::credentials::{CredentialKind, CredentialStore};
 use squelch_core::features::Features;
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
+use squelch_core::triage::research::ResearchClient;
 use squelch_core::triage::rule_infer::RuleInferClient;
 use squelch_core::triage::rule_suggest::RuleSuggestClient;
 use squelch_core::triage::smart_clear::SmartClearClient;
@@ -355,6 +356,13 @@ pub struct ApiState {
     /// never saved on its own. `None` (no key, every test harness) means no
     /// suggestions. See [`squelch_core::triage::rule_suggest`].
     pub(crate) rule_suggest: Option<RuleSuggestClient>,
+    /// The investigation model with the web search tool, behind the contact
+    /// card's "Who is this?" (`POST /client/person/research`). `None` (research
+    /// off, no key, every test harness) means the button answers with what is
+    /// stored and nothing runs. See [`squelch_core::triage::research`].
+    pub(crate) sender_research: Option<ResearchClient>,
+    /// `[research]`: the cache window and the on-demand cap.
+    pub(crate) research_config: squelch_core::config::ResearchConfig,
     /// The small model behind the sitrep's headline. `None` (no key, every
     /// test harness) means `/client/v2/fye/headline` answers null and the
     /// client keeps its own line. See [`squelch_core::triage::fye_headline`].
@@ -708,6 +716,8 @@ impl ApiState {
             )),
             rule_infer: None,
             rule_suggest: None,
+            sender_research: None,
+            research_config: Default::default(),
             fye_headline: None,
             fye_headline_cache: Arc::new(std::sync::Mutex::new(None)),
             fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
@@ -1133,6 +1143,18 @@ impl ApiState {
     /// [`squelch_core::triage::rule_infer`].
     pub fn with_rule_inference(mut self, client: Option<RuleInferClient>) -> Self {
         self.rule_infer = client.map(Arc::new);
+        self
+    }
+
+    /// Attach sender research and its config. `None` keeps
+    /// `POST /client/person/research` answering with what is stored.
+    pub fn with_sender_research(
+        mut self,
+        client: Option<ResearchClient>,
+        config: squelch_core::config::ResearchConfig,
+    ) -> Self {
+        self.sender_research = client;
+        self.research_config = config;
         self
     }
 
@@ -1567,6 +1589,9 @@ impl ApiState {
             // The rule card's suggestion rides the same key and the NOTIFY
             // model, the one small model the daemon already runs and prices.
             .with_rule_suggestion(RuleSuggestClient::from_config(cfg))
+            // "Who is this?": the investigation model with web search, on the
+            // same key, billed under its own ledger category.
+            .with_sender_research(ResearchClient::from_config(cfg), cfg.research.clone())
             // The sitrep headline: same key, same notify model.
             .with_fye_headline(HeadlineClient::from_config(cfg))
             // Smart clear's expiry pass: same key, its OWN model

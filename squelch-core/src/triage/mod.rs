@@ -68,6 +68,10 @@ mod tests {
         vec![
             ("prompts/agent-v1.txt", include_str!("prompts/agent-v1.txt")),
             ("prompts/profile-v1.txt", profile::system_prompt()),
+            (
+                "prompts/sender-research-v1.txt",
+                include_str!("prompts/sender-research-v1.txt"),
+            ),
             ("fye_headline", fye_headline::SYSTEM_PROMPT),
             ("rule_suggest", rule_suggest::SYSTEM_PROMPT),
             ("rule_suggest", rule_suggest::EMAIL_SUGGEST_SYSTEM_PROMPT),

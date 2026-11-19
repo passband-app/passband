@@ -62,6 +62,40 @@ fn migrate_adds_auth_pass_null_to_a_preexisting_messages_table() {
 }
 
 #[test]
+fn migrate_marks_every_preexisting_banner_a_renotify() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE renotify_batches(
+             id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, trigger TEXT NOT NULL,
+             fired_at TEXT NOT NULL, listeners INTEGER NOT NULL, opened_at TEXT,
+             opened_message_id INTEGER);
+         CREATE TABLE renotify_items(
+             batch_id INTEGER NOT NULL, account_id INTEGER NOT NULL,
+             message_id INTEGER NOT NULL, position INTEGER NOT NULL, due_at TEXT,
+             PRIMARY KEY(batch_id, position));
+         INSERT INTO renotify_batches(id, account_id, trigger, fired_at, listeners)
+             VALUES (1, 1, 'client_online', '2026-11-01T09:00:00Z', 1);
+         INSERT INTO renotify_items(batch_id, account_id, message_id, position)
+             VALUES (1, 1, 7, 0);",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let kind: String = conn
+        .query_row("SELECT kind FROM renotify_batches WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(kind, "renotify");
+    let priced: (Option<i64>, Option<String>) = conn
+        .query_row("SELECT est_secs, basis FROM renotify_items", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(priced, (None, None), "a re-notify item has no price");
+}
+
+#[test]
 fn migrate_adds_sender_signals_null_to_a_preexisting_messages_table() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(

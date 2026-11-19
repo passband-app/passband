@@ -1263,6 +1263,9 @@ CREATE TABLE IF NOT EXISTS renotify_batches (
     id                INTEGER PRIMARY KEY,
     account_id        INTEGER NOT NULL,
     trigger           TEXT NOT NULL,     -- client_online | meeting_end
+    -- renotify | quick_clear (`renotify::BannerKind`). Habits pause each
+    -- (trigger, kind) on its own.
+    kind              TEXT NOT NULL DEFAULT 'renotify',
     fired_at          TEXT NOT NULL,
     listeners         INTEGER NOT NULL,  -- Macs the frame was sent to
     opened_at         TEXT,
@@ -1277,6 +1280,15 @@ CREATE TABLE IF NOT EXISTS renotify_items (
     -- The due time a due-soon re-notify was for (RFC 3339), NULL for an
     -- ordinary one. One due-soon re-notify per message per due time.
     due_at     TEXT,
+    -- A quick-clear item's predicted seconds and where the number came from
+    -- (`quick_clear::Basis`), for calibration. NULL on re-notify items.
+    est_secs   INTEGER,
+    basis      TEXT,
+    -- The same estimate BEFORE the owner's multiplier: what calibration
+    -- learns against, so the multiplier settles instead of measuring its own
+    -- last correction. NULL on re-notify items and on rows written before it
+    -- (read as `est_secs`).
+    raw_secs   INTEGER,
     PRIMARY KEY(batch_id, position)
 );
 CREATE INDEX IF NOT EXISTS idx_renotify_items_message ON renotify_items(account_id, message_id);

@@ -471,6 +471,12 @@ pub const COVERAGE: &[(&str, Coverage)] = &[
             "how the model reached the estimate; the minutes are scored by `record_fields`",
         ),
     ),
+    (
+        "effort.*",
+        Coverage::Unscored(
+            "a price for the quick-clear queue, not a placement judgement; it is checked against the owner's own dwell (`GET /client/renotify/stats` calibration), and gold before agent-triage-v26 has none to agree with",
+        ),
+    ),
 ];
 
 /// The first [`COVERAGE`] entry for a schema leaf path.

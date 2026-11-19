@@ -17,6 +17,7 @@ mod messages;
 mod migrate;
 mod notify;
 mod people;
+mod quick_clear;
 mod reading_senders;
 mod relationships;
 mod relationships_bench;

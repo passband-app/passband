@@ -122,6 +122,18 @@ fn relabel_scanner_opens(conn: &Connection) -> Result<()> {
 /// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
+    // QUICK CLEAR rides the re-notify record (docs/RENOTIFY.md). Every banner
+    // stored before it was a re-notify, which is what the default says; a
+    // re-notify item has no price, which is what NULL says.
+    add_column_if_missing(
+        conn,
+        "renotify_batches",
+        "kind",
+        "TEXT NOT NULL DEFAULT 'renotify'",
+    )?;
+    add_column_if_missing(conn, "renotify_items", "est_secs", "INTEGER")?;
+    add_column_if_missing(conn, "renotify_items", "basis", "TEXT")?;
+    add_column_if_missing(conn, "renotify_items", "raw_secs", "INTEGER")?;
     relabel_scanner_opens(conn)?;
     retire_preference_retriage(conn)?;
     rebuild_calendar_reminder_fires(conn)?;

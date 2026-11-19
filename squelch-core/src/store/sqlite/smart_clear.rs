@@ -138,14 +138,17 @@ fn given_back(
 }
 
 /// One open Reading row as the judgement left it.
-struct Scanned {
-    message_id: i64,
-    sender: String,
+pub(super) struct Scanned {
+    pub(super) message_id: i64,
+    pub(super) thread_id: String,
+    pub(super) sender: String,
+    /// The triage summary, for a quick-clear queue's line.
+    pub(super) summary: String,
     /// `triage.status` before anything is written, for the undo.
     status: String,
     received_at: DateTime<Utc>,
     /// What stored facts say, if they say to clear it.
-    reason: Option<ClearReason>,
+    pub(super) reason: Option<ClearReason>,
     /// The summary the model may be asked about, when nothing stored decides.
     question: Option<String>,
 }
@@ -225,7 +228,7 @@ pub(super) const MARK_DONE_SQL: &str = concat!(
 /// senders. Everything ELSE is always read fresh: the feed, each row's own
 /// state, FYE membership, what an undo gave back, and who the owner said to
 /// leave alone.
-fn scan(
+pub(super) fn scan(
     conn: &Connection,
     account_id: AccountId,
     now: DateTime<Utc>,
@@ -381,6 +384,8 @@ fn scan(
         };
         out.push(Scanned {
             message_id: item.message_id,
+            thread_id: item.thread_id.clone(),
+            summary: item.decision.summary.clone(),
             status,
             received_at,
             reason: stored_reason(&facts, now),

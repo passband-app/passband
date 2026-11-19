@@ -68,6 +68,12 @@ pub struct EventsQuery {
     /// opt-in nobody understood should cost only the opt-in.
     #[serde(default)]
     opens: Option<String>,
+    /// `1` from a Mac app that can SHOW a quick-clear banner (on a stream
+    /// that also sent `opens=1`). Quick clear is sent only while one such
+    /// stream is open: an older app drops the frame, so it keeps getting the
+    /// "still waiting" banner it can show. A string, like `opens`.
+    #[serde(default)]
+    quick_clear: Option<String>,
 }
 
 /// Where a connection starts reading. WITH `after`: exactly there (exclusive);
@@ -128,8 +134,10 @@ fn open_draft_frame(draft_id: i64) -> SseEvent {
 /// A smart re-notify banner ([`crate::renotify`]), as an SSE frame. Like
 /// [`open_draft_frame`]: no `id:`, so it moves no cursor, and a payload an
 /// [`Event`] decoder rejects, so an app that does not know it carries on.
-fn renotify_frame(payload: &str) -> SseEvent {
-    SseEvent::default().event("renotify").data(payload)
+fn renotify_frame(banner: &crate::renotify::BannerFrame) -> SseEvent {
+    SseEvent::default()
+        .event(banner.event)
+        .data(banner.payload.as_ref())
 }
 
 /// A calendar reminder ([`crate::calendar_remind`]), as an SSE frame. Like
@@ -194,7 +202,7 @@ async fn run(
     mut wake: broadcast::Receiver<i64>,
     _anchor: Option<broadcast::Sender<i64>>,
     mut opens: Option<broadcast::Receiver<i64>>,
-    mut banners: Option<broadcast::Receiver<Arc<str>>>,
+    mut banners: Option<broadcast::Receiver<crate::renotify::BannerFrame>>,
     mut reminders: Option<broadcast::Receiver<Arc<str>>>,
     tx: mpsc::Sender<Result<SseEvent, Infallible>>,
 ) {
@@ -229,8 +237,8 @@ async fn run(
                     return;
                 }
             }
-            // A re-notify banner, for a Mac stream. A lag is a missed banner:
-            // it was about a moment that has passed.
+            // A re-notify or quick-clear banner, for a Mac stream. A lag is a
+            // missed banner: it was about a moment that has passed.
             Some(banner) = next_banner(&mut banners) => {
                 if let Some(payload) = banner
                     && tx.send(Ok(renotify_frame(&payload))).await.is_err()
@@ -282,10 +290,8 @@ async fn shutting_down(shutdown: Option<watch::Receiver<bool>>) {
     }
 }
 
-/// [`next_open`] for re-notify banners.
-async fn next_banner(
-    banners: &mut Option<broadcast::Receiver<Arc<str>>>,
-) -> Option<Option<Arc<str>>> {
+/// [`next_open`] for banners (re-notify, quick clear, calendar reminders).
+async fn next_banner<T: Clone>(banners: &mut Option<broadcast::Receiver<T>>) -> Option<Option<T>> {
     let Some(rx) = banners else {
         return std::future::pending().await;
     };
@@ -335,6 +341,9 @@ pub async fn events_stream(
     // Both are inert with the feature off: no banner is ever sent, and no
     // session is written.
     let banners = mac.then(|| state.renotify.frames.subscribe());
+    // Counted for the life of the response body, like `listening` below.
+    let quick_capable = (mac && q.quick_clear.as_deref() == Some("1"))
+        .then(|| crate::renotify::QuickClearListener::start(&state));
     // Calendar reminders reach a Mac stream too, whatever `renotify` says.
     let reminders = mac.then(|| state.calendar_remind.frames.subscribe());
     let session = if mac {
@@ -369,6 +378,7 @@ pub async fn events_stream(
     let body = ReceiverStream::new(rx).map(move |frame| {
         let _listening = &listening;
         let _session = &session;
+        let _quick_capable = &quick_capable;
         frame
     });
     Ok(Sse::new(body).keep_alive(KeepAlive::new().interval(KEEPALIVE)))

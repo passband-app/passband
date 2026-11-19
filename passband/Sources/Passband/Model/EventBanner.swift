@@ -66,6 +66,9 @@ enum EventBanner {
         /// A smart re-notify banner (RenotifyBanner.swift): open its first
         /// message and report the tap against its batch.
         case renotify(RenotifyTap)
+        /// A quick clear banner (QuickClearBanner.swift): open the sprint
+        /// queue it promised, never the inbox and never one message.
+        case quickClear(QuickClearTap)
         /// An agent's draft to review. `accountId` nil only when an enriched
         /// banner lost its account key, which the tap queue reads as "the
         /// active account".
@@ -128,6 +131,12 @@ enum EventBanner {
             return .morningBrief(accountId: push.accountId)
         }
         if let renotify = renotifyTap(userInfo) { return .renotify(renotify) }
+        // A quick clear names no message of its own, so a banner that lost
+        // its batch opens nothing rather than falling through to the reader.
+        if route == quickClearRoute {
+            guard let tap = quickClearTap(userInfo) else { return .thread(nil) }
+            return .quickClear(tap)
+        }
         let messageId =
             (userInfo[messageKey] as? Int) ?? (userInfo[messageKey] as? String).flatMap(Int.init)
         let flagged = (userInfo[authKey] as? Bool) ?? false
@@ -310,6 +319,47 @@ enum EventBanner {
             batch: batch, messageId: messageId, threadId: userInfo[threadKey] as? String ?? "",
             trigger: (userInfo[renotifyTriggerKey] as? String).flatMap(RenotifyTrigger.init),
             items: intValue(userInfo[renotifyCountKey]) ?? 1)
+    }
+
+    // MARK: - quick clear taps (the banner itself: QuickClearBanner.swift)
+
+    /// The tap route a quick clear banner carries in `routeKey`.
+    static let quickClearRoute = "quick_clear"
+    /// The batch id: what a tap reports to `/client/renotify/{id}/opened`,
+    /// the endpoint the daemon shares with re-notify.
+    static let quickClearBatchKey = "passband.quickclear.batch"
+    /// The frame's trigger, for the tap's analytics.
+    static let quickClearTriggerKey = "passband.quickclear.trigger"
+    /// How many items the queue holds.
+    static let quickClearCountKey = "passband.quickclear.items"
+    /// The frame itself, as JSON: the queue the banner promised, so a tap
+    /// after a relaunch opens exactly it. A String here because this file
+    /// compiles in the phone's extension without the frame's type.
+    static let quickClearPayloadKey = "passband.quickclear.frame"
+    /// The coalescing group every quick clear shares, before the poster
+    /// prefixes it with the account.
+    static let quickClearGroup = "passband.quickclear"
+
+    /// A tap on a quick clear banner: open the sprint for `batch` from
+    /// `payload` and report the tap. An empty payload still fronts the app
+    /// and reports; it just has no queue to show.
+    struct QuickClearTap: Equatable, Sendable {
+        var batch: Int
+        var trigger: RenotifyTrigger?
+        var items: Int
+        var payload: String
+    }
+
+    /// The quick clear half of `tapRoute`, nil for any other banner.
+    static func quickClearTap(_ userInfo: [AnyHashable: Any]) -> QuickClearTap? {
+        guard userInfo[routeKey] as? String == quickClearRoute,
+            let batch = intValue(userInfo[quickClearBatchKey]), batch > 0
+        else { return nil }
+        return QuickClearTap(
+            batch: batch,
+            trigger: (userInfo[quickClearTriggerKey] as? String).flatMap(RenotifyTrigger.init),
+            items: intValue(userInfo[quickClearCountKey]) ?? 0,
+            payload: userInfo[quickClearPayloadKey] as? String ?? "")
     }
 
     private static func intValue(_ any: Any?) -> Int? {

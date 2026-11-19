@@ -1238,6 +1238,74 @@ fn client_activity_reports_timestamps_per_platform() {
     );
 }
 
+/// The presence fact for clients that never name themselves: their
+/// `last_used_at`, and only theirs. A named app's `last_used_at` is moved by
+/// the phone's notification extension too, so it is not presence; a console
+/// session is nobody's.
+#[test]
+fn unnamed_client_use_is_read_only_from_unnamed_tokens() {
+    let (store, acct) = store();
+    assert_eq!(store.unnamed_client_last_used_at(acct).unwrap(), None);
+    let apr = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).single().unwrap();
+    let may = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).single().unwrap();
+    let jun = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).single().unwrap();
+    let set_used = |id: i64, at: DateTime<Utc>| {
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE device_tokens SET last_used_at = ?2 WHERE id = ?1",
+                params![id, at.to_rfc3339()],
+            )
+            .unwrap();
+    };
+
+    let terminal = store.issue_device_token(acct, "terminal").unwrap();
+    set_used(terminal.id, apr);
+    let phone = store.issue_device_token(acct, "phone").unwrap();
+    store
+        .verify_device_token_from(&phone.token, Some(&tag("ios/0.0.15")))
+        .unwrap()
+        .unwrap();
+    set_used(phone.id, jun);
+    let console = store.issue_device_token(acct, CONSOLE_DEVICE_NAME).unwrap();
+    set_used(console.id, jun);
+    assert_eq!(store.unnamed_client_last_used_at(acct).unwrap(), Some(apr));
+
+    let old_mac = store.issue_device_token(acct, "old-mac").unwrap();
+    set_used(old_mac.id, may);
+    assert!(store.revoke_device_token(acct, old_mac.id).unwrap());
+    assert_eq!(
+        store.unnamed_client_last_used_at(acct).unwrap(),
+        Some(may),
+        "a revoked token's last use still happened"
+    );
+}
+
+/// Agent-door use is a time, written at most once per five minutes.
+#[test]
+fn agent_door_use_is_stamped_and_coalesced() {
+    use super::super::device_tokens::AGENT_USE_STAMP_SECS;
+    let (store, acct) = store();
+    assert_eq!(store.agent_door_last_used_at(acct).unwrap(), None);
+    let t0 = Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).single().unwrap();
+    store.note_agent_door_use(acct, t0).unwrap();
+    assert_eq!(store.agent_door_last_used_at(acct).unwrap(), Some(t0));
+    store
+        .note_agent_door_use(acct, t0 + Duration::seconds(60))
+        .unwrap();
+    assert_eq!(
+        store.agent_door_last_used_at(acct).unwrap(),
+        Some(t0),
+        "coalesced"
+    );
+    let later = t0 + Duration::seconds(AGENT_USE_STAMP_SECS);
+    store.note_agent_door_use(acct, later).unwrap();
+    assert_eq!(store.agent_door_last_used_at(acct).unwrap(), Some(later));
+    let other = store.ensure_account("other@example.com").unwrap();
+    assert_eq!(store.agent_door_last_used_at(other).unwrap(), None);
+}
+
 // ---- the owner's zone (#526) ------------------------------------------
 
 fn zoned(header: &str, zone: &str) -> ClientTag {

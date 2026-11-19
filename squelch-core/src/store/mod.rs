@@ -241,6 +241,11 @@ pub struct TriagedMessage {
     /// First classification from incremental sync may use reserved arrival
     /// capacity. Historical backfill and repairs use background capacity.
     pub foreground_triage: bool,
+    /// The message is a note Passband FILED into this mailbox itself
+    /// ([`crate::sync::ingest::is_filed_passband_note`]), never one that
+    /// arrived. Stored the way the archive tier stores mail: findable, and
+    /// never triaged, placed, pushed or counted.
+    pub passband_note: bool,
     /// Ingested by the first-run backfill (`triage.first_load`): the mail a
     /// new account opens on, which shares a small FYE allowance. Written on
     /// the row's first insert only, like `notify_eligible_at`.

@@ -94,7 +94,7 @@ pub fn candidate(
     cfg: &NotifyConfig,
     known_contact: impl FnOnce(&str) -> bool,
 ) -> Option<Candidate> {
-    if triaged.message.is_sent || triaged.message.is_spam {
+    if triaged.message.is_sent || triaged.message.is_spam || triaged.passband_note {
         return None;
     }
     triaged.notify_eligible_at?;

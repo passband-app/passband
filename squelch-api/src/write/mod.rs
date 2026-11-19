@@ -49,6 +49,18 @@ impl std::fmt::Display for WriteError {
     }
 }
 
+/// Why filing a message failed, and whether the request can have reached
+/// the provider. `reached: false` is PROOF nothing was filed: no credential,
+/// the mailbox's budget held it, the connection never opened, or the
+/// provider refused it unread (401, 429). Anything else (a timeout after the
+/// bytes went, a 5xx, a refusal of the message itself) is `true`, because
+/// the message may exist.
+#[derive(Debug)]
+pub struct InsertFailure {
+    pub error: WriteError,
+    pub reached: bool,
+}
+
 /// How long a `messages.send` may take: the client's ordinary minute, plus a
 /// second for every 50 KB of the message — a 25 MB attachment is ~34 MB on the
 /// wire, and 50 KB/s is a slow uplink, not a broken one. The Swift client
@@ -173,6 +185,32 @@ pub trait MailWriter: Send + Sync {
     /// Gmail files its own copy: never.
     fn sent_without_copy(&self, _message_id: &str) -> bool {
         false
+    }
+
+    /// FILE `raw` straight into this mailbox's inbox, unread, as if it had
+    /// arrived: Gmail's `messages.insert`. NOTHING IS SENT. No SMTP, no
+    /// recipient, no mail leaves the account: the message is written into the
+    /// owner's own mailbox and nowhere else. Its one caller is the
+    /// lapsed-user note (`crate::lapsed_note`).
+    ///
+    /// Refused by default: only Gmail files a non-draft message this way
+    /// cleanly. Graph can only make one through an undocumented extended
+    /// property, and IMAP's `APPEND` is a different contract again.
+    async fn insert_into_inbox(&self, _raw: &[u8]) -> Result<SentRef, InsertFailure> {
+        Err(InsertFailure {
+            error: WriteError::Invalid("this mailbox cannot have mail filed into it".into()),
+            reached: false,
+        })
+    }
+
+    /// The provider's labels on one message as they stand NOW, or `None` when
+    /// the mailbox no longer has it. Labels only, never a header or a body.
+    /// The lapsed note asks this of every message it would list, because the
+    /// store never learns of a deletion. Refused by default (Gmail only).
+    async fn current_labels(&self, _msg_id: &str) -> Result<Option<Vec<String>>, WriteError> {
+        Err(WriteError::Invalid(
+            "this mailbox cannot be asked for labels".into(),
+        ))
     }
 
     /// SAVE THE SENDER'S COPY of a send that went with none saved: `raw` is

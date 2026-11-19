@@ -604,6 +604,7 @@ mod feedback;
 mod ghosts;
 pub mod groups;
 mod imap_locations;
+pub mod lapsed_note;
 pub mod memory;
 mod messages;
 mod migrate;

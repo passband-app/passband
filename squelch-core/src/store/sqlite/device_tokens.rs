@@ -28,6 +28,11 @@
 
 use super::*;
 
+/// The `app_settings` key holding when the agent door last served a call.
+pub const AGENT_USED_KEY: &str = "agent_door_used_at";
+/// The agent-door presence stamp moves at most this often.
+pub const AGENT_USE_STAMP_SECS: i64 = 300;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Duration;
@@ -767,6 +772,58 @@ impl SqliteStore {
             first_paired_at,
             platforms,
         })
+    }
+
+    /// Record that the agent door (MCP) served a tool call for this mailbox:
+    /// the presence fact for somebody who uses Passband through an assistant
+    /// and never opens an app. Hosted agent tokens are not device tokens, so
+    /// nothing else records it. Kept in `app_settings` ([`AGENT_USED_KEY`])
+    /// and written at most once per [`AGENT_USE_STAMP_SECS`], so a burst of
+    /// calls is one write. Time only: never which tool, never what was asked.
+    pub fn note_agent_door_use(&self, account_id: AccountId, now: DateTime<Utc>) -> Result<()> {
+        let fresh = self
+            .agent_door_last_used_at(account_id)?
+            .is_some_and(|last| (now - last).num_seconds() < AGENT_USE_STAMP_SECS && last <= now);
+        if !fresh {
+            self.set_app_setting(account_id, AGENT_USED_KEY, &now.to_rfc3339())?;
+        }
+        Ok(())
+    }
+
+    /// When the agent door last served this mailbox, to [`AGENT_USE_STAMP_SECS`].
+    pub fn agent_door_last_used_at(&self, account_id: AccountId) -> Result<Option<DateTime<Utc>>> {
+        Ok(self
+            .get_app_setting(account_id, AGENT_USED_KEY)?
+            .and_then(|v| DateTime::parse_from_rfc3339(v.trim()).ok())
+            .map(|t| t.with_timezone(&Utc)))
+    }
+
+    /// The newest `last_used_at` among this mailbox's tokens whose app NEVER
+    /// named itself (no `client_platform`): a client [`Self::client_activity`]
+    /// cannot see, such as the terminal client or an app older than the
+    /// client header. Console sessions are excluded by name, as everywhere.
+    ///
+    /// A token that HAS named itself is left out on purpose: its
+    /// `last_used_at` also moves when the iPhone's notification extension
+    /// fetches a push with no app open, so for those `client_seen_at` is the
+    /// presence fact. Revoked rows count, for the reason they count in
+    /// `client_activity`. Folded in Rust over parsed timestamps.
+    pub fn unnamed_client_last_used_at(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT last_used_at FROM device_tokens
+             WHERE account_id = ?1 AND name <> ?2 AND client_platform IS NULL
+               AND last_used_at IS NOT NULL",
+        )?;
+        let newest = stmt
+            .query_map(params![account_id, CONSOLE_DEVICE_NAME], |r| dt(r, 0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .max();
+        Ok(newest)
     }
 
     // ---- pairing ---------------------------------------------------------

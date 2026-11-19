@@ -31,6 +31,7 @@ pub mod profile;
 pub mod ranking;
 pub mod receipt;
 pub mod receipt_match;
+pub mod research;
 pub mod rule_infer;
 pub mod rule_suggest;
 pub mod rules;

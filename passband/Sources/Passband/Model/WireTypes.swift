@@ -3292,6 +3292,46 @@ struct PersonCard: Codable, Sendable, Equatable {
     }
 }
 
+/// What sender research ("Who is this?") has on one address, from
+/// `/client/person/research`. Everything under `result` is a model's reading
+/// of the web about a stranger: shown, never acted on. Decoding never throws
+/// past the top level, so a shape this client does not know costs the card
+/// its research section and nothing else.
+struct SenderResearch: Codable, Sendable, Equatable {
+    enum Verdict: String, Codable, Sendable {
+        case verified, plausible, unverified, suspicious
+    }
+    enum CheckStatus: String, Codable, Sendable {
+        case confirmed, contradicted, not_found
+    }
+    struct Organization: Codable, Sendable, Equatable {
+        var name: String?
+        var website: String?
+        var what_it_does: String?
+        var size_hint: String?
+    }
+    struct Check: Codable, Sendable, Equatable, Identifiable {
+        var claim: String
+        var status: CheckStatus
+        var id: String { claim }
+    }
+    struct Result: Codable, Sendable, Equatable {
+        var who: String
+        var organization: Organization
+        var checks: [Check]
+        var verdict: Verdict
+        var sources: [String]
+    }
+
+    /// `none`, `queued`, `running`, `done`, `unavailable`, `failed`, or
+    /// `capped` (today's lookups are spent).
+    var status: String
+    /// Whether this daemon can run research at all.
+    var available: Bool
+    var researched_at: String?
+    var result: Result?
+}
+
 struct StatusResult: Codable, Sendable {
     var status: String
     var message_id: Int?

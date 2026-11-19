@@ -124,6 +124,7 @@ pub const ROUTE_CEILINGS: &[(&str, &str, RequestCeiling)] = &[
     ("PUT", "/client/rules/{id}", RequestCeiling::Upstream),
     ("POST", "/client/teach", RequestCeiling::Upstream),
     ("GET", "/client/v2/fye/headline", RequestCeiling::Upstream),
+    ("POST", "/client/person/research", RequestCeiling::Upstream),
     (
         "GET",
         "/client/unsubscribes/smart_block",

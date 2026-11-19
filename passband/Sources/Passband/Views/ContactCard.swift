@@ -135,12 +135,27 @@ private struct ContactCard: View {
 
     @State private var phase: Phase = .loading
     @State private var copied = false
+    /// "Who is this?": what sender research has on them. `nil` hides the
+    /// section (an older daemon, a failed read, or the owner's own card).
+    @State private var research: SenderResearch?
+    /// A lookup the owner started from this card is in flight.
+    @State private var researching = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s12) {
             header
             Hairline()
             history
+            #if os(macOS)
+                // Shown when there is something to show or something to do:
+                // a daemon with no web search and nothing stored has neither.
+                if let research, person?.is_self != true,
+                    research.available || research.result != nil || research.status == "running"
+                {
+                    Hairline()
+                    whoIsThis(research)
+                }
+            #endif
             Hairline()
             actions
         }
@@ -151,6 +166,9 @@ private struct ContactCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         #endif
         .task(id: who.address) { await load() }
+        #if os(macOS)
+            .task(id: who.address) { await loadResearch() }
+        #endif
     }
 
     private var person: PersonCard? {
@@ -353,6 +371,230 @@ private struct ContactCard: View {
             }
         }
     }
+
+    // MARK: - who is this (macOS)
+
+    #if os(macOS)
+        /// Sender research: whether a stranger is who they say they are, from
+        /// a web search the daemon ran. Every word of it is a model's reading
+        /// of the web, so it is shown as a lead: a verdict chip, one line,
+        /// the claims it checked, and where it looked.
+        @ViewBuilder
+        private func whoIsThis(_ r: SenderResearch) -> some View {
+            VStack(alignment: .leading, spacing: Space.s8) {
+                HStack(spacing: Space.s8) {
+                    Text("Who is this?")
+                        .font(Typo.sectionLabel)
+                        .foregroundStyle(Palette.inkFaint)
+                        .textCase(.uppercase)
+                    if let result = r.result, !researching {
+                        Chip(
+                            text: verdictLabel(result.verdict), tone: verdictTone(result.verdict),
+                            symbol: verdictSymbol(result.verdict))
+                    }
+                    Spacer(minLength: 0)
+                }
+                if researching || r.status == "running" {
+                    HStack(spacing: Space.s8) {
+                        ProgressView().controlSize(.small)
+                        Text("Looking them up")
+                            .font(CardMetrics.body)
+                            .foregroundStyle(Palette.inkFaint)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: Space.scaled(28), alignment: .leading)
+                } else if let result = r.result {
+                    researched(result, at: r.researched_at)
+                } else {
+                    notResearched(r)
+                }
+            }
+        }
+
+        @ViewBuilder
+        private func researched(_ result: SenderResearch.Result, at: String?) -> some View {
+            Text(result.who)
+                .font(CardMetrics.body)
+                .foregroundStyle(Palette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            if let org = result.organization.name {
+                let about = [result.organization.what_it_does, result.organization.size_hint]
+                    .compactMap { $0 }
+                fact("Org", org, detail: about.isEmpty ? nil : about.joined(separator: " · "))
+            }
+            if !result.checks.isEmpty {
+                VStack(alignment: .leading, spacing: Space.s4) {
+                    ForEach(result.checks) { check in
+                        HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
+                            Image(systemName: checkSymbol(check.status))
+                                .font(Typo.ui(10, weight: .semibold))
+                                .foregroundStyle(checkTone(check.status))
+                                .frame(width: Space.scaled(12))
+                            Text(check.claim)
+                                .font(CardMetrics.body)
+                                .foregroundStyle(Palette.inkDim)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .help(checkHelp(check.status))
+                    }
+                }
+            }
+            let links = researchLinks(result)
+            if !links.isEmpty {
+                HStack(spacing: Space.s10) {
+                    ForEach(links, id: \.self) { url in
+                        Button {
+                            _ = Platform.open(url)
+                        } label: {
+                            HStack(spacing: Space.scaled(3)) {
+                                Text(url.host() ?? url.absoluteString)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Image(systemName: "arrow.up.right")
+                                    .font(Typo.ui(8, weight: .semibold))
+                            }
+                        }
+                        .buttonStyle(.textAction)
+                        .help(url.absoluteString)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(CardMetrics.detail)
+            }
+            Text(researchFootnote(at))
+                .font(CardMetrics.detail)
+                .foregroundStyle(CardMetrics.detailInk)
+        }
+
+        @ViewBuilder
+        private func notResearched(_ r: SenderResearch) -> some View {
+            switch r.status {
+            case "unavailable":
+                quiet("Looking people up isn't available on this setup.")
+            case "failed":
+                quiet("Couldn't look them up. Try again tomorrow.")
+            case "capped":
+                quiet("That's all the lookups for today. Try again tomorrow.")
+            default:
+                if r.available {
+                    Button(action: runResearch) {
+                        Label("Look them up", systemImage: "magnifyingglass")
+                    }
+                    .font(CardMetrics.body)
+                    .buttonStyle(.textAction)
+                    .help(
+                        "Search the web to check who they say they are. Only their name, address and claimed role are searched, never your mail."
+                    )
+                }
+            }
+        }
+
+        private func quiet(_ text: String) -> some View {
+            Text(text)
+                .font(CardMetrics.body)
+                .foregroundStyle(Palette.inkFaint)
+        }
+
+        /// The organization's own site first, then the pages the checks rest
+        /// on; http(s) only, each once.
+        private func researchLinks(_ result: SenderResearch.Result) -> [URL] {
+            var out: [URL] = []
+            for raw in [result.organization.website].compactMap({ $0 }) + result.sources {
+                guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(),
+                    scheme == "https" || scheme == "http", !out.contains(url)
+                else { continue }
+                out.append(url)
+            }
+            return Array(out.prefix(4))
+        }
+
+        private func researchFootnote(_ at: String?) -> String {
+            let when = at.map { "Looked up \(ago($0))" } ?? "Looked up"
+            return "\(when) from a web search. A lead, not proof."
+        }
+
+        private func verdictLabel(_ v: SenderResearch.Verdict) -> String {
+            switch v {
+            case .verified: "checks out"
+            case .plausible: "plausible"
+            case .unverified: "unverified"
+            case .suspicious: "suspicious"
+            }
+        }
+
+        private func verdictTone(_ v: SenderResearch.Verdict) -> Color {
+            switch v {
+            case .verified: Palette.positive
+            case .plausible: Palette.accent
+            case .unverified: Palette.inkFaint
+            case .suspicious: Palette.danger
+            }
+        }
+
+        private func verdictSymbol(_ v: SenderResearch.Verdict) -> String? {
+            switch v {
+            case .verified: "checkmark"
+            case .suspicious: "exclamationmark.triangle"
+            case .plausible, .unverified: nil
+            }
+        }
+
+        private func checkSymbol(_ s: SenderResearch.CheckStatus) -> String {
+            switch s {
+            case .confirmed: "checkmark.circle"
+            case .contradicted: "xmark.circle"
+            case .not_found: "questionmark.circle"
+            }
+        }
+
+        private func checkTone(_ s: SenderResearch.CheckStatus) -> Color {
+            switch s {
+            case .confirmed: Palette.positive
+            case .contradicted: Palette.danger
+            case .not_found: Palette.inkFaintest
+            }
+        }
+
+        private func checkHelp(_ s: SenderResearch.CheckStatus) -> String {
+            switch s {
+            case .confirmed: "A source supports this"
+            case .contradicted: "A source disagrees with this"
+            case .not_found: "Nothing found either way"
+            }
+        }
+
+        private func loadResearch() async {
+            research = nil
+            do {
+                var r = try await APIClient.shared.senderResearch(who.address)
+                research = r
+                // A lookup triage started is running now: check back while
+                // the card is open, for as long as a lookup can take.
+                var polls = 0
+                while r.status == "running", polls < 30 {
+                    try await Task.sleep(for: .seconds(4))
+                    r = try await APIClient.shared.senderResearch(who.address)
+                    research = r
+                    polls += 1
+                }
+            } catch {
+                // An older daemon (404), a failed read, or the card closed:
+                // no section.
+            }
+        }
+
+        private func runResearch() {
+            guard !researching else { return }
+            researching = true
+            Task {
+                defer { researching = false }
+                if let r = try? await APIClient.shared.runSenderResearch(who.address) {
+                    research = r
+                }
+            }
+        }
+    #endif
 
     // MARK: - acting on them
 

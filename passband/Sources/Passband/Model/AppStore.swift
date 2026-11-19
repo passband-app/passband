@@ -1154,19 +1154,6 @@ final class AppStore {
         activeView == .sitrep && threadId == nil && !composeOpen
     }
 
-    /// The unsubscribe tray, under it the smart clear receipt: drawn by
-    /// ActionLayer in the bottom-right corner. Not while the smart clear list
-    /// is up, which is a page over the board they belong to.
-    var showsUnsubscribeTray: Bool {
-        showsSitrepCorner && !smartClearListOpen && !UnsubscribeJobs.shared.items.isEmpty
-    }
-    var showsSmartClearReceipt: Bool {
-        showsSitrepCorner && !smartClearListOpen && smartClearReceipt != nil
-    }
-    /// Something already holds the bottom-right corner, so a one-time card
-    /// set there (`DefaultMailNudgeCard`) waits.
-    var bottomTrailingCornerOccupied: Bool { showsUnsubscribeTray || showsSmartClearReceipt }
-
     /// The press. Asks the daemon, takes what it cleared off the board at
     /// once, and puts up the receipt.
     ///
@@ -5323,6 +5310,25 @@ final class AppStore {
         openMailto(ask.link)
     }
 
+    // MARK: - the default mail app
+
+    #if os(macOS)
+        /// The inbox has loaded: ask macOS, once ever, to make Passband the
+        /// default mail app (`DefaultMailApp`). Called at the first sync of
+        /// every launch (an install from before the ask) and at the end of a
+        /// first look (a new install). Blocked by any other one-time card,
+        /// read a second later when the ask would go; blocked waits for the
+        /// next launch, not behind the card.
+        func askDefaultMailIfNeverAsked() {
+            DefaultMailApp.shared.askIfNeverAsked { [weak self] in
+                guard let self else { return (verified: false, blocked: true) }
+                return (
+                    verified: self.connStatus == .connected && self.connectionVerified,
+                    blocked: AgentNudge.othersShowing(self) || AgentNudge.shared.showingNudge)
+            }
+        }
+    #endif
+
     // MARK: - mailto: links from other apps
 
     /// mailto: links from outside (Passband as the default mail app) waiting
@@ -6874,12 +6880,6 @@ final class AppStore {
                 noteDraftGone(sentDraft)
             }
             pushToast("sent", .success)
-            // The moment to ask once whether email links should open here
-            // (`DefaultMailApp`). The Mac's alone: the phone cannot be asked.
-            #if os(macOS)
-                DefaultMailApp.shared.noteSent(othersShowing: AgentNudge.othersShowing(self)
-                    || AgentNudge.shared.showingNudge)
-            #endif
             // Only an INLINE reply names its thread: the pane's mail (a new
             // message, a forward) starts a thread of its own, and refetching
             // whatever happens to be open would move somebody's reading.

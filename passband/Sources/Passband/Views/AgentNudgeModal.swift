@@ -48,12 +48,10 @@ struct AgentNudgeModal: View {
 
 extension AgentNudge {
     /// Every other one-time card that can be on screen: the share ask, the
-    /// iPhone ad, the default-mail ask, the first-load veil, What's New, and
-    /// the update card. Two of these at once is a pile.
+    /// iPhone ad, the first-load veil, What's New, and the update card. Two of these at once is a pile.
     static func othersShowing(_ store: AppStore) -> Bool {
         ShareNudge.shared.showingNudge
             || TestFlightNudge.shared.showingNudge
-            || DefaultMailApp.shared.showingNudge
             || store.firstLoad.active
             || store.whatsNew.active
             || Updater.shared.phase != .idle

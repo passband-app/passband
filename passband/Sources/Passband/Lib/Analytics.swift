@@ -158,7 +158,7 @@ enum Analytics {
         // here" note on a first esc out of For your eyes.
         "reader_hint_shown", "flow_hint_shown", "stays_hint_shown",
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
-        "ios_nudge_closed", "agent_nudge_closed", "default_mail_nudge_closed",
+        "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
         // The calendar page: opened, the
         // connect card's two answers, the user's word on a ghost, and the
@@ -243,11 +243,6 @@ enum Analytics {
         // taken to Settings > Agents. Whether an agent then connects is not
         // measured here, at any level.
         "agent_nudge_closed",
-        // The default-mail-app ask closing, with one bool: whether "Make
-        // default" was pressed. The change can still be declined or fail
-        // after that, so this is a ceiling on uptake, not a count of defaults
-        // set.
-        "default_mail_nudge_closed",
         // Send groups carry a mode and a member COUNT. Whether people organize
         // their correspondents into audiences at all, and which shape they
         // reach for, is the "does the product work" question for this feature;

@@ -1,47 +1,27 @@
 // PASSBAND AS THE MAC'S DEFAULT MAIL APP: whether it is, the one time it asks
-// to be, and the button that makes it so.
+// macOS to make it so, and the Settings button that does the same.
 //
-// NEW USERS ARE ASKED DURING ONBOARDING, BY THE SYSTEM ALONE. The moment the
-// first look at a newly connected mailbox ends (FirstLoad.conclude, the inbox
-// on screen, the connection verified), and a beat later so the dialog does
-// not land mid-transition, Passband asks macOS to make it the default. macOS
-// shows its own "change default email reader?" confirmation; there is no
-// card, sheet or step of ours. The stamp is written BEFORE the request, so a
-// crash or a refusal never asks again, and a fresh install therefore never
-// sees the card below.
+// THE ASK IS THE SYSTEM'S ALONE. There is no card, sheet or step of ours: the
+// first time an inbox is loaded over a verified connection, and a second
+// later so nothing lands mid-transition, Passband asks macOS to make it the
+// default mail app. macOS may show its own confirmation; that is the whole
+// ask. One rule covers both roads to that moment:
 //
-// EXISTING USERS (onboarded before this version) never pass through that
-// moment again, so they keep the card, earned by a send:
+//   * A NEW INSTALL, at the end of its first look (FirstLoad.conclude): the
+//     inbox is on screen for the first time.
+//   * AN INSTALL FROM BEFORE THIS VERSION, at the first sync of the launch
+//     that brought it (RootView): never asked, so asked now.
 //
-// THE CARD IS EARNED BY A SEND, not by a launch. Somebody who has just sent
-// mail from Passband has a reason to want email links to land here; somebody
-// who has only opened the app has not. So the card can only be wanted right
-// after a send from Passband goes out: the first one on a new install, and
-// the first one after this update on an install that predates it (the stamp
-// is new, so neither has been asked).
+// ONCE, EVER. The stamp is written BEFORE the request, so a crash or a
+// refusal never asks again. Skipped when Passband is already the default.
 //
-// ONLY IF IT IS NOT ALREADY THE DEFAULT. Asked of Launch Services at the
-// moment of the send, by bundle id, so a person who set it in Mail's
-// settings, or from Settings here, is never asked.
+// NEVER OVER ANOTHER ONE-TIME CARD (the first-load veil, What's New, the
+// iPhone or agent ad, the share ask, the update card). If one is up when the
+// second has passed, nothing is stamped and nothing waits behind it: the next
+// launch tries again.
 //
-// WANTED IS NOT DRAWN. The card waits while a composer is open (it sits in
-// the corner the Send button is in, and the next mail is often started right
-// after the last one went) and while the sitrep's corner holds the
-// unsubscribe tray or the smart clear receipt. It comes back when they go.
-//
-// ASKED ONCE, EVER, like the other one-time cards: the stamp is written the
-// first time the card is actually DRAWN (`noteShown`), before any answer, so
-// a crash with it on screen has still asked. A card wanted and never drawn
-// (quit with a composer open) is not an ask; the next send earns it again.
-// "Not now" is an answer. Settings > Mail keeps the button for anyone who
-// changes their mind.
-//
-// NEVER ON TOP OF ANOTHER ONE-TIME CARD. A send while one is up wants
-// nothing; the next send gets the chance instead.
-//
-// "Make default" is a request: macOS may ask the person to confirm it, and it
-// can fail. What Launch Services says afterwards is the answer, re-read
-// rather than assumed.
+// Settings > Mail keeps the button for anyone who refused and changed their
+// mind.
 
 import Foundation
 import Observation
@@ -57,35 +37,24 @@ final class DefaultMailApp {
 
     nonisolated static let askedKey = "passband.defaultMail.asked"
 
-    /// `PASSBAND_FORCE_DEFAULT_MAIL_NUDGE=1` puts the card up at launch without
-    /// recording an ask, so it can be looked at without sending mail. Same
-    /// posture as the other cards' overrides: a launch environment nobody sets
-    /// by accident.
+    /// `PASSBAND_FORCE_DEFAULT_MAIL_NUDGE=1` asks at the first verified inbox
+    /// of this launch, past the stamp and without writing it, so the system's
+    /// dialog can be looked at on any install. It still skips when Passband is
+    /// already the default.
     nonisolated static let forced =
         ProcessInfo.processInfo.environment["PASSBAND_FORCE_DEFAULT_MAIL_NUDGE"] == "1"
 
-    /// `PASSBAND_FORCE_DEFAULT_MAIL_NUDGE=onboarding` runs the onboarding ask
-    /// at the first sync of any launch, past the stamp and without writing
-    /// it, so the system's dialog can be looked at without a fresh install.
-    /// It still skips when Passband is already the default.
-    nonisolated static let forcedOnboarding =
-        ProcessInfo.processInfo.environment["PASSBAND_FORCE_DEFAULT_MAIL_NUDGE"] == "onboarding"
-
-    /// How long after the inbox first shows before the system is asked.
-    nonisolated static let onboardingDelay: Duration = .seconds(1)
+    /// How long after the inbox is loaded before the system is asked.
+    nonisolated static let askDelay: Duration = .seconds(1)
 
     private let defaults: UserDefaults
     /// Launch Services' answer: is Passband the app mailto: links open in.
     /// Injected so a suite can answer without the system.
     private let probe: () -> Bool
-    private let isForced: Bool
     /// Asks the system to make Passband the default. Injected so a suite can
     /// see the call, and what was stamped when it came.
     private let request: () -> Void
-
-    /// Whether the card is WANTED: earned and not yet answered. Whether it is
-    /// drawn right now is `drawn(composerOpen:cornerOccupied:)`.
-    var showingNudge = false
+    private let isForced: Bool
 
     /// What Launch Services last said. Refreshed on `refresh()`, which the
     /// Settings row calls on appear and on every return to the app.
@@ -93,6 +62,10 @@ final class DefaultMailApp {
 
     /// The last "Make default" failed or was declined.
     private(set) var lastRequestFailed = false
+
+    /// An ask is waiting out its second, so a second caller in that window
+    /// does not queue another.
+    private var pending = false
 
     init(
         defaults: UserDefaults = .standard,
@@ -102,33 +75,17 @@ final class DefaultMailApp {
     ) {
         self.defaults = defaults
         self.probe = probe
-        self.request = request ?? { DefaultMailApp.shared.makeDefault() }
         self.isForced = forced
+        self.request = request ?? { DefaultMailApp.shared.makeDefault() }
         refresh()
-        showingNudge = forced
     }
 
-    /// THE RULE, pure. `sentFromPassband` is whether this moment follows a
-    /// send that went out; nothing else is a moment to ask at.
-    nonisolated static func earned(
-        sentFromPassband: Bool, isDefault: Bool, asked: Bool, othersShowing: Bool
+    /// THE RULE, pure: a verified connection, nothing else on screen, not
+    /// already the default, and never asked (or the preview override).
+    nonisolated static func shouldAsk(
+        verified: Bool, blocked: Bool, isDefault: Bool, asked: Bool, forced: Bool
     ) -> Bool {
-        sentFromPassband && !isDefault && !asked && !othersShowing
-    }
-
-    /// THE ONBOARDING RULE, pure: the end of a first-ever onboarding on this
-    /// Mac, over a verified connection, on an install never asked and not
-    /// already the default.
-    nonisolated static func asksDuringOnboarding(
-        firstOnboarding: Bool, verified: Bool, isDefault: Bool, asked: Bool
-    ) -> Bool {
-        firstOnboarding && verified && !isDefault && !asked
-    }
-
-    /// THE PLACEMENT RULE, pure: a wanted card is drawn only with no composer
-    /// open and nothing else in the bottom-right corner.
-    nonisolated static func drawn(wanted: Bool, composerOpen: Bool, cornerOccupied: Bool) -> Bool {
-        wanted && !composerOpen && !cornerOccupied
+        verified && !blocked && !isDefault && (forced || !asked)
     }
 
     /// The default handler's bundle id against this app's, both lowercased.
@@ -142,62 +99,43 @@ final class DefaultMailApp {
 
     var asked: Bool { defaults.bool(forKey: Self.askedKey) }
 
-    func drawn(composerOpen: Bool, cornerOccupied: Bool) -> Bool {
-        Self.drawn(wanted: showingNudge, composerOpen: composerOpen, cornerOccupied: cornerOccupied)
-    }
-
-    /// The first look at a newly connected mailbox just ended. On a first
-    /// onboarding, asks the system (no card), once ever: the stamp is written
-    /// here, before the request, and the request comes `after` later. `forced`
-    /// (the preview override) skips the first-onboarding and stamp checks and
-    /// writes nothing. Returns whether it asked.
-    @discardableResult
-    func askDuringOnboarding(
-        firstOnboarding: Bool, verified: Bool, forced: Bool = false,
-        after delay: Duration? = DefaultMailApp.onboardingDelay
-    ) -> Bool {
-        guard !FixtureMode.isEnabled || forced else { return false }
-        refresh()
-        guard
-            Self.asksDuringOnboarding(
-                firstOnboarding: firstOnboarding || forced, verified: verified,
-                isDefault: isDefault, asked: asked && !forced)
-        else { return false }
-        if !forced { defaults.set(true, forKey: Self.askedKey) }
-        guard let delay else {
-            request()
-            return true
+    /// The inbox has loaded. `after` the delay, reads `conditions` (whether
+    /// the connection is verified, and whether another one-time card is up)
+    /// and asks if the rule says so, stamping first. Nil `after` decides now.
+    /// The completion says whether it asked.
+    func askIfNeverAsked(
+        after delay: Duration? = DefaultMailApp.askDelay,
+        conditions: @escaping () -> (verified: Bool, blocked: Bool),
+        done: ((Bool) -> Void)? = nil
+    ) {
+        guard !FixtureMode.isEnabled || isForced, !pending else {
+            done?(false)
+            return
         }
+        guard let delay else {
+            done?(decide(conditions()))
+            return
+        }
+        pending = true
         Task { @MainActor in
             try? await Task.sleep(for: delay)
-            self.request()
+            self.pending = false
+            let asked = self.decide(conditions())
+            done?(asked)
         }
-        return true
     }
 
-    /// A send from Passband just went out. Wants the card if this is the
-    /// moment. The one entry point the store calls (`release`).
-    func noteSent(othersShowing: Bool) {
-        guard !FixtureMode.isEnabled, !showingNudge else { return }
+    /// The rule over this install, and the stamp written before the request.
+    private func decide(_ now: (verified: Bool, blocked: Bool)) -> Bool {
         refresh()
         guard
-            Self.earned(
-                sentFromPassband: true, isDefault: isDefault, asked: asked,
-                othersShowing: othersShowing)
-        else { return }
-        showingNudge = true
-    }
-
-    /// The card is on screen. Stamps the ask the first time; a forced card
-    /// (the preview override) stamps nothing.
-    func noteShown() {
-        guard showingNudge, !isForced, !asked else { return }
-        defaults.set(true, forKey: Self.askedKey)
-    }
-
-    /// Either answer. Never wanted again.
-    func close() {
-        showingNudge = false
+            Self.shouldAsk(
+                verified: now.verified, blocked: now.blocked, isDefault: isDefault,
+                asked: asked, forced: isForced)
+        else { return false }
+        if !isForced { defaults.set(true, forKey: Self.askedKey) }
+        request()
+        return true
     }
 
     /// Re-read the system's answer.

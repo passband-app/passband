@@ -303,7 +303,6 @@ extension TestFlightNudge {
     static func othersShowing(_ store: AppStore) -> Bool {
         ShareNudge.shared.showingNudge
             || AgentNudge.shared.showingNudge
-            || DefaultMailApp.shared.showingNudge
             || store.firstLoad.active
             || store.whatsNew.active
             || Updater.shared.phase != .idle

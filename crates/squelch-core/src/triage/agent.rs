@@ -2544,6 +2544,11 @@ mod tests {
         assert!(SYSTEM.contains("Cold outreach on first contact never takes these floors"));
         assert!(SYSTEM.contains("always null when first_contact is false"));
         assert!(SYSTEM.contains("Never state an outreach_history figure"));
+        // A first email that continues something from elsewhere is not cold,
+        // but only on the owner's own records, never the sender's say-so.
+        assert!(SYSTEM.contains("so the claim alone proves nothing"));
+        assert!(SYSTEM.contains("Inbound demand is never outreach"));
+        assert!(SYSTEM.contains("the line is drawn at fit, not at politeness or polish"));
     }
 
     fn pitch(wanted: OutreachWanted) -> MessageDecision {

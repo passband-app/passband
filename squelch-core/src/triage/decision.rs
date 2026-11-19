@@ -150,6 +150,100 @@ impl AuthAssessment {
         self.critical && self.kinds.contains(&AuthKind::AccountChange)
     }
 }
+// What a cold pitch is after. `favor_ask` is a stranger asking for the
+// owner's time or help (advice, an intro, a review) with nothing to sell.
+decision_enum!(OutreachKind {
+    Other,
+    Sales,
+    Recruiting,
+    Investor,
+    Partnership,
+    Press,
+    Services,
+    FavorAsk
+});
+// How much of the pitch was written for this owner. `personal` names
+// something specific and checkable about them; `templated` reads as personal
+// but would fit anyone in a list; `mail_merge` is a sequence that only fills
+// in a name or a company.
+decision_enum!(OutreachShape {
+    MailMerge,
+    Templated,
+    Personal
+});
+// Whether this owner would want to see this pitch, from what Passband knows
+// about them. `Unlikely` is placed for them: never FYE, never a push
+// (`OutreachAssessment::apply_gate`).
+decision_enum!(OutreachWanted {
+    Unsure,
+    Likely,
+    Unlikely
+});
+
+/// Cold outreach: mail from a stranger the owner has never written to,
+/// replied to, or been introduced to on the thread, written to get something
+/// from them. WHETHER mail is cold is the application's call (`first_contact`
+/// in the agent context, computed from stored mail, never from text); the
+/// model only says what the pitch is and whether this owner wants it, and an
+/// assessment on mail that is not first contact is dropped at commit.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutreachAssessment {
+    pub kind: OutreachKind,
+    pub shape: OutreachShape,
+    /// A follow-up in an unanswered sequence ("bumping this", "circling
+    /// back"), as opposed to a first touch.
+    pub follow_up: bool,
+    pub wanted: OutreachWanted,
+    /// Model-authored, short, never shown on /mcp.
+    pub reason: String,
+    /// Who the sender says they are, as the mail states it: their role and
+    /// their organization. UNTRUSTED (the sender wrote it); the sender
+    /// research reads it as a claim to check, never as a fact. Null when the
+    /// mail does not say.
+    pub claimed_role: Option<String>,
+    pub claimed_organization: Option<String>,
+}
+
+impl OutreachAssessment {
+    /// The highest notification importance an unwanted pitch may carry:
+    /// under the push threshold (`notify.min_importance`, 40).
+    pub const UNWANTED_MAX_IMPORTANCE: u8 = 30;
+
+    /// The application's half of outreach, run at commit after
+    /// [`normalize`](super::agent::normalize_decision):
+    ///
+    /// - Mail that is not first contact carries no assessment, whatever the
+    ///   model said: someone the owner wrote to is never "cold".
+    /// - An unwanted pitch is not FYE and never pushes, UNLESS a sender rule
+    ///   matched this mail (`has_sender_rule`): the owner's own rule outranks
+    ///   Passband's guess about what they want, and the model weighed it.
+    pub fn apply_gate(decision: &mut MessageDecision, first_contact: bool, has_sender_rule: bool) {
+        if !first_contact {
+            decision.outreach = None;
+            return;
+        }
+        let Some(outreach) = &decision.outreach else {
+            return;
+        };
+        if outreach.wanted != OutreachWanted::Unlikely || has_sender_rule {
+            return;
+        }
+        decision.attention.show_in_fye = false;
+        decision.notification.importance = decision
+            .notification
+            .importance
+            .min(Self::UNWANTED_MAX_IMPORTANCE);
+    }
+
+    /// Whether this pitch is one the sender research should look into: one
+    /// written for this owner that they might want. Mail-merge and unwanted
+    /// pitches are never researched; there is nothing to verify that changes
+    /// what the owner does.
+    pub fn worth_research(&self) -> bool {
+        self.shape == OutreachShape::Personal && self.wanted != OutreachWanted::Unlikely
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AccessAssessment {
     pub restricted: bool,
@@ -510,6 +604,12 @@ pub struct MessageDecision {
     /// every decision stored before v26 has none.
     #[serde(default)]
     pub effort: Option<EffortEstimate>,
+    /// Cold outreach (agent-triage-v28). Null for everything else, and
+    /// dropped at commit on mail that is not first contact
+    /// ([`OutreachAssessment::apply_gate`]). Defaults for the reason
+    /// `reading_kind` does.
+    #[serde(default)]
+    pub outreach: Option<OutreachAssessment>,
 }
 
 #[cfg(test)]

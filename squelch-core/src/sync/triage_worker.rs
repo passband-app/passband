@@ -357,6 +357,15 @@ pub fn snapshot(
     if let Some(relationship) = &context.relationship {
         initial["relationship"] = relationship.clone();
     }
+    // Trusted, computed from stored mail. `outreach_history` only rides
+    // first contact, and is ABSENT when nothing has been counted.
+    initial["first_contact"] = context.first_contact.into();
+    if let Some(history) = &context.outreach_history {
+        initial["outreach_history"] = history.clone();
+    }
+    if let Some(organisation) = &context.sender_organisation {
+        initial["sender_organisation"] = organisation.clone();
+    }
     ContextSnapshot {
         account_id: job.account_id,
         message_id: job.message_id,
@@ -377,6 +386,7 @@ pub fn snapshot(
         memory: Vec::new(),
         // Set by the worker from the `understanding` flag; off is main's prompt.
         understanding: false,
+        first_contact: context.first_contact,
     }
 }
 

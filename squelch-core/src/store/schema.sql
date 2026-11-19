@@ -1897,6 +1897,12 @@ CREATE TABLE IF NOT EXISTS agent_message_decisions (
 -- expression that raised on malformed JSON would make that row's INSERT fail.
 CREATE INDEX IF NOT EXISTS idx_decisions_critical ON agent_message_decisions(account_id, message_id)
     WHERE CASE WHEN json_valid(decision_json) THEN json_extract(decision_json,'$.auth.critical') END = 1;
+-- The few decisions that assessed cold outreach, for the owner's outreach
+-- history (`store::sqlite::agent_triage::outreach_history`), which runs on
+-- every first-contact triage. Same shape and the same reason as
+-- `idx_decisions_critical`; the query names EXACTLY this expression.
+CREATE INDEX IF NOT EXISTS idx_decisions_outreach ON agent_message_decisions(account_id, message_id)
+    WHERE CASE WHEN json_valid(decision_json) THEN json_type(decision_json,'$.outreach') END = 'object';
 CREATE TABLE IF NOT EXISTS agent_message_destinations (
     account_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,

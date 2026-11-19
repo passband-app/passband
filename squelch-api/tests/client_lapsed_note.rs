@@ -122,16 +122,25 @@ async fn mock_gmail_with(
     (format!("http://{addr}"), seen, handle)
 }
 
-/// The owner's Mac, paired and opened NOW.
-fn paired(store: &SqliteStore, acct: i64) {
+/// The owner's zone in most tests.
+const LA: &str = "America/Los_Angeles";
+
+/// The owner's Mac, paired and opened NOW, from `zone` (None: an app that
+/// never said where it is).
+fn paired_in(store: &SqliteStore, acct: i64, zone: Option<&str>) {
     let token = store.issue_device_token(acct, "laptop").unwrap();
     store
         .verify_device_token_from(
             &token.token,
-            Some(&ClientTag::parse("macos/0.0.21").unwrap()),
+            Some(&ClientTag::parse("macos/0.0.21").unwrap().with_zone(zone)),
         )
         .unwrap()
         .unwrap();
+}
+
+/// [`paired_in`] Los Angeles.
+fn paired(store: &SqliteStore, acct: i64) {
+    paired_in(store, acct, Some(LA));
 }
 
 /// One receipt from a shop, received at `at`, decided as a receipt that
@@ -181,8 +190,16 @@ fn receipt(store: &SqliteStore, acct: i64, n: usize, at: DateTime<Utc>) {
 }
 
 /// Twenty days on: the Mac was last open twenty days before this.
+///
+/// Pinned to 20:00 UTC, which is noon or 13:00 in Los Angeles and 15:00 or
+/// 16:00 in New York whatever the season: inside the owner's daytime, so no
+/// test depends on the hour it runs at.
 fn later() -> DateTime<Utc> {
-    Utc::now() + Duration::days(20)
+    (Utc::now() + Duration::days(20))
+        .date_naive()
+        .and_hms_opt(20, 0, 0)
+        .unwrap()
+        .and_utc()
 }
 
 fn stamp(store: &SqliteStore, acct: i64) -> Option<String> {
@@ -190,8 +207,13 @@ fn stamp(store: &SqliteStore, acct: i64) -> Option<String> {
 }
 
 fn setup(receipts: usize, gmail: &str) -> (ApiState, Arc<SqliteStore>, i64) {
+    setup_in(receipts, gmail, Some(LA))
+}
+
+/// [`setup`], with the owner's app in `zone`.
+fn setup_in(receipts: usize, gmail: &str, zone: Option<&str>) -> (ApiState, Arc<SqliteStore>, i64) {
     let (state, store, acct) = common::state_with(|store, acct| {
-        paired(store, acct);
+        paired_in(store, acct, zone);
         for n in 0..receipts {
             receipt(store, acct, n, later() - Duration::hours(2 + n as i64));
         }
@@ -328,6 +350,90 @@ async fn a_refused_insert_stays_stamped() {
         LapsedOutcome::AlreadyDone
     );
     assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// Outside the owner's daytime nothing is filed or stamped, and the same
+/// owner gets the note once their day comes round.
+#[tokio::test]
+async fn the_note_waits_for_the_owners_daytime() {
+    let (base, seen, _h) = mock_gmail(200).await;
+    let (state, store, acct) = setup(4, &base);
+    // 11:00 UTC is 03:00 in Los Angeles.
+    let night = later() - Duration::hours(9);
+    assert_eq!(
+        run_lapsed_pass(&state, night).await.unwrap(),
+        LapsedOutcome::NotNow
+    );
+    assert!(stamp(&store, acct).is_none());
+    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(
+        run_lapsed_pass(&state, later()).await.unwrap(),
+        LapsedOutcome::Filed(4)
+    );
+}
+
+/// No app has said where the owner is: never filed, at any hour.
+#[tokio::test]
+async fn an_unknown_zone_files_nothing() {
+    let (base, seen, _h) = mock_gmail(200).await;
+    let (state, store, acct) = setup_in(4, &base, None);
+    for h in [0, 6, 12, 18] {
+        let t = later() - Duration::hours(h);
+        assert_eq!(
+            run_lapsed_pass(&state, t).await.unwrap(),
+            LapsedOutcome::NotNow,
+            "{t}"
+        );
+    }
+    assert!(stamp(&store, acct).is_none());
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// An owner in New York: daytime and dates are theirs. 03:00 UTC is still
+/// the evening before in New York, after 18:00, so nothing; 20:00 UTC is
+/// their afternoon, and the note goes.
+#[tokio::test]
+async fn an_owner_in_new_york_gets_it_in_their_afternoon() {
+    let (base, seen, _h) = mock_gmail(200).await;
+    let (state, store, acct) = setup_in(4, &base, Some("America/New_York"));
+    let ny_night = later() - Duration::hours(17);
+    assert_eq!(
+        run_lapsed_pass(&state, ny_night).await.unwrap(),
+        LapsedOutcome::NotNow
+    );
+    assert!(stamp(&store, acct).is_none());
+    assert_eq!(
+        run_lapsed_pass(&state, later()).await.unwrap(),
+        LapsedOutcome::Filed(4)
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// An account address that cannot go into the note's To stops the pass
+/// before any Gmail read: the mock fails every read, so a read would have
+/// answered CheckFailed.
+#[tokio::test]
+async fn an_unusable_address_spends_no_reads() {
+    let (base, seen, _h) = mock_gmail_with(Mock {
+        post: 200,
+        get: 500,
+        ..Default::default()
+    })
+    .await;
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("not an address").unwrap();
+    paired(&store, acct);
+    for n in 0..4 {
+        receipt(&store, acct, n, later() - Duration::hours(2 + n as i64));
+    }
+    let state = ApiState::new(store.clone(), acct, common::TOKEN)
+        .with_write_test_harness(Arc::new(StubCreds), base);
+    assert_eq!(
+        run_lapsed_pass(&state, later()).await.unwrap(),
+        LapsedOutcome::Unsupported
+    );
+    assert!(stamp(&store, acct).is_none());
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 /// Mail deleted, trashed or in spam since triage saw it is never listed:

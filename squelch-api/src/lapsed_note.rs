@@ -53,8 +53,13 @@
 //! cannot use it to hide mail. `Auto-Submitted` names it for other readers.
 //!
 //! WHEN. Checked from the morning brief's worker ([`LapsedCheck`]), at most
-//! every [`CHECK_EVERY`], and only in the owner's daytime when their zone is
-//! known, so the note is new when they look rather than buried overnight.
+//! every [`CHECK_EVERY`], and only in the owner's daytime, so the note is new
+//! when they look rather than buried overnight. An owner whose zone is not
+//! known yet gets nothing until it is.
+//!
+//! NOT COUNTED AS PRESENCE: the master token and console sessions, which
+//! are operator doors on a self-hosted daemon rather than an owner reading
+//! mail. A self-hoster who reads only through those can be sent the note.
 //!
 //! LOGS. Outcomes and a count, never a sender, a subject or an address.
 
@@ -166,10 +171,11 @@ pub fn is_lapsed(
         .is_some_and(|last| now - last >= chrono::Duration::days(IDLE_DAYS))
 }
 
-/// Whether `now` is in the owner's daytime. An unknown zone is any time: the
-/// note waits for nobody's clock it cannot read.
+/// Whether `now` is in the owner's daytime. An unknown zone is never: the
+/// note waits until some app or calendar has said where the owner is, so
+/// "daytime" always means theirs.
 pub fn in_local_hours(now: DateTime<Utc>, zone: Tz, known: bool) -> bool {
-    !known || LOCAL_HOURS.contains(&now.with_timezone(&zone).hour())
+    known && LOCAL_HOURS.contains(&now.with_timezone(&zone).hour())
 }
 
 /// One listed message, as the note prints it.
@@ -235,16 +241,19 @@ fn month(m: u32) -> &'static str {
     ][(m.clamp(1, 12) - 1) as usize]
 }
 
-/// A snippet with what a reader could tap taken out: links (anything with
-/// `://`, a `www.` or a bare domain), email addresses, and any run of six or
-/// more digits, separators allowed between them, which covers phone numbers
-/// as well as codes, PINs and locker numbers. The snippet is the start of a
+/// A snippet with what a reader could tap or redeem taken out: links
+/// (anything with `://`, a `www.` or a bare domain, with or without a path,
+/// query, fragment or port), email addresses, codes of eight or more letters
+/// and digits mixed (gift cards, claim codes), and any run of six or more
+/// digits, separators allowed between them (including Unicode dashes, the
+/// minus sign and the no-break and thin spaces), which covers phone numbers
+/// as well as numeric codes, PINs and locker numbers. The snippet is the start of a
 /// stranger's body, and the note says Passband handled these: it must never
 /// hand the owner a callback number.
 pub fn scrub_snippet(raw: &str) -> String {
     let words: Vec<&str> = raw
         .split_whitespace()
-        .filter(|w| !looks_like_link(w))
+        .filter(|w| !looks_like_link(w) && !looks_like_code(w))
         .collect();
     strip_long_numbers(&words.join(" "))
         .split_whitespace()
@@ -258,9 +267,13 @@ fn looks_like_link(word: &str) -> bool {
     if lower.contains("://") || lower.starts_with("www.") || lower.contains('@') {
         return true;
     }
-    // A bare domain: `name.tld` or `name.tld/path`, the TLD two or more
-    // letters. `e.g.` and a sentence's full stop are not.
-    let host = lower.split('/').next().unwrap_or("");
+    // A bare domain: `name.tld`, then anything (a path, `?query`, `#frag`,
+    // `:port`): the host ends at the first character a host cannot hold.
+    // The TLD is two or more letters, so `e.g.` and a full stop are not.
+    let host = lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '.'))
+        .next()
+        .unwrap_or("");
     let mut parts = host.rsplitn(2, '.');
     match (parts.next(), parts.next()) {
         (Some(tld), Some(name)) => {
@@ -277,17 +290,51 @@ fn looks_like_link(word: &str) -> bool {
     }
 }
 
-/// Remove every span of digits and phone-style separators (space, `-`,
-/// `.`, `(`, `)`, `+`, `/`) that starts and ends with a digit and holds six
-/// or more digits.
+/// A code to redeem or quote: after outer punctuation, only letters, digits
+/// and `-`, at least eight letters and digits, and BOTH kinds present. An
+/// ordinary word has no digit, and a number alone is [`strip_long_numbers`]'s.
+fn looks_like_code(word: &str) -> bool {
+    let w = word.trim_matches(|c: char| !c.is_alphanumeric());
+    let alnum = w.chars().filter(|c| c.is_alphanumeric()).count();
+    alnum >= 8
+        && w.chars().all(|c| c.is_alphanumeric() || c == '-')
+        && w.chars().any(|c| c.is_numeric())
+        && w.chars().any(|c| c.is_alphabetic())
+}
+
+/// Remove every span of digits and phone-style separators that starts and
+/// ends with a digit and holds six or more digits. Separators: space, the
+/// no-break and thin spaces, `-` and the Unicode dashes and minus sign, `.`,
+/// `(`, `)`, `+`, `/`.
 fn strip_long_numbers(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
-    let sep = |c: char| matches!(c, ' ' | '-' | '.' | '(' | ')' | '+' | '/');
+    let sep = |c: char| {
+        matches!(
+            c,
+            ' ' | '-'
+                | '.'
+                | '('
+                | ')'
+                | '+'
+                | '/'
+                | '\u{a0}'
+                | '\u{2009}'
+                | '\u{202f}'
+                | '\u{2010}'
+                | '\u{2011}'
+                | '\u{2012}'
+                | '\u{2013}'
+                | '\u{2014}'
+                | '\u{2212}'
+        )
+    };
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if !(c.is_ascii_digit() || c == '+' || c == '(') {
+        // A span may open on a digit or on any separator but a space (a
+        // `+`, a `(`, a dash or a minus sign ahead of the number goes too).
+        if !(c.is_ascii_digit() || (sep(c) && c != ' ')) {
             out.push(c);
             i += 1;
             continue;
@@ -459,14 +506,7 @@ pub fn build_rfc822(
     date: DateTime<Utc>,
 ) -> Result<Vec<u8>, WriteError> {
     let addr = mailbox.trim();
-    let header_safe = |s: &str| {
-        !s.is_empty()
-            && s.is_ascii()
-            && !s
-                .chars()
-                .any(|c| c.is_control() || matches!(c, '<' | '>' | ',' | '"' | ' '))
-    };
-    if !header_safe(addr) || !addr.contains('@') {
+    if !usable_mailbox(addr) {
         return Err(WriteError::Invalid("mailbox address unusable".into()));
     }
     if !message_id.is_ascii() || message_id.chars().any(|c| c.is_control()) {
@@ -491,6 +531,24 @@ pub fn build_rfc822(
     Ok(out.into_bytes())
 }
 
+/// Whether `mailbox` can go into the To header as written: ASCII, one `@`
+/// with something either side, and nothing that could end or split a
+/// header. Checked before any Gmail read is spent, and again by
+/// [`build_rfc822`].
+pub fn usable_mailbox(mailbox: &str) -> bool {
+    let addr = mailbox.trim();
+    let mut halves = addr.split('@');
+    let (Some(local), Some(domain), None) = (halves.next(), halves.next(), halves.next()) else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && addr.is_ascii()
+        && !addr
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '<' | '>' | ',' | '"' | ' ' | ';' | ':'))
+}
+
 /// What a pass did, for the log and for tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LapsedOutcome {
@@ -500,7 +558,8 @@ pub enum LapsedOutcome {
     NeverPaired,
     /// A client was present within [`IDLE_DAYS`].
     Active,
-    /// Outside the owner's daytime; the check does not count.
+    /// Outside the owner's daytime, or their zone is not known yet; the
+    /// check does not count.
     NotNow,
     /// Not a Gmail mailbox (see the module docs).
     Unsupported,
@@ -570,6 +629,11 @@ pub async fn run_lapsed_pass(
     .await?;
     if candidates.len() < MIN_ITEMS {
         return Ok(LapsedOutcome::TooFew(candidates.len()));
+    }
+    // An address that cannot be written into the note's To is known before
+    // a single Gmail read is spent on checking the list.
+    if !usable_mailbox(&mailbox) {
+        return Ok(LapsedOutcome::Unsupported);
     }
 
     // A disconnected account (a revoked grant, a refresh that fails) is
@@ -810,6 +874,25 @@ mod tests {
                 "Thanks e.g. for the order. See you",
                 "Thanks e.g. for the order. See you",
             ),
+            // A bare domain with a query, fragment, port or path after it.
+            ("Go to shop.example?ref=x now", "Go to now"),
+            ("Go to shop.example#deal now", "Go to now"),
+            ("Go to shop.example:8443/pay now", "Go to now"),
+            ("Go to Shop.Example/claim?id=1. Thanks", "Go to Thanks"),
+            // Unicode dashes, the minus sign and the no-break and thin spaces.
+            ("Call 800\u{2010}555\u{2011}0199 now", "Call now"),
+            ("Call 800\u{2013}555\u{2014}0199 now", "Call now"),
+            ("Ref \u{2212}123\u{2009}456 kept? no", "Ref kept? no"),
+            ("PIN 12\u{a0}34\u{202f}56 inside", "PIN inside"),
+            // Codes mixing letters and digits, eight or more.
+            ("Gift code ABCD-1234-EFGH inside", "Gift code inside"),
+            ("Claim X7K9P2Q4 today", "Claim today"),
+            ("Use code SAVE20 at checkout", "Use code SAVE20 at checkout"),
+            (
+                "Your unforgettable extraordinary order",
+                "Your unforgettable extraordinary order",
+            ),
+            ("Model A1B2C3 shipped", "Model A1B2C3 shipped"),
         ];
         for (raw, want) in cases {
             assert_eq!(scrub_snippet(raw), want, "{raw}");
@@ -817,13 +900,17 @@ mod tests {
     }
 
     #[test]
-    fn local_hours_gate_only_a_known_zone() {
+    fn local_hours_need_a_known_zone() {
         let la: Tz = "America/Los_Angeles".parse().unwrap();
         // 09:00 PST is in, 08:59 and 18:00 are out.
         assert!(in_local_hours(at("2026-11-18T17:00:00Z"), la, true));
         assert!(!in_local_hours(at("2026-11-18T16:59:00Z"), la, true));
         assert!(!in_local_hours(at("2026-11-19T02:00:00Z"), la, true));
-        assert!(in_local_hours(at("2026-11-19T02:00:00Z"), la, false));
+        // An unknown zone is never daytime, at any hour.
+        for h in 0..24 {
+            let t = at("2026-11-18T00:00:00Z") + chrono::Duration::hours(h);
+            assert!(!in_local_hours(t, Tz::UTC, false), "{t}");
+        }
     }
 
     // ---- the template ----------------------------------------------------
@@ -1102,6 +1189,26 @@ mod tests {
             parsed.from().unwrap().first().unwrap().name(),
             Some("Passband")
         );
+    }
+
+    #[test]
+    fn a_usable_mailbox_is_one_plain_address() {
+        assert!(usable_mailbox("me@example.com"));
+        assert!(usable_mailbox(" me+tag@example.com "));
+        for bad in [
+            "",
+            "me",
+            "@example.com",
+            "me@",
+            "a@b@example.com",
+            "me@example.com\r\nBcc: x@y.example",
+            "Me <me@example.com>",
+            "a b@example.com",
+            "m\u{e9}@example.com",
+            "me@example.com;x@y.example",
+        ] {
+            assert!(!usable_mailbox(bad), "{bad:?}");
+        }
     }
 
     #[test]

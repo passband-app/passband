@@ -290,3 +290,36 @@ fn a_candidate_names_its_provider_id() {
     let got = store.lapsed_note_candidates(acct, week_ago()).unwrap();
     assert_eq!(got[0].provider_id, "g-id");
 }
+
+/// The archive tier (old mail, and the notes Passband files itself) is never
+/// listed.
+#[test]
+fn archive_tier_mail_is_out() {
+    let (store, acct) = store();
+    receipt(&store, acct, CONTROL, SHOP, 2);
+    let old = receipt(&store, acct, "archived", SHOP, 1);
+    store
+        .lock()
+        .unwrap()
+        .execute("UPDATE messages SET is_archive = 1 WHERE id = ?1", [old])
+        .unwrap();
+    assert_eq!(subjects(&store, acct), vec![CONTROL]);
+}
+
+/// Mail whose access check is still pending might be a login code: out,
+/// even with a receipt decision on it.
+#[test]
+fn mail_still_pending_its_access_check_is_out() {
+    let (store, acct) = store();
+    receipt(&store, acct, CONTROL, SHOP, 2);
+    let pending = receipt(&store, acct, "pending-access", SHOP, 1);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_message_state SET access = 'pending' WHERE message_id = ?1",
+            [pending],
+        )
+        .unwrap();
+    assert_eq!(subjects(&store, acct), vec![CONTROL]);
+}

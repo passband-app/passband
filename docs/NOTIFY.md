@@ -499,7 +499,7 @@ duplicate), and one read for the eval query,
 
 ### 11.5 The fast lane
 
-New module `squelch-core/src/sync/notify_lane.rs`. `NotifyLane` is an
+New module `crates/squelch-core/src/sync/notify_lane.rs`. `NotifyLane` is an
 `Arc`-held struct built once by `SyncEngine::new` from clones of what it needs
 (store `Arc`, the reqwest client, `NotifyConfig`, `stage1.known_contact_importance`,
 the resolved LLM if any, `SyncMetrics`, `account_id`) plus a
@@ -507,7 +507,7 @@ the resolved LLM if any, `SyncMetrics`, `account_id`) plus a
 `Mutex<Option<Instant>>` "disabled until". `ResolvedLlm` is not `Clone`
 (deliberately no `Debug` either, it holds the key); give it a manual `Clone`
 impl, and nothing else. The gateway needs the model id qualified exactly as
-`squelch-api/src/assistant.rs` does for the assistant:
+`crates/squelch-api/src/assistant.rs` does for the assistant:
 `if llm::is_gateway_url(url) { llm::qualify_gateway_model(&cfg.model) }`, and
 that qualified id is what `model_used` records.
 
@@ -577,7 +577,7 @@ The seed's tier and deadline decide the event's *kind* through the unchanged
 only *importance* and *one_line*. Structure answers "what shape", the model
 answers "how much and what to say".
 
-**`notify_llm`** (`squelch-core/src/triage/notify_llm.rs`): its own static
+**`notify_llm`** (`crates/squelch-core/src/triage/notify_llm.rs`): its own static
 system prompt (recall-biased, Stage-1's importance anchors verbatim, the
 one_line rules verbatim including the no-em-dash rule, and
 `stage1_llm::TRUST_RULE` appended LAST), reusing `stage2::build_user_message`

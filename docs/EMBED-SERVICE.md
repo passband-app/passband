@@ -36,7 +36,7 @@ the code; the file named is where to look.
   archive tier can grow one tenant's database to about 4 GB.
 - **No cross-request batching. One forward pass per request.** §2's "Two
   lanes" had a 10 ms coalescing window that merged waiting requests into one
-  pass, and it is gone (`squelch-embed/src/coalescer.rs`, which keeps the name
+  pass, and it is gone (`crates/squelch-embed/src/coalescer.rs`, which keeps the name
   and is now a two-lane queue in front of one worker). Merging was a side
   channel between tenants: a pass pads every text to the longest one in it, so
   how long tenant B's request took said something about the token length of
@@ -50,7 +50,7 @@ the code; the file named is where to look.
   that. Throughput under load is unremeasured since the change.
 - **Every queued request has a deadline, under the client's.** 4.5 s
   interactive and 25 s backfill (see `INTERACTIVE_DEADLINE` and
-  `BACKFILL_DEADLINE` in `squelch-embed/src/protocol.rs`), each just under the
+  `BACKFILL_DEADLINE` in `crates/squelch-embed/src/protocol.rs`), each just under the
   daemon's own 5 s and 30 s timeouts, which `RemoteEmbedder` takes from the
   same file. The deadline is for a request's pass to START: one still queued
   at it is dropped unrun and counted `abandoned`, and a caller still waiting
@@ -70,7 +70,7 @@ the code; the file named is where to look.
   the accept loop stops accepting and the kernel's backlog holds the rest).
   Those three are what a flood can hold, whoever sends it.
 - **`outcome` gained `not_ready`, `unauthorized` and `abandoned`**
-  (`squelch-embed/src/metrics.rs`). §4 listed `ok`, `rejected`, `queue_full`,
+  (`crates/squelch-embed/src/metrics.rs`). §4 listed `ok`, `rejected`, `queue_full`,
   `error`. `abandoned` counts a request whose caller hung up, or whose deadline
   passed, before its pass ran (skipped, never run), or whose caller hung up
   before its vectors came back.
@@ -78,7 +78,7 @@ the code; the file named is where to look.
   (decided before the body is read), a 429 for want of a body permit, or a body
   that does not parse or carries no texts.
 - **Status codes.** An oversized body is a 400 `bad_request`, not a 413, and a
-  body that takes longer than 10 s to arrive is a 408 (`squelch-embed/src/http.rs`).
+  body that takes longer than 10 s to arrive is a 408 (`crates/squelch-embed/src/http.rs`).
   A 401 `unauthorized` exists because the token does. Every error body is one
   closed word from `protocol.rs`.
 - **A dead worker takes the pod out of service.** If the inference thread
@@ -93,7 +93,7 @@ the code; the file named is where to look.
   failed parse) could carry text. A test drives a panic with a canary in it
   and fails if the canary reaches the line the hook writes.
 - **The process runs as uid 10003**, not the tenants' 10001 or the warden's
-  10002, in both `Dockerfile.embed` and `65-embed.yaml`, so where user
+  10002, in both `crates/squelch-embed/Dockerfile` and `65-embed.yaml`, so where user
   namespaces are off a tenant daemon and the embedder are still different
   users on the node.
 - **Timeouts on the server are header read and body read, 10 s each, and
@@ -105,7 +105,7 @@ the code; the file named is where to look.
 - **`/healthz` is on both ports.** §2 put it on 9464 only. It is also on 8850,
   because the daemon's one startup probe goes through the Service, which carries
   only 8850. The kubelet's probes use 9464.
-- **Weights are fetched by `curl` in `Dockerfile.embed`, not by the binary.**
+- **Weights are fetched by `curl` in `crates/squelch-embed/Dockerfile`, not by the binary.**
   A native build stage pulls the five files fastembed reads from
   `Xenova/bge-small-en-v1.5` at pinned revision `ea104dac`, checks each against
   a pinned sha256, and lays them out as the hf-hub cache. The binary refuses to
@@ -116,7 +116,7 @@ the code; the file named is where to look.
   32 characters or still holding the example Secret's placeholder, and refuses
   to start with `HF_HOME` set (fastembed would read it in place of the baked
   cache).
-- **Backoff opens on more than 429 and 503.** `squelch-core/src/sync/embed_backoff.rs`
+- **Backoff opens on more than 429 and 503.** `crates/squelch-core/src/sync/embed_backoff.rs`
   opens a window on any transient failure: 408, 429, 503 and other 5xx, a
   timeout, a refused or failed connection. 5 s doubling to 5 min, `Retry-After`
   as a floor (capped at 5 min where it is parsed), reset on the first success.
@@ -128,7 +128,7 @@ the code; the file named is where to look.
   sooner sends the same request to the same refusal, and every tenant of a
   fleet with a wrong token doing that every tick is a flood of 401s. Local
   embedder errors never open a window and keep the retry-next-tick behaviour.
-- **The client is pinned to the configured host** (`squelch-core/src/embed/remote.rs`).
+- **The client is pinned to the configured host** (`crates/squelch-core/src/embed/remote.rs`).
   Redirects are disabled and proxy environment variables are ignored, because
   either would send mail text somewhere nobody configured. The pooled idle
   timeout is 5 s, under the server's 10 s idle close.
@@ -156,7 +156,7 @@ the code; the file named is where to look.
   ingest always stores `Sensitivity::Normal`, and for a while the only embed
   gate was provider spam, so login codes were embedded like any other mail.
   The gate as built is `embeddable_mail_sql!`
-  (`squelch-core/src/store/sqlite/mod.rs`): not spam, not known sealed (an auth
+  (`crates/squelch-core/src/store/sqlite/mod.rs`): not spam, not known sealed (an auth
   decision, a restriction by the model or a person, the legacy column), and
   either a stored decision for the message's CURRENT content with access
   settled, or the owner's own mail once its access check has settled and did
@@ -236,7 +236,7 @@ and CPU for the Gmail poll loops.
 ### The unit: a new crate and its own image
 
 `squelch-embed`, a new workspace member with one small binary, built by a new
-`Dockerfile.embed`. The alternative was a `squelchd embed-serve` subcommand
+`crates/squelch-embed/Dockerfile`. The alternative was a `squelchd embed-serve` subcommand
 reusing the daemon image, which keeps the image count at one. Two reasons it
 loses:
 
@@ -249,7 +249,7 @@ loses:
    mounts no credential, and has no Gmail or LLM client on any route. It
    therefore does **not** link `squelch-core`, which pulls `rusqlite`,
    `sqlite-vec`, `keyring-core`, `age`, `oauth2`, `mail-parser`, `ammonia` and
-   `reqwest` (`squelch-core/Cargo.toml:13-49`) and makes that sentence
+   `reqwest` (`crates/squelch-core/Cargo.toml:13-49`) and makes that sentence
    unprovable to whoever audits it. Depend on `fastembed` directly, or put the
    `Embedder` trait in a leaf crate both sides use. Linking is not reachability,
    but the audit is cheaper when the two agree.
@@ -303,7 +303,7 @@ the first draft assumed.
 **Timeouts, both ends.** `RemoteEmbedder` sets a 2 s connect timeout and a
 request timeout (5 s for one text, 30 s for a batch), and it is not optional: the
 embed call is local CPU work inside `spawn_blocking` today
-(`squelch-core/src/sync/mod.rs:1304`) and becomes a network call at that exact
+(`crates/squelch-core/src/sync/mod.rs:1304`) and becomes a network call at that exact
 site, where unbounded means a blocking-pool thread parked forever on a half-open
 connection, one per poll tick, until the pool is gone and the daemon has stopped
 syncing. The server sets read, write and header timeouts of the same order so a
@@ -317,7 +317,7 @@ about a successful one.
 
 - **`MAX_TEXTS_PER_CALL = 8`.** The daemon's largest batch after PR #148 is
   `embed.backfill_batch`, whose default drops from 64 to 8
-  (`squelch-core/src/config.rs:782` on that branch); ingest and query send one
+  (`crates/squelch-core/src/config.rs:782` on that branch); ingest and query send one
   text each. A wire bound that forces the daemon to re-chunk drifts from the
   daemon's config, so the wire takes the daemon's number.
 - **`INFERENCE_BATCH = 8`. This is the memory bound.** From §1, batch-8 at 256
@@ -336,10 +336,10 @@ about a successful one.
   the coalescer grows a splitter; today it must not have one.
 - **`MAX_CHARS_PER_TEXT = 8192`**, and a 1 MB body limit: a sanity bound, not a
   product decision. Ingest and backfill truncate to `embed.max_chars` (1000 after
-  #144) through `message_embed_text` (`squelch-core/src/sync/mod.rs:1199` and
-  `:1350`). **Queries do not.** `squelch-api/src/handlers.rs:804` hands the raw
+  #144) through `message_embed_text` (`crates/squelch-core/src/sync/mod.rs:1199` and
+  `:1350`). **Queries do not.** `crates/squelch-api/src/handlers.rs:804` hands the raw
   search term to `hybrid_search`, which calls `embedder.embed(query_text)`
-  untruncated (`squelch-core/src/store/sqlite/search.rs:201`); #144 says so out
+  untruncated (`crates/squelch-core/src/store/sqlite/search.rs:201`); #144 says so out
   loud, because today `max_tokens` alone bounds a long query. So `RemoteEmbedder`
   truncates to `max_chars` client-side, **and** the service truncates rather than
   rejecting on length: a search box is where a user can paste anything, and a 400
@@ -381,19 +381,19 @@ node.
 
 ## 3. The daemon side
 
-A `RemoteEmbedder` in `squelch-core/src/embed/`, implementing the existing
+A `RemoteEmbedder` in `crates/squelch-core/src/embed/`, implementing the existing
 `Embedder` trait. `embed` posts one text, `embed_batch` posts up to
 `MAX_TEXTS_PER_CALL` per call and chunks past that, both truncating to
 `max_chars` first, and `dims` returns the configured 384 without a network call.
 
 **Because `dims` is a constant, the echoed `dims` is what must be checked.**
 `SqliteStore::attach_embedder` compares `embedder.dims()` to `VEC_DIMS`
-(`squelch-core/src/store/sqlite/mod.rs:192`), which against a constant is 384 ==
+(`crates/squelch-core/src/store/sqlite/mod.rs:192`), which against a constant is 384 ==
 384 and proves nothing about what the service returns. So `RemoteEmbedder`
 **rejects any response whose `dims`, or whose vector length, disagrees with its
 configured dims**, before the vector reaches the store. The vec0 width checks in
 `knn_by_vector` and `upsert_message_vector`
-(`squelch-core/src/store/sqlite/search.rs:143` and `:504`) are the last line and
+(`crates/squelch-core/src/store/sqlite/search.rs:143` and `:504`) are the last line and
 do catch it, but as a per-row error mid-backfill, which is a bad place to learn
 the service was rebuilt on another model.
 
@@ -426,7 +426,7 @@ load-bearing twice after PR #148, which makes `embedder_settled` a
 waits on through `SyncEngine::with_embedder_gate`. The gate waits for **the
 attempt, not for success**, opening on a failed init exactly as on a good one and
 bounded by `EMBEDDER_GATE_CEILING`, 15 minutes
-(`squelch-core/src/sync/mod.rs:123`); with a remote embedder the attempt is one
+(`crates/squelch-core/src/sync/mod.rs:123`); with a remote embedder the attempt is one
 `/healthz` request, so it opens in milliseconds rather than after a 126 MB model
 download, which is the case it was written for.
 
@@ -448,7 +448,7 @@ Failure semantics are today's local-failure semantics, unchanged:
 
 **A 429 needs backoff, because nothing honours `Retry-After` today.** A stopped
 pass resumes on the next poll tick and `sync.poll_secs` defaults to **5**
-(`squelch-core/src/config.rs:206`), so a 429'd fleet re-posts every five seconds
+(`crates/squelch-core/src/config.rs:206`), so a 429'd fleet re-posts every five seconds
 per tenant: a service that just said "I am full", asked again twelve times a
 minute by everyone. The daemon-side PR adds exponential backoff on 429 and 503 in
 the sync engine (5 s, doubling to a few minutes, reset on success), with
@@ -464,7 +464,7 @@ sees every message Stage 2 triages, and `docs/HOSTED.md` says so. This is a
 second such component with a narrower job.
 
 **The sealed-content invariant is structural, and store-side.** The gate is
-`embeddable_mail_sql!` (`squelch-core/src/store/sqlite/mod.rs`), asked at
+`embeddable_mail_sql!` (`crates/squelch-core/src/store/sqlite/mod.rs`), asked at
 ingest, in `messages_missing_vectors` and `translations_missing_vectors`, on the
 translation path, and again at the write, not in the embedder. Sealed is the
 triage decision (auth, restricted), a person's restriction or the legacy
@@ -488,7 +488,7 @@ triage is what decides auth.
   tenant B learns from hit latency that tenant A received a byte-identical
   message. So no cache, and no in-batch dedup either (the thing a coalescer
   naturally invites), for the same reason and because it saves nothing.
-- **Never attach a tenant identifier to metrics.** `squelch-core/src/metrics.rs`
+- **Never attach a tenant identifier to metrics.** `crates/squelch-core/src/metrics.rs`
   is the standard: closed label sets resolved from enums, never from data. Here
   that is unlabelled totals plus closed `outcome` (`ok`, `rejected`,
   `queue_full`, `error`) and `lane` labels. A per-tenant counter would put the
@@ -535,7 +535,7 @@ one from becoming durable.
 the node and TLS means a certificate to mint, rotate and expire on a path whose
 only observer would already hold the node's network namespace and could read the
 SQLite files directly. Compare `SQUELCH_WARDEN_LLM_BASE_URL`, which the warden's
-validator **requires** to be https (`squelch-warden/src/config.rs:880`) and
+validator **requires** to be https (`crates/squelch-warden/src/config.rs:880`) and
 correctly: Bifrost is remote and a virtual key crosses the public internet. This
 service is neither, so `SQUELCH_WARDEN_EMBED_URL`'s validator is the mirror image
 and should say so at the check: `http://` is allowed **because** the destination
@@ -671,7 +671,7 @@ those are per-process by definition. **It does not address the active floor**,
 because the 300-500 MB is weights plus arena high-water mark and this removes at
 best the 126 MB of weights. And **the init container copies the weights today**:
 `SEED_SCRIPT` does `cp -r /models /data/.local/share/squelch/models`
-(`squelch-warden/src/objects.rs:317`) because the root filesystem is read-only
+(`crates/squelch-warden/src/objects.rs:317`) because the root filesystem is read-only
 and fastembed expects to own its cache directory, so every tenant has its own
 file and the page cache holds N copies. Sharing needs fastembed to read from the
 shared mount, a change to its cache handling and not a flag.
@@ -705,7 +705,7 @@ Before either, run the §8 spike: cheap, and it can move the trigger.
 behaviour until the last:
 
 1. **`squelch-embed`, the crate.** Binary, two-lane coalescer, bounds, timeouts,
-   both listeners, `Dockerfile.embed`, CI build, weights baked, no `squelch-core`
+   both listeners, `crates/squelch-embed/Dockerfile`, CI build, weights baked, no `squelch-core`
    dependency. Tests: over-length truncation rather than 400, 429 at lane-full,
    positional ordering under coalescing, an interactive request overtaking a
    queued backfill, and a metrics test asserting the label set is closed and

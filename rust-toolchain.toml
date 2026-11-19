@@ -5,8 +5,7 @@
 # local 1.94 does not). Bump this deliberately, fixing whatever the new clippy
 # flags in the same commit.
 #
-# THE IMAGES BUILD WITH THIS TOOLCHAIN TOO. Every Rust Dockerfile (the root one,
-# Dockerfile.broker, Dockerfile.control, Dockerfile.warden, squelchd/Dockerfile)
+# THE IMAGES BUILD WITH THIS TOOLCHAIN TOO. Every Rust Dockerfile (crates/*/Dockerfile)
 # copies this file into its builder and runs the same no-arg `rustup toolchain
 # install` ci.yml does, so cargo in the image runs the compiler CI tested rather
 # than whatever stable the `rust:1-slim-*` tag carried that day. (Pinning the

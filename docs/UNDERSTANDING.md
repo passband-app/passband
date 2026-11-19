@@ -13,7 +13,7 @@ the ledger yet: it reads `contacts`, `senders`, `send_groups`, calendar guests
 and the owner's replies through the `ProfileInputSource` seam
 (`triage/profile.rs`), and a `person` address is checked against `contacts`
 and `senders`. The seam it fills is `MemoryContextProvider` in
-`squelch-core/src/triage/context.rs` (TRIAGE-CODE-DESIGN.md §4, "Future
+`crates/squelch-core/src/triage/context.rs` (TRIAGE-CODE-DESIGN.md §4, "Future
 memory seam"), now `triage::memory::StoreMemoryContext`. Issue #213 owns the
 explicit-feedback UX and lands as §4 below.
 

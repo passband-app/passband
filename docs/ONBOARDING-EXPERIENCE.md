@@ -65,7 +65,7 @@ The experience starts with relief, then opens onto the person's own mail:
   again for the new one.
 - **Present means running.** The daemon meets its inbox count before it
   extends the walk by Sent (`catchup_begin` then `catchup_begin_extend` in
-  `squelch-core/src/sync/mod.rs`), so `catch_up` with done equal to total is a
+  `crates/squelch-core/src/sync/mod.rs`), so `catch_up` with done equal to total is a
   walk still going: the bar shows full with "finishing up…", and the veil
   stays. Finished is `catch_up` absent. `Lib/FirstLoadRule.swift` holds this,
   pinned by `Tests/FirstLoadRuleTests.swift`.

@@ -1,0 +1,62 @@
+# Builds squelch-warden — the in-cluster tenant provisioner for hosted
+# Passband. Unlike the other three images in this repo, this one does not run on
+# shared infrastructure: it runs as a pod on the k3s box, with a ServiceAccount
+# scoped to one namespace. See deploy/hosted/SETUP.md.
+#
+# The build context must be the workspace root: squelch-warden is a workspace
+# member and cargo needs the root manifest + lockfile to resolve it.
+#
+# Bookworm is fine here, unlike the squelchd and control images: the warden
+# does NOT link squelch-core, so there is no ort, no onnxruntime, and no
+# glibc 2.38 floor. It links axum, kube-rs and age, and nothing else.
+
+FROM rust:1-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37 AS chef
+WORKDIR /build
+
+# cargo-chef, so the dependency compile (no ONNX here, but still most of this
+# build) is its own layer keyed on the dependency graph alone. A plain `COPY Cargo.toml
+# Cargo.lock` + `cargo build` cannot cache it across releases: every daemon tag
+# bumps the workspace version, which rewrites both files. chef's recipe masks
+# the workspace crates' own versions, so a release that changes no dependency
+# reuses the cooked layer from the registry cache and compiles only our crates.
+# Installed before the toolchain COPY so a toolchain bump does not reinstall it.
+RUN cargo install cargo-chef --locked --version 0.1.78
+
+# The compiler is rust-toolchain.toml's, not the image's; see that file's
+# header for why, and for what a bump of it reaches.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --locked -p squelch-warden --recipe-path recipe.json
+COPY --from=planner /build ./
+# The target dir is deleted in the same layer, so the layer the registry cache
+# re-uploads every tag is the binary, not gigabytes of build tree.
+RUN cargo build --release --locked -p squelch-warden \
+    && cp target/release/squelch-warden /squelch-warden \
+    && rm -rf target
+
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+# rustls everywhere, so the only runtime need is CA roots. The warden's one
+# outbound connection is to the in-cluster API server, whose certificate is
+# signed by the cluster CA that kube-rs reads from the ServiceAccount mount.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /squelch-warden /usr/local/bin/squelch-warden
+
+# No entrypoint script and no privileged start: the warden writes nothing to
+# disk, so there is no volume to chown, and the manifest runs it as a fixed
+# non-root uid with a read-only root filesystem.
+USER 10002:10002
+
+EXPOSE 8852
+
+ENTRYPOINT ["/usr/local/bin/squelch-warden"]

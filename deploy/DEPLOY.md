@@ -290,10 +290,10 @@ way to consent on a host with no browser. It parks one Google authorization code
 per session, in memory, for ten minutes. It holds no OAuth client credentials and
 no tokens: the code it parks is useless without the PKCE verifier, which never
 leaves the daemon. Wire contract: [../docs/BROKER.md](../docs/BROKER.md);
-operational reference: [../squelch-broker/README.md](../squelch-broker/README.md).
+operational reference: [../crates/squelch-broker/README.md](../crates/squelch-broker/README.md).
 
-It is its own service with its own image, `Dockerfile.broker` at the repo root,
-not another copy of the APNs relay (the root `Dockerfile`). The two share a
+It is its own service with its own image, `crates/squelch-broker/Dockerfile`,
+not another copy of the APNs relay (`crates/squelch-relay/Dockerfile`). The two share a
 posture and nothing else, and must not share a service or an image. Whatever
 platform runs it, check that the image it built is the broker's: a green deploy
 of the wrong Dockerfile serves the wrong binary with no error anywhere.
@@ -302,7 +302,7 @@ of the wrong Dockerfile serves the wrong binary with no error anywhere.
 
 | Need | Value |
 |---|---|
-| Image | `Dockerfile.broker`. Its entrypoint binds `0.0.0.0:${PORT:-8851}`, so it listens on 8851 unless the platform injects `PORT`. |
+| Image | `crates/squelch-broker/Dockerfile`. Its entrypoint binds `0.0.0.0:${PORT:-8851}`, so it listens on 8851 unless the platform injects `PORT`. |
 | Public HTTPS host | `auth.passband.email` is the planned one. TLS is terminated in front of the listener (load balancer or reverse proxy); the listener itself speaks plain HTTP. |
 | Health check | `GET /healthz`, unauthenticated and outside every rate limiter, so it answers while a client is being throttled. |
 | Restart policy | Restart on failure. A restart drops every pending consent, which is the design: the recovery is re-running `squelchd auth`. |
@@ -361,7 +361,7 @@ then polls until you finish consent.
 **Locally, before you push it anywhere**
 
 ```sh
-docker build -f Dockerfile.broker -t squelch-broker .
+docker build -f crates/squelch-broker/Dockerfile -t squelch-broker .
 docker run --rm -p 8851:8851 \
   -e SQUELCH_BROKER_PUBLIC_URL=http://127.0.0.1:8851 squelch-broker
 ```

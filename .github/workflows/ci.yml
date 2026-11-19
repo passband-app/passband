@@ -4,10 +4,9 @@
 # this workflow never pushes anything.
 #
 # Path-filtered so a client-only or docs-only PR does not build the workspace.
-# The filter is the workspace's real input set: every member crate (all named
-# squelch-* or squelchd; the glob also catches a crate added later without
-# anyone editing this list, and would catch any squelch-* directory, crate or
-# not), the two Cargo manifests, the toolchain pin, and the hosted deploy
+# The filter is the workspace's real input set: every member crate (all under
+# crates/; the glob also catches a crate added later without anyone editing
+# this list), the two Cargo manifests, the toolchain pin, and the hosted deploy
 # directory (squelch-warden's quota test reads six of its manifests with
 # include_str!, and is the one gate on a quota line that would refuse a
 # signup, so a PR that edits only one of those files has to run it; the glob
@@ -48,8 +47,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "squelch-*/**"
-      - "squelchd/**"
+      - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -108,15 +106,12 @@ jobs:
         with:
           filters: |
             rust:
-              - "squelch-*/**"
-              - "squelchd/**"
+              - "crates/**"
               - "Cargo.toml"
               - "Cargo.lock"
               - "rust-toolchain.toml"
               - ".github/workflows/ci.yml"
               - "deploy/hosted/**"
-              # squelch-embed's tests read it, and the image builds from it.
-              - "Dockerfile.embed"
             deny:
               - "**/Cargo.toml"
               - "Cargo.lock"

@@ -8,7 +8,7 @@
 # ARCHITECTURES DIFFER PER IMAGE, on purpose:
 #
 # - squelchd is amd64 + arm64. Its Dockerfile cross-compiles the non-native arch
-#   (see squelchd/Dockerfile), so one amd64 runner covers both and no emulation
+#   (see crates/squelchd/Dockerfile), so one amd64 runner covers both and no emulation
 #   is involved.
 # - squelch-warden and squelch-control are amd64 ONLY. Their Dockerfiles build
 #   natively for the runner's arch, so a second platform would mean QEMU, and
@@ -90,7 +90,7 @@ jobs:
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: squelchd/Dockerfile
+          file: crates/squelchd/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -131,8 +131,8 @@ jobs:
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: Dockerfile.warden
-          # amd64 only; see the header. Dockerfile.warden builds natively, and
+          file: crates/squelch-warden/Dockerfile
+          # amd64 only; see the header. crates/squelch-warden/Dockerfile builds natively, and
           # emulating the ONNX build is not worth an arch nothing runs.
           platforms: linux/amd64
           push: true
@@ -174,7 +174,7 @@ jobs:
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: Dockerfile.control
+          file: crates/squelch-control/Dockerfile
           # amd64 only, for the reason the warden job gives.
           platforms: linux/amd64
           push: true
@@ -185,7 +185,7 @@ jobs:
 
   # The shared per-node embedding service (docs/EMBED-SERVICE.md), weights
   # baked in. Released on the daemon's tag because the two must agree on the
-  # model and squelch-embed/src/protocol.rs is one file both build from; what
+  # model and crates/squelch-embed/src/protocol.rs is one file both build from; what
   # runs it is deploy/hosted/65-embed.yaml, pinned to one of these tags.
   embed-image:
     runs-on: ubuntu-latest
@@ -218,8 +218,8 @@ jobs:
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: Dockerfile.embed
-          # Both arches, like squelchd: Dockerfile.embed cross-compiles the
+          file: crates/squelch-embed/Dockerfile
+          # Both arches, like squelchd: crates/squelch-embed/Dockerfile cross-compiles the
           # binary and fetches the weights in a native stage, so neither half
           # needs emulation.
           platforms: linux/amd64,linux/arm64

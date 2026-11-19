@@ -429,7 +429,7 @@ groups:
       # not come up; `error` is inference failing. `queue_full` on the
       # INTERACTIVE lane is searches being turned away, which the lane's
       # share exists to prevent, and on lane `none` it is the server out of
-      # body permits (`BODY_PERMITS` in squelch-embed/src/http.rs), which
+      # body permits (`BODY_PERMITS` in crates/squelch-embed/src/http.rs), which
       # turns away every caller before it has a lane. Backfill 429s during a
       # signup are expected and are not here.
       #

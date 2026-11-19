@@ -1,6 +1,6 @@
 // THE MAC'S APNs TOKEN, for one kind of push: "a new version is out", which
 // the daemon sends when this Mac has not picked a release up on its own
-// (squelch-core/src/release_feed.rs). macOS draws a remote push even while
+// (crates/squelch-core/src/release_feed.rs). macOS draws a remote push even while
 // Passband is QUIT, which is the whole point: the updater's own banner only
 // exists while the app runs.
 //

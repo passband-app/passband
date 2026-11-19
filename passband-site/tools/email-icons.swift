@@ -7,7 +7,7 @@
 //   swift tools/email-icons.swift
 import AppKit
 
-// File name -> the SF Symbol. squelch-control/src/resend.rs names these.
+// File name -> the SF Symbol. crates/squelch-control/src/resend.rs names these.
 let symbols: [(String, String)] = [
     ("email-sitrep", "gauge.with.dots.needle.33percent"),
     ("email-box", "shippingbox"),

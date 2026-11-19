@@ -346,7 +346,7 @@ struct MemoryPatch: Encodable, Sendable {
 // MARK: - the flag
 
 /// The `understanding` hidden feature's key, the same string as
-/// `squelch-core/src/features.rs`. Here rather than only in HiddenFeatures.swift
+/// `crates/squelch-core/src/features.rs`. Here rather than only in HiddenFeatures.swift
 /// so the practice transport, which compiles without the app, can claim it.
 enum UnderstandingFlag {
     static let key = "understanding"

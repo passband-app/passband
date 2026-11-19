@@ -367,8 +367,8 @@ Everything runs from `.github/workflows/deploy-aws.yml`; the architecture is
 
 | Service | Runs on | Deploys when |
 |---|---|---|
-| `control` (signup.passband.app) | ECS Fargate | push to `main` touching `squelch-control`, `squelch-core`, `squelch-httpauth`, `Dockerfile.control` or the workspace manifests |
-| `relay` (relay.squelch.sh) | ECS Fargate, `/data` on EFS | push to `main` touching `squelch-relay`, `squelch-httpauth`, `squelch-ratelimit`, the root `Dockerfile` or the workspace manifests |
+| `control` (signup.passband.app) | ECS Fargate | push to `main` touching `squelch-control`, `squelch-core`, `squelch-httpauth`, `crates/squelch-control/Dockerfile` or the workspace manifests |
+| `relay` (relay.squelch.sh) | ECS Fargate, `/data` on EFS | push to `main` touching `squelch-relay` (its Dockerfile included), `squelch-httpauth`, `squelch-ratelimit` or the workspace manifests |
 | `bifrost` (LLM gateway) | ECS Fargate, store on EFS | push to `main` touching `deploy/aws/docker/Dockerfile.bifrost` |
 | prometheus / grafana / blackbox | EC2 `monitor` box, docker compose | push to `main` touching `deploy/aws/monitor/` or `deploy/monitoring/{grafana,prometheus,blackbox}/` (via the SSM document `passband-monitor-deploy`) |
 | landing site (passband.app) | S3 + CloudFront | push to `main` touching `passband-site/` or `deploy/aws/site/`, and after every successful `release-passband-mac` run (`workflow_run`) |
@@ -404,13 +404,13 @@ roll the carrier promptly.
   regression on every reader that has not updated.
 - **Env vars are API.** Renames need the legacy-alias treatment
   (`SQUELCH_ACCOUNT`/`SQUELCH_DB` precedent: honored + deprecation line).
-  Defaults baked into `squelchd/Dockerfile` (`SQUELCH_BIND=0.0.0.0:8848`,
+  Defaults baked into `crates/squelchd/Dockerfile` (`SQUELCH_BIND=0.0.0.0:8848`,
   file cred backend, `/data` paths) are load-bearing for every compose file
   in the wild.
 - **glibc floor.** squelchd and control images must stay on trixie-or-newer
   bases (ort needs glibc ≥ 2.38). Warden and relay are independent.
 - **New workspace crates** must be added to the COPY lists in BOTH
-  `squelchd/Dockerfile` and `Dockerfile.control`, or the tag fails in CI.
+  `crates/squelchd/Dockerfile` and `crates/squelch-control/Dockerfile`, or the tag fails in CI.
 - **What gets a vector is behaviour too.** From `daemon-0.0.15`, the sealed
   gate (`docs/SECURITY.md` §4d) decides which mail is embedded, on self-host as
   on hosted. Say it in that release's notes, because a self-hoster will notice:

@@ -56,6 +56,7 @@
 use std::time::Duration;
 
 use base64::Engine as _;
+use chrono::{DateTime, Datelike as _, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Ceiling on a governance response body. A mint answer is a few hundred
@@ -140,6 +141,15 @@ pub enum BifrostError {
     /// validates first); it means the validators have drifted.
     #[error("refusing a label this client would not have validated")]
     BadLabel,
+    /// A top-up write was sent and may have LANDED, but the read-back did not
+    /// show it: the write timed out, the listing failed, or it shows another
+    /// amount. Not the same as a refusal: topping up by hand on top of it can
+    /// give twice what was meant.
+    #[error(
+        "the LLM gateway may have applied the top-up but the read-back did not confirm it; \
+         check the key in the gateway before topping up by hand"
+    )]
+    Unconfirmed,
 }
 
 /// A freshly minted virtual key.
@@ -215,6 +225,24 @@ pub struct BudgetState {
     /// Extra allowance ADDED to `max_limit` while a top-up is active; zero
     /// when there is none. The gateway omits the field then.
     pub override_amount: f64,
+    /// When the budget's CURRENT window opened (`last_reset`). It moves
+    /// exactly when the gateway resets the spend, so it names the cycle a
+    /// reading belongs to. `None` when the gateway omitted it or sent Go's
+    /// zero time, which is no cycle at all.
+    pub last_reset: Option<DateTime<Utc>>,
+    /// `"cycles"`, `"forever"`, or empty when there is no override.
+    pub override_mode: String,
+    /// How many windows a cycles override still covers, this one included
+    /// (`override_cycles_remaining`). The gateway re-derives it whenever
+    /// `last_reset` advances and clears the override at zero, so this, not
+    /// the anchor, says whether an override is live.
+    pub override_cycles_remaining: i64,
+    /// The window boundary the current override was granted at
+    /// (`override_anchor_reset`). An override anchored before `last_reset`
+    /// belongs to a window that has already closed.
+    pub override_anchor_reset: Option<DateTime<Utc>>,
+    /// How long a window lasts, in the gateway's spelling (`"1M"`).
+    pub reset_duration: String,
 }
 
 impl BudgetState {
@@ -402,6 +430,26 @@ struct WireBudget {
     current_usage: f64,
     #[serde(default)]
     override_amount: f64,
+    #[serde(default)]
+    last_reset: Option<String>,
+    #[serde(default)]
+    override_mode: Option<String>,
+    #[serde(default)]
+    override_cycles_remaining: i64,
+    #[serde(default)]
+    override_anchor_reset: Option<String>,
+    #[serde(default)]
+    reset_duration: Option<String>,
+}
+
+/// A gateway timestamp (Go's RFC3339), or `None` for anything unreadable and
+/// for Go's zero time (`0001-01-01T00:00:00Z`), which a budget that was never
+/// reset can carry and which names no window.
+fn gateway_time(raw: Option<&str>) -> Option<DateTime<Utc>> {
+    let t = DateTime::parse_from_rfc3339(raw?.trim())
+        .ok()?
+        .with_timezone(&Utc);
+    (t.year() >= 2000).then_some(t)
 }
 
 /// `PUT /api/governance/virtual-keys/{vk}/budgets/{budget}/override` body.
@@ -623,6 +671,13 @@ impl BifrostClient {
                                 max_limit: b.max_limit,
                                 current_usage: b.current_usage,
                                 override_amount: b.override_amount,
+                                last_reset: gateway_time(b.last_reset.as_deref()),
+                                override_mode: b.override_mode.unwrap_or_default(),
+                                override_cycles_remaining: b.override_cycles_remaining,
+                                override_anchor_reset: gateway_time(
+                                    b.override_anchor_reset.as_deref(),
+                                ),
+                                reset_duration: b.reset_duration.unwrap_or_default(),
                             })
                             .collect(),
                     })
@@ -648,6 +703,10 @@ impl BifrostClient {
     /// (`mutateVirtualKeyBudgetOverride`). That version declares a
     /// `reset_budget_usage` field on the key update and never reads it, so
     /// there is no way to zero `current_usage` short of a new key.
+    ///
+    /// A 5xx is [`BifrostError::Unconfirmed`], not a refusal: that version
+    /// commits the override and only then reloads the key, and answers 500
+    /// when the reload fails, so the write may well have landed.
     pub async fn set_budget_override(
         &self,
         vk_id: &str,
@@ -675,6 +734,7 @@ impl BifrostClient {
         match resp.status().as_u16() {
             200 | 201 | 204 => Ok(()),
             401 | 403 => Err(BifrostError::Unauthorized),
+            500..=599 => Err(BifrostError::Unconfirmed),
             _ => Err(BifrostError::Failed),
         }
     }
@@ -712,8 +772,18 @@ impl BifrostClient {
     ///
     /// A key with anything but exactly one budget was not made by a mint, and
     /// guessing which budget to raise is how the wrong one gets raised: that
-    /// is an error, as is a read-back that does not show the top-up.
-    pub async fn top_up_key(&self, vk_id: &str, amount_usd: f64) -> Result<(), BifrostError> {
+    /// is an error. A write that timed out, or a read-back that fails or does
+    /// not show the top-up, is [`BifrostError::Unconfirmed`]: the write may
+    /// have landed.
+    ///
+    /// Answers the budget AS READ BACK, because the gateway anchors the grant
+    /// on its own clock: a write that crossed a window boundary lands in the
+    /// NEW window, and only `override_anchor_reset` says so.
+    pub async fn top_up_key(
+        &self,
+        vk_id: &str,
+        amount_usd: f64,
+    ) -> Result<BudgetState, BifrostError> {
         let find = || async {
             let key = self
                 .list_virtual_keys()
@@ -727,12 +797,18 @@ impl BifrostClient {
             }
         };
         let budget = find().await?;
-        self.set_budget_override(vk_id, &budget.id, amount_usd)
-            .await?;
-        if (find().await?.override_amount - amount_usd).abs() > 0.005 {
-            return Err(BifrostError::Failed);
+        match self
+            .set_budget_override(vk_id, &budget.id, amount_usd)
+            .await
+        {
+            Ok(()) => {}
+            Err(BifrostError::Unreachable) => return Err(BifrostError::Unconfirmed),
+            Err(e) => return Err(e),
         }
-        Ok(())
+        match find().await {
+            Ok(after) if (after.override_amount - amount_usd).abs() <= 0.005 => Ok(after),
+            _ => Err(BifrostError::Unconfirmed),
+        }
     }
 
     /// Mint the TRIAGE virtual key, named `tenant-<label>`, with a monthly
@@ -1577,6 +1653,69 @@ mod tests {
         assert!(keys[1].budgets.is_empty());
     }
 
+    /// The listing also says which window a budget is in and which window its
+    /// override was granted in, read as the live gateway (v1.6.9) spells them.
+    /// Go's zero time, an unreadable stamp and an absent one all read as no
+    /// window rather than as year one.
+    #[tokio::test]
+    async fn listing_reads_the_budget_window_and_the_override_grant() {
+        let rec: Shared = Arc::new(Mutex::new(Recorder {
+            listing: Some(json!({
+                "virtual_keys": [
+                    {
+                        "id": "vk-1",
+                        "name": "tenant-ada",
+                        "budgets": [{
+                            "id": "b-1",
+                            "max_limit": 75,
+                            "current_usage": 80,
+                            "override_amount": 75,
+                            "override_mode": "cycles",
+                            "override_cycles_remaining": 1,
+                            "last_reset": "2026-11-02T09:15:00.123456789Z",
+                            "override_anchor_reset": "2026-11-02T09:15:00.123456789Z",
+                            "reset_duration": "1M",
+                        }],
+                    },
+                    {
+                        "id": "vk-2",
+                        "name": "tenant-bob",
+                        "budgets": [{
+                            "id": "b-2",
+                            "max_limit": 75,
+                            "last_reset": "0001-01-01T00:00:00Z",
+                            "override_anchor_reset": "not a time",
+                        }],
+                    },
+                    {
+                        "id": "vk-3",
+                        "name": "tenant-cy",
+                        "budgets": [{ "id": "b-3", "max_limit": 75 }],
+                    },
+                ],
+            })),
+            ..Default::default()
+        }));
+        let c = client_for(&rec).await;
+
+        let keys = c.list_virtual_keys().await.unwrap();
+        let b = &keys[0].budgets[0];
+        let opened = DateTime::parse_from_rfc3339("2026-11-02T09:15:00.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(b.last_reset, Some(opened));
+        assert_eq!(b.override_anchor_reset, Some(opened));
+        assert_eq!(b.override_mode, "cycles");
+        assert_eq!(b.reset_duration, "1M");
+        assert_eq!(b.override_cycles_remaining, 1);
+        for k in &keys[1..] {
+            let b = &k.budgets[0];
+            assert_eq!(b.last_reset, None, "{}", k.name);
+            assert_eq!(b.override_anchor_reset, None, "{}", k.name);
+            assert_eq!(b.override_mode, "", "{}", k.name);
+        }
+    }
+
     /// A top-up is one cycle of extra allowance on the budget's own route: it
     /// names the key and the budget in the path and carries nothing that could
     /// replace the key's limit, models or providers.
@@ -1623,6 +1762,11 @@ mod tests {
         rec.lock().unwrap().override_status = Some(404);
         let err = c.set_budget_override("vk-1", "b-1", 5.0).await.unwrap_err();
         assert!(matches!(err, BifrostError::Failed), "{err:?}");
+        // A 5xx may come after the write committed (the gateway saves, then
+        // reloads the key, and answers 500 if the reload fails).
+        rec.lock().unwrap().override_status = Some(500);
+        let err = c.set_budget_override("vk-1", "b-1", 5.0).await.unwrap_err();
+        assert!(matches!(err, BifrostError::Unconfirmed), "{err:?}");
     }
     /// A listing holding one minted key with the budgets given.
     fn listing_with(budgets: Value) -> Value {
@@ -1692,7 +1836,9 @@ mod tests {
         }));
         let c = client_for(&rec).await;
         let err = c.top_up_key("vk-123", 75.0).await.unwrap_err();
-        assert!(matches!(err, BifrostError::Failed), "{err:?}");
+        // Accepted but not shown: the write may have landed, which is its own
+        // answer rather than a plain refusal.
+        assert!(matches!(err, BifrostError::Unconfirmed), "{err:?}");
         assert_eq!(rec.lock().unwrap().overrides.len(), 1);
 
         // A key the gateway does not list is an error, not a top-up of some

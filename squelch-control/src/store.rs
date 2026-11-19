@@ -344,6 +344,36 @@ CREATE TABLE IF NOT EXISTS feature_defaults (
     feature    TEXT PRIMARY KEY,
     enabled_at TEXT COLLATE \"C\" NOT NULL
 );
+
+-- AUTOMATIC LLM TOP-UPS, one row per (tenant, budget window) the budget
+-- poller topped up, or is trying to (see `crate::budget_topup`). The PRIMARY
+-- KEY IS THE ONCE-PER-CYCLE RULE: two control tasks, or one that restarted
+-- mid-call, cannot both own a window, because only one INSERT lands.
+--
+-- `cycle_start` is the gateway's own `last_reset` for the window, in `stamp`'s
+-- shape, so a later window is a later string. `target_usd` is the override the
+-- claim decided on, kept so that a retry after a failed or unconfirmed write
+-- sends the SAME value (an override replaces, so resending is a no-op) rather
+-- than adding a second month on top of a write that did land.
+--
+-- CASCADE for `tenant_features`' reason: a tenant row deleted by hand takes
+-- its history with it.
+CREATE TABLE IF NOT EXISTS llm_auto_topups (
+    tenant_id    BIGINT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    cycle_start  TEXT COLLATE \"C\" NOT NULL,
+    target_usd   DOUBLE PRECISION NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'applied', 'closed')),
+    attempts     INTEGER NOT NULL DEFAULT 1,
+    attempted_at TEXT COLLATE \"C\" NOT NULL,
+    applied_at   TEXT COLLATE \"C\",
+    -- When the operator was last told this window's top-up was refused, and
+    -- separately when it was last told a write could not be confirmed, so
+    -- each is announced at a bounded rate and one never silences the other.
+    failed_alerted_at      TEXT COLLATE \"C\",
+    unconfirmed_alerted_at TEXT COLLATE \"C\",
+    PRIMARY KEY (tenant_id, cycle_start)
+);
 ";
 
 /// Columns added to `invite_codes` after the first deployment, with the type
@@ -2276,6 +2306,204 @@ impl ControlStore {
     }
 }
 
+/// One tenant the budget poller may consider: its triage key, whether it is
+/// live, and the newest window it was automatically topped up in.
+#[derive(Debug, Clone)]
+pub struct TopupCandidate {
+    pub tenant_id: i64,
+    pub label: String,
+    pub active: bool,
+    pub vk_id: String,
+    /// The newest `cycle_start` with an APPLIED top-up, in [`stamp`]'s shape.
+    /// A claim that never landed is not counted: it is still owed.
+    pub last_applied_cycle: Option<String>,
+    /// The newest claim still PENDING, and the amount it decided on: a write
+    /// that may have landed without being confirmed.
+    pub pending_cycle: Option<String>,
+    pub pending_target_usd: Option<f64>,
+}
+
+impl ControlStore {
+    /// Every tenant that has a triage key, with the newest window it was
+    /// automatically topped up in, at most `limit`. Torn-down tenants are
+    /// included and marked, so the caller's decision is the one place liveness
+    /// is judged.
+    pub async fn auto_topup_candidates(&self, limit: i64) -> Result<Vec<TopupCandidate>> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT t.id, t.label, t.status = $1, t.bifrost_vk_id,
+                        (SELECT max(a.cycle_start) FROM llm_auto_topups a
+                          WHERE a.tenant_id = t.id AND a.status = 'applied'),
+                        p.cycle_start, p.target_usd
+                   FROM tenants t
+                   LEFT JOIN LATERAL (
+                        SELECT cycle_start, target_usd FROM llm_auto_topups a
+                         WHERE a.tenant_id = t.id AND a.status = 'pending'
+                         ORDER BY cycle_start DESC LIMIT 1
+                   ) p ON true
+                  WHERE t.bifrost_vk_id IS NOT NULL
+                  ORDER BY t.id
+                  LIMIT $2",
+                &[&STATUS_ACTIVE, &limit],
+            )
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(TopupCandidate {
+                    tenant_id: r.try_get(0)?,
+                    label: r.try_get(1)?,
+                    active: r.try_get(2)?,
+                    vk_id: r.try_get(3)?,
+                    last_applied_cycle: r.try_get(4)?,
+                    pending_cycle: r.try_get(5)?,
+                    pending_target_usd: r.try_get(6)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Claim the right to top up `tenant_id` for the window opened at `cycle`.
+    ///
+    /// `Some((target, attempt))` means THIS caller owns the attempt and must
+    /// send `target`, which is the value the FIRST claim for this window
+    /// recorded, not necessarily the one passed now. `None` means the window
+    /// is already topped up, or another attempt holds it and started after
+    /// `retry_before`.
+    ///
+    /// ONE STATEMENT, so it is atomic without a transaction: the first claim
+    /// inserts; a later one only takes over a claim that is still pending and
+    /// whose last attempt is older than `retry_before`.
+    pub async fn claim_auto_topup(
+        &self,
+        tenant_id: i64,
+        cycle: &str,
+        target_usd: f64,
+        now: DateTime<Utc>,
+        retry_before: DateTime<Utc>,
+    ) -> Result<Option<(f64, i32)>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "INSERT INTO llm_auto_topups(tenant_id, cycle_start, target_usd, attempted_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (tenant_id, cycle_start) DO UPDATE
+                    SET attempts = llm_auto_topups.attempts + 1,
+                        attempted_at = EXCLUDED.attempted_at
+                  WHERE llm_auto_topups.status = 'pending'
+                    AND llm_auto_topups.attempted_at < $5
+                 RETURNING target_usd, attempts",
+                &[
+                    &tenant_id,
+                    &cycle,
+                    &target_usd,
+                    &stamp(now),
+                    &stamp(retry_before),
+                ],
+            )
+            .await?;
+        row.map(|r| Ok((r.try_get(0)?, r.try_get(1)?))).transpose()
+    }
+
+    /// Whether to tell the operator about a failed attempt on this window now.
+    /// `true` (and the moment recorded) when nobody has been told about this
+    /// KIND of failure yet, or not since `quiet_before`. Refusals and
+    /// unconfirmed writes are limited separately, so a timeout's alert cannot
+    /// hold back the refusal that follows it. One statement, so two tasks
+    /// cannot both say yes.
+    pub async fn take_topup_failure_alert(
+        &self,
+        tenant_id: i64,
+        cycle: &str,
+        unconfirmed: bool,
+        now: DateTime<Utc>,
+        quiet_before: DateTime<Utc>,
+    ) -> Result<bool> {
+        // The column is one of this file's two constants, never input.
+        let column = if unconfirmed {
+            "unconfirmed_alerted_at"
+        } else {
+            "failed_alerted_at"
+        };
+        let n = self
+            .client()
+            .await?
+            .execute(
+                &format!(
+                    "UPDATE llm_auto_topups SET {column} = $3
+                      WHERE tenant_id = $1 AND cycle_start = $2
+                        AND ({column} IS NULL OR {column} < $4)"
+                ),
+                &[&tenant_id, &cycle, &stamp(now), &stamp(quiet_before)],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+
+    /// Record `cycle` as topped up, whether or not it was ever claimed: the
+    /// window a top-up ANCHORED in, when the gateway put it in a later window
+    /// than the one claimed. That window then has its top-up and is not
+    /// topped up again.
+    pub async fn record_auto_topup_applied(
+        &self,
+        tenant_id: i64,
+        cycle: &str,
+        target_usd: f64,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO llm_auto_topups
+                        (tenant_id, cycle_start, target_usd, status, attempted_at, applied_at)
+                 VALUES ($1, $2, $3, 'applied', $4, $4)
+                 ON CONFLICT (tenant_id, cycle_start) DO UPDATE
+                    SET status = 'applied', applied_at = EXCLUDED.applied_at",
+                &[&tenant_id, &cycle, &target_usd, &stamp(now)],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Close a pending claim for good: its window has ended, and what it was
+    /// for either landed late (and was recorded in the window it landed in)
+    /// or never landed. A closed claim is never retried or read again.
+    pub async fn close_auto_topup(&self, tenant_id: i64, cycle: &str) -> Result<bool> {
+        let n = self
+            .client()
+            .await?
+            .execute(
+                "UPDATE llm_auto_topups SET status = 'closed'
+                  WHERE tenant_id = $1 AND cycle_start = $2 AND status = 'pending'",
+                &[&tenant_id, &cycle],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+
+    /// Record that the window's top-up landed and was read back. `true` when a
+    /// pending claim took it.
+    pub async fn mark_auto_topup_applied(
+        &self,
+        tenant_id: i64,
+        cycle: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let n = self
+            .client()
+            .await?
+            .execute(
+                "UPDATE llm_auto_topups SET status = 'applied', applied_at = $3
+                  WHERE tenant_id = $1 AND cycle_start = $2 AND status = 'pending'",
+                &[&tenant_id, &cycle, &stamp(now)],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+}
+
 /// Run one of the listing statements above inside a transaction the caller
 /// already opened, so both halves of a listing read the same snapshot.
 async fn select_users(
@@ -2853,7 +3081,7 @@ fn is_inkless(c: char) -> bool {
 /// under the `COLLATE "C"` every timestamp column carries (see [`SCHEMA`]), so
 /// two spellings of the same instant would order wrongly and a live code would
 /// read as expired.
-fn stamp(t: DateTime<Utc>) -> String {
+pub(crate) fn stamp(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
@@ -3449,6 +3677,185 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
         // A label with no row takes nothing and answers nothing.
         assert!(!s.set_tenant_vk("ghost", "vk-9").await.unwrap());
         assert_eq!(s.tenant_vk("ghost").await.unwrap(), None);
+    }
+
+    /// The candidate set: every tenant with a triage key, torn down or not,
+    /// with the newest window whose top-up APPLIED. A pending claim is still
+    /// owed, so it is not counted.
+    #[tokio::test]
+    async fn topup_candidates_carry_liveness_and_the_last_applied_window() {
+        let s = store().await;
+        s.insert_tenant("ada", "ada@example.com").await.unwrap();
+        s.insert_tenant("bob", "bob@example.com").await.unwrap();
+        s.insert_tenant("cy", "cy@example.com").await.unwrap();
+        s.set_tenant_vk("ada", "vk-ada").await.unwrap();
+        s.set_tenant_vk("bob", "vk-bob").await.unwrap();
+        // `cy` has no key and is no candidate.
+        s.client()
+            .await
+            .unwrap()
+            .execute(
+                "UPDATE tenants SET status = 'cancelled' WHERE label = 'bob'",
+                &[],
+            )
+            .await
+            .unwrap();
+        let ada = tenant_id(&s, "ada").await;
+        let now = Utc::now();
+        let long_ago = now - chrono::Duration::hours(1);
+        let oct = "2026-10-03T09:15:00.000Z";
+        let nov = "2026-11-02T09:15:00.000Z";
+        s.claim_auto_topup(ada, oct, 75.0, now, long_ago)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(s.mark_auto_topup_applied(ada, oct, now).await.unwrap());
+        s.claim_auto_topup(ada, nov, 75.0, now, long_ago)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let c = s.auto_topup_candidates(100).await.unwrap();
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert_eq!(
+            (c[0].label.as_str(), c[0].active, c[0].vk_id.as_str()),
+            ("ada", true, "vk-ada")
+        );
+        assert_eq!(c[0].tenant_id, ada);
+        assert_eq!(c[0].last_applied_cycle.as_deref(), Some(oct));
+        assert_eq!(c[0].pending_cycle.as_deref(), Some(nov));
+        assert_eq!(c[0].pending_target_usd, Some(75.0));
+        assert_eq!(
+            (
+                c[1].label.as_str(),
+                c[1].active,
+                c[1].last_applied_cycle.as_deref()
+            ),
+            ("bob", false, None)
+        );
+        assert_eq!(s.auto_topup_candidates(1).await.unwrap().len(), 1);
+    }
+
+    /// ONE CLAIM PER WINDOW. The first claim owns it; a second inside the
+    /// retry interval gets nothing; one after it takes over the SAME target;
+    /// an applied window is never claimed again; a new window is a new claim.
+    #[tokio::test]
+    async fn a_window_is_claimed_once_and_retried_with_the_same_amount() {
+        let s = store().await;
+        s.insert_tenant("ada", "ada@example.com").await.unwrap();
+        let ada = tenant_id(&s, "ada").await;
+        let t0 = Utc::now();
+        let nov = "2026-11-02T09:15:00.000Z";
+        let retry = chrono::Duration::minutes(30);
+
+        assert_eq!(
+            s.claim_auto_topup(ada, nov, 150.0, t0, t0 - retry)
+                .await
+                .unwrap(),
+            Some((150.0, 1))
+        );
+        // A second control task, or the next pass, while the first is in
+        // flight.
+        let t1 = t0 + chrono::Duration::minutes(5);
+        assert_eq!(
+            s.claim_auto_topup(ada, nov, 225.0, t1, t1 - retry)
+                .await
+                .unwrap(),
+            None
+        );
+        // The first attempt failed and its lease lapsed: the retry sends what
+        // the first claim decided, not the larger figure a re-read computed.
+        let t2 = t0 + chrono::Duration::minutes(31);
+        assert_eq!(
+            s.claim_auto_topup(ada, nov, 225.0, t2, t2 - retry)
+                .await
+                .unwrap(),
+            Some((150.0, 2))
+        );
+        assert!(s.mark_auto_topup_applied(ada, nov, t2).await.unwrap());
+        assert!(
+            !s.mark_auto_topup_applied(ada, nov, t2).await.unwrap(),
+            "applied once"
+        );
+        let t3 = t0 + chrono::Duration::days(1);
+        assert_eq!(
+            s.claim_auto_topup(ada, nov, 150.0, t3, t3 - retry)
+                .await
+                .unwrap(),
+            None,
+            "an applied window is done"
+        );
+        // Failure alerts for a window are rate-limited per kind: the first
+        // one goes, the next inside the quiet interval does not, a later one
+        // does, and an unconfirmed write never holds back a refusal.
+        let quiet = chrono::Duration::hours(6);
+        let take = |unconfirmed: bool, at: DateTime<Utc>| {
+            let s = &s;
+            async move {
+                s.take_topup_failure_alert(ada, nov, unconfirmed, at, at - quiet)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(take(true, t0).await, "the first unconfirmed");
+        let t4 = t0 + chrono::Duration::hours(1);
+        assert!(!take(true, t4).await, "a repeat inside the interval");
+        assert!(take(false, t4).await, "a refusal is not held back");
+        assert!(!take(false, t4).await);
+        let t5 = t0 + chrono::Duration::hours(7);
+        assert!(take(true, t5).await, "after the interval");
+        // A window the gateway anchored in without a claim is recorded as
+        // done all the same, and so is one that was pending.
+        let jan = "2027-01-01T09:15:00.000Z";
+        s.record_auto_topup_applied(ada, jan, 75.0, t5)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.claim_auto_topup(ada, jan, 75.0, t5, t5).await.unwrap(),
+            None
+        );
+        // A pending claim closed for good is never offered or retried again.
+        let feb = "2027-02-01T09:15:00.000Z";
+        s.claim_auto_topup(ada, feb, 75.0, t5, t5)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(s.close_auto_topup(ada, feb).await.unwrap());
+        assert!(!s.close_auto_topup(ada, feb).await.unwrap(), "closed once");
+        let later = t5 + chrono::Duration::days(1);
+        assert_eq!(
+            s.claim_auto_topup(ada, feb, 75.0, later, later)
+                .await
+                .unwrap(),
+            None
+        );
+        s.set_tenant_vk("ada", "vk-ada").await.unwrap();
+        let c = s.auto_topup_candidates(10).await.unwrap();
+        assert_eq!(c[0].pending_cycle, None, "{c:?}");
+        // Next month is its own window.
+        let dec = "2026-12-02T09:15:00.000Z";
+        assert_eq!(
+            s.claim_auto_topup(ada, dec, 75.0, t3, t3 - retry)
+                .await
+                .unwrap(),
+            Some((75.0, 1))
+        );
+        // Purging the tenant takes its history with it.
+        s.client()
+            .await
+            .unwrap()
+            .execute("DELETE FROM tenants WHERE id = $1", &[&ada])
+            .await
+            .unwrap();
+        let left: i64 = s
+            .client()
+            .await
+            .unwrap()
+            .query_one("SELECT count(*) FROM llm_auto_topups", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(left, 0);
     }
 
     /// The raw `assistant_vk_minted_at` cell for `label`.

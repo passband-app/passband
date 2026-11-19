@@ -1190,6 +1190,10 @@ async fn serve_async(config: Config) -> anyhow::Result<()> {
             // kind of exec-per-tenant read, serial and batched, with its own
             // per-person refresh interval on top of this cadence.
             squelch_control::retention::poll_activity(&poller).await;
+            // The budget poller too: one gateway listing per pass, and a
+            // top-up for any tenant about to run out of triage budget. Does
+            // nothing on a deployment without the gateway.
+            squelch_control::budget_topup::poll_budgets(&poller).await;
         }
     });
 

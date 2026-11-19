@@ -68,6 +68,12 @@ pub const FAILURE_ALERT_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// sub-microsecond noise, and a real window is a month.
 const BOUNDARY_SLACK: chrono::Duration = chrono::Duration::seconds(1);
 
+/// How close to a window's end a key is left alone. The gateway anchors a
+/// grant on ITS clock at the moment the write lands, so a write sent just
+/// before a reset can land just after it, in the next window. Five minutes is
+/// far longer than one pass's serial writes and much shorter than a window.
+pub const BOUNDARY_MARGIN: chrono::Duration = chrono::Duration::minutes(5);
+
 /// What the poller should do about one tenant's key.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
@@ -163,14 +169,14 @@ pub fn decide(
     if !active {
         return Decision::Skip(Skip::Inactive);
     }
-    let (Some(opened), Some(length)) = (budget.last_reset, reset_duration(&budget.reset_duration))
+    let (Some(opened), Some(_)) = (budget.last_reset, reset_duration(&budget.reset_duration))
     else {
         return Decision::Skip(Skip::UnknownWindow);
     };
     if budget
         .override_anchor_reset
         .is_some_and(|anchor| anchor > opened + BOUNDARY_SLACK)
-        || opened + length <= now
+        || window_closing(budget, now)
     {
         return Decision::Skip(Skip::WindowInFlux);
     }
@@ -196,6 +202,15 @@ pub fn decide(
     // against what the gateway stores.
     let target_usd = ((existing + base) * 100.0).ceil() / 100.0;
     Decision::TopUp { cycle, target_usd }
+}
+
+/// Whether `budget`'s window has ended, or ends within [`BOUNDARY_MARGIN`] of
+/// `now`. An unreadable window counts as closing: nothing is written to it.
+pub fn window_closing(budget: &BudgetState, now: DateTime<Utc>) -> bool {
+    match (budget.last_reset, reset_duration(&budget.reset_duration)) {
+        (Some(opened), Some(length)) => opened + length <= now + BOUNDARY_MARGIN,
+        _ => true,
+    }
 }
 
 /// What to do with a claim, given the override live on the key right now.
@@ -269,7 +284,16 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
         let Some([budget]) = budgets.get(c.vk_id.as_str()).copied() else {
             continue;
         };
-        let (cycle, target) = match decide(c.active, budget, c.last_applied_cycle.as_deref(), now) {
+        // The clock is read per tenant, not once per pass: the writes ahead
+        // of this one take time, and the boundary margin is measured from
+        // when this one is decided.
+        let decision = decide(
+            c.active,
+            budget,
+            c.last_applied_cycle.as_deref(),
+            Utc::now(),
+        );
+        let (cycle, target) = match decision {
             Decision::TopUp { cycle, target_usd } => (cycle, target_usd),
             Decision::Skip(Skip::UnknownWindow) => {
                 unknown_window += 1;
@@ -294,7 +318,7 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
         };
         attempted += 1;
         let label = c.label.as_str();
-        let mark_applied = || async {
+        let mark_applied = |cycle: String| async move {
             if let Err(e) = state
                 .store()
                 .mark_auto_topup_applied(c.tenant_id, &cycle, now)
@@ -310,17 +334,46 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
         let amount = match send_for(claimed, live_override(budget)) {
             Send::Write(amount) => amount,
             Send::AlreadyCovered => {
-                mark_applied().await;
-                tracing::info!(%label, vk_id = %c.vk_id, "budget top-up: already covered, nothing written");
+                // Reachable only at the threshold, so the tenant is about to
+                // run dry on a top-up somebody already gave. Worth a person.
+                mark_applied(cycle.clone()).await;
+                tracing::warn!(%label, vk_id = %c.vk_id, "budget top-up: already covered, nothing written");
+                state.alert(crate::alert::llm_auto_topup_covered(label));
                 continue;
             }
         };
+        // Once more, right before the write: a pass can be slow, and a write
+        // that lands after the reset is granted in the next window. The claim
+        // stays pending; the next pass reads the new window.
+        if window_closing(budget, Utc::now()) {
+            tracing::debug!(%label, "budget top-up: window closing, write deferred");
+            continue;
+        }
         match bifrost.top_up_key(&c.vk_id, amount).await {
-            Ok(()) => {
-                mark_applied().await;
+            Ok(after) => {
+                mark_applied(cycle.clone()).await;
                 applied += 1;
-                tracing::info!(%label, vk_id = %c.vk_id, "budget top-up: auto top-up applied");
-                state.alert(crate::alert::llm_auto_topup_applied(label));
+                // The gateway anchors the grant on its own clock. If it put
+                // this one in a later window, that window has had its top-up
+                // too, and must not get a second.
+                let anchored = after.override_anchor_reset.map(cycle_key);
+                match anchored.filter(|a| *a != cycle) {
+                    Some(late) => {
+                        if let Err(e) = state
+                            .store()
+                            .record_auto_topup_applied(c.tenant_id, &late, amount, now)
+                            .await
+                        {
+                            tracing::error!(error = %e, %label, "budget top-up: late anchor not recorded");
+                        }
+                        tracing::warn!(%label, vk_id = %c.vk_id, "budget top-up: applied in the next window");
+                        state.alert(crate::alert::llm_auto_topup_anchored_late(label));
+                    }
+                    None => {
+                        tracing::info!(%label, vk_id = %c.vk_id, "budget top-up: auto top-up applied");
+                        state.alert(crate::alert::llm_auto_topup_applied(label));
+                    }
+                }
             }
             Err(e) => {
                 let unconfirmed = matches!(e, crate::bifrost::BifrostError::Unconfirmed);
@@ -341,23 +394,20 @@ pub async fn poll_budgets(state: &ControlState) -> usize {
                         "AUTO TOP-UP FAILED: this tenant's triage stops when its budget runs out; retried automatically, or `squelch-control llm topup <label>` by hand"
                     );
                 }
+                let alert = if unconfirmed {
+                    crate::alert::llm_auto_topup_unconfirmed(label, attempt)
+                } else {
+                    crate::alert::llm_auto_topup_failed(label, &e.to_string(), attempt)
+                };
                 match state
                     .store()
-                    .take_topup_failure_alert(c.tenant_id, &cycle, now, quiet_before)
+                    .take_topup_failure_alert(c.tenant_id, &cycle, unconfirmed, now, quiet_before)
                     .await
                 {
-                    Ok(true) => state.alert(if unconfirmed {
-                        crate::alert::llm_auto_topup_unconfirmed(label, attempt)
-                    } else {
-                        crate::alert::llm_auto_topup_failed(label, &e.to_string(), attempt)
-                    }),
+                    Ok(true) => state.alert(alert),
                     Ok(false) => {}
                     // Better a repeat than silence while a tenant goes dark.
-                    Err(_) => state.alert(crate::alert::llm_auto_topup_failed(
-                        label,
-                        &e.to_string(),
-                        attempt,
-                    )),
+                    Err(_) => state.alert(alert),
                 }
             }
         }
@@ -448,13 +498,22 @@ mod tests {
     #[test]
     fn a_window_that_should_have_closed_waits_a_pass() {
         let b = budget(80.0);
-        let closed = at(WINDOW) + chrono::Duration::days(30) + chrono::Duration::seconds(5);
-        assert_eq!(
-            decide(true, &b, None, closed),
-            Decision::Skip(Skip::WindowInFlux)
-        );
-        let just_before = at(WINDOW) + chrono::Duration::days(30) - chrono::Duration::seconds(5);
-        assert_eq!(decide(true, &b, None, just_before), top_up(75.0));
+        let closes = at(WINDOW) + chrono::Duration::days(30);
+        for now in [
+            closes + chrono::Duration::seconds(5),
+            // Inside the margin: a write sent now could land after the reset.
+            closes - chrono::Duration::minutes(4),
+        ] {
+            assert_eq!(
+                decide(true, &b, None, now),
+                Decision::Skip(Skip::WindowInFlux),
+                "{now}"
+            );
+            assert!(window_closing(&b, now));
+        }
+        let before_margin = closes - chrono::Duration::minutes(6);
+        assert_eq!(decide(true, &b, None, before_margin), top_up(75.0));
+        assert!(!window_closing(&b, before_margin));
         // A length the gateway's own parser would not read is no window.
         let b = BudgetState {
             reset_duration: "monthly".into(),

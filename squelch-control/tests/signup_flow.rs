@@ -137,7 +137,8 @@ struct Recorder {
     bifrost_minted: Vec<(String, f64)>,
     /// Budget-override PUTs the mock Bifrost saw: `(vk id, budget id, body)`.
     bifrost_overrides: Vec<(String, String, Value)>,
-    /// When true, the override route answers 500.
+    /// When true, the override route refuses the write (400), which is a
+    /// refusal and not a write that may have landed.
     bifrost_fail_override: bool,
     /// When true, the override route answers 200 and changes nothing: the
     /// gateway that says yes and does not show it.
@@ -148,6 +149,10 @@ struct Recorder {
     bifrost_window: Option<String>,
     /// The window each key's override was granted in, by vk id.
     bifrost_anchor: BTreeMap<String, String>,
+    /// When set, an override PUT is granted in THIS window rather than the
+    /// one the listing names: the gateway anchoring on its own clock after a
+    /// reset the listing has not caught up with.
+    bifrost_anchor_on: Option<String>,
     /// Bearer values the warden saw, on every route.
     warden_bearers: Vec<String>,
     /// Labels asked about via `GET /v1/tenants/{label}`.
@@ -765,13 +770,17 @@ async fn spawn_bifrost(rec: Shared) -> String {
                     let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
                     r.bifrost_overrides.push((id.clone(), budget, body.clone()));
                     if r.bifrost_fail_override {
-                        return StatusCode::INTERNAL_SERVER_ERROR;
+                        return StatusCode::BAD_REQUEST;
                     }
                     if r.bifrost_ignore_override {
                         return StatusCode::OK;
                     }
                     let amount = body["amount"].as_f64().unwrap_or(0.0);
-                    let window = r.bifrost_window.clone().unwrap_or_else(|| bifrost_window(0));
+                    let window = r
+                        .bifrost_anchor_on
+                        .clone()
+                        .or_else(|| r.bifrost_window.clone())
+                        .unwrap_or_else(|| bifrost_window(0));
                     r.bifrost_anchor.insert(id.clone(), window);
                     for key in r.bifrost_minted.iter_mut().filter(|(k, _)| *k == id) {
                         key.1 = amount;
@@ -2592,6 +2601,113 @@ async fn a_stale_retry_never_lowers_a_bigger_manual_top_up() {
     }
     let c = h.state.store().auto_topup_candidates(10).await.unwrap();
     assert!(c[0].last_applied_cycle.is_some(), "the window is done");
+    // And the operator hears that the tenant is about to run dry with no
+    // automatic top-up left.
+    let alerts = alerts_after(&h.rec, 3).await;
+    assert!(
+        alerts[2].contains("no auto top-up left this window:* `ada`"),
+        "{}",
+        alerts[2]
+    );
+}
+
+/// A write that crosses a reset on its way to the gateway is granted in the
+/// NEW window. It counts as that window's top-up: once the listing catches
+/// up, the new window is not topped up a second time.
+#[tokio::test]
+async fn a_top_up_anchored_in_the_next_window_is_that_windows_one() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    alerts_after(&h.rec, 1).await;
+    let triage = vk_id_for("tenant-ada");
+    let b = DEFAULT_LLM_BUDGET_USD;
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_usage.insert(triage.clone(), 2.0 * b);
+        r.bifrost_anchor_on = Some(bifrost_window(1));
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 1);
+    assert_eq!(h.rec.lock().unwrap().bifrost_overrides.len(), 2);
+    let alerts = alerts_after(&h.rec, 2).await;
+    assert!(
+        alerts[1].contains("in the next window: `ada`"),
+        "{}",
+        alerts[1]
+    );
+
+    // The listing catches up: the new window, with the late grant live in it
+    // and the tenant spending into it.
+    {
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_window = Some(bifrost_window(1));
+        r.bifrost_anchor_on = None;
+        r.bifrost_usage.insert(triage.clone(), 2.0 * b);
+    }
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 0);
+    assert_eq!(
+        h.rec.lock().unwrap().bifrost_overrides.len(),
+        2,
+        "the new window already had its top-up"
+    );
+}
+
+/// Claims another attempt holds do not count against a pass's batch. With a
+/// full batch of tenants ahead of it whose claims are all in flight, the next
+/// tenant is still topped up in the same pass.
+#[tokio::test]
+async fn held_claims_do_not_starve_the_tenants_after_them() {
+    let h = Harness::with_bifrost(Bifrost::Mock).await;
+    let b = DEFAULT_LLM_BUDGET_USD;
+    let opened = chrono::DateTime::parse_from_rfc3339(&bifrost_window(0))
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let cycle = budget_topup::cycle_key(opened);
+    let now = chrono::Utc::now();
+    // Created BEFORE the signup, so their ids sort first.
+    for i in 0..budget_topup::TOPUP_BATCH {
+        let label = format!("held{i}");
+        let vk = format!("vk-{label}");
+        let store = h.state.store();
+        store
+            .insert_tenant(&label, &format!("{label}@example.com"))
+            .await
+            .unwrap();
+        assert!(store.set_tenant_vk(&label, &vk).await.unwrap());
+        let id = store
+            .auto_topup_candidates(100)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.label == label)
+            .unwrap()
+            .tenant_id;
+        // Another attempt claimed it a moment ago and is still in flight.
+        assert!(
+            store
+                .claim_auto_topup(id, &cycle, 2.0 * b, now, now - chrono::Duration::hours(1))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let mut r = h.rec.lock().unwrap();
+        r.bifrost_minted.push((vk.clone(), 0.0));
+        r.bifrost_usage.insert(vk, 2.0 * b);
+    }
+    let invite = h.invite_code.clone();
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    h.rec
+        .lock()
+        .unwrap()
+        .bifrost_usage
+        .insert(vk_id_for("tenant-ada"), 2.0 * b);
+
+    assert_eq!(budget_topup::poll_budgets(&h.state).await, 1);
+    let o = h.rec.lock().unwrap().bifrost_overrides.clone();
+    assert_eq!(o.len(), 2, "the signup allowance, then ada's top-up: {o:?}");
+    assert_eq!(o[1].0, vk_id_for("tenant-ada"));
 }
 
 /// A write the gateway accepts but the read-back does not show is reported

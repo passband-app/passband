@@ -356,9 +356,11 @@ CREATE TABLE IF NOT EXISTS llm_auto_topups (
     attempts     INTEGER NOT NULL DEFAULT 1,
     attempted_at TEXT COLLATE \"C\" NOT NULL,
     applied_at   TEXT COLLATE \"C\",
-    -- When the operator was last told this window's top-up failed, so a
-    -- top-up that keeps failing is announced at a bounded rate.
-    alerted_at   TEXT COLLATE \"C\",
+    -- When the operator was last told this window's top-up was refused, and
+    -- separately when it was last told a write could not be confirmed, so
+    -- each is announced at a bounded rate and one never silences the other.
+    failed_alerted_at      TEXT COLLATE \"C\",
+    unconfirmed_alerted_at TEXT COLLATE \"C\",
     PRIMARY KEY (tenant_id, cycle_start)
 );
 ";
@@ -2310,26 +2312,63 @@ impl ControlStore {
     }
 
     /// Whether to tell the operator about a failed attempt on this window now.
-    /// `true` (and the moment recorded) when nobody has been told yet, or not
-    /// since `quiet_before`. One statement, so two tasks cannot both say yes.
+    /// `true` (and the moment recorded) when nobody has been told about this
+    /// KIND of failure yet, or not since `quiet_before`. Refusals and
+    /// unconfirmed writes are limited separately, so a timeout's alert cannot
+    /// hold back the refusal that follows it. One statement, so two tasks
+    /// cannot both say yes.
     pub async fn take_topup_failure_alert(
         &self,
         tenant_id: i64,
         cycle: &str,
+        unconfirmed: bool,
         now: DateTime<Utc>,
         quiet_before: DateTime<Utc>,
     ) -> Result<bool> {
+        // The column is one of this file's two constants, never input.
+        let column = if unconfirmed {
+            "unconfirmed_alerted_at"
+        } else {
+            "failed_alerted_at"
+        };
         let n = self
             .client()
             .await?
             .execute(
-                "UPDATE llm_auto_topups SET alerted_at = $3
-                  WHERE tenant_id = $1 AND cycle_start = $2
-                    AND (alerted_at IS NULL OR alerted_at < $4)",
+                &format!(
+                    "UPDATE llm_auto_topups SET {column} = $3
+                      WHERE tenant_id = $1 AND cycle_start = $2
+                        AND ({column} IS NULL OR {column} < $4)"
+                ),
                 &[&tenant_id, &cycle, &stamp(now), &stamp(quiet_before)],
             )
             .await?;
         Ok(n == 1)
+    }
+
+    /// Record `cycle` as topped up, whether or not it was ever claimed: the
+    /// window a top-up ANCHORED in, when the gateway put it in a later window
+    /// than the one claimed. That window then has its top-up and is not
+    /// topped up again.
+    pub async fn record_auto_topup_applied(
+        &self,
+        tenant_id: i64,
+        cycle: &str,
+        target_usd: f64,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO llm_auto_topups
+                        (tenant_id, cycle_start, target_usd, status, attempted_at, applied_at)
+                 VALUES ($1, $2, $3, 'applied', $4, $4)
+                 ON CONFLICT (tenant_id, cycle_start) DO UPDATE
+                    SET status = 'applied', applied_at = EXCLUDED.applied_at",
+                &[&tenant_id, &cycle, &target_usd, &stamp(now)],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Record that the window's top-up landed and was read back. `true` when a
@@ -3632,25 +3671,34 @@ SQUELCH_TEST_PG_URL is not set, and these tests run against a real Postgres.
             None,
             "an applied window is done"
         );
-        // Failure alerts for a window are rate-limited: the first one goes,
-        // the next inside the quiet interval does not, a later one does.
+        // Failure alerts for a window are rate-limited per kind: the first
+        // one goes, the next inside the quiet interval does not, a later one
+        // does, and an unconfirmed write never holds back a refusal.
         let quiet = chrono::Duration::hours(6);
-        assert!(
-            s.take_topup_failure_alert(ada, nov, t0, t0 - quiet)
-                .await
-                .unwrap()
-        );
+        let take = |unconfirmed: bool, at: DateTime<Utc>| {
+            let s = &s;
+            async move {
+                s.take_topup_failure_alert(ada, nov, unconfirmed, at, at - quiet)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(take(true, t0).await, "the first unconfirmed");
         let t4 = t0 + chrono::Duration::hours(1);
-        assert!(
-            !s.take_topup_failure_alert(ada, nov, t4, t4 - quiet)
-                .await
-                .unwrap()
-        );
+        assert!(!take(true, t4).await, "a repeat inside the interval");
+        assert!(take(false, t4).await, "a refusal is not held back");
+        assert!(!take(false, t4).await);
         let t5 = t0 + chrono::Duration::hours(7);
-        assert!(
-            s.take_topup_failure_alert(ada, nov, t5, t5 - quiet)
-                .await
-                .unwrap()
+        assert!(take(true, t5).await, "after the interval");
+        // A window the gateway anchored in without a claim is recorded as
+        // done all the same, and so is one that was pending.
+        let jan = "2027-01-01T09:15:00.000Z";
+        s.record_auto_topup_applied(ada, jan, 75.0, t5)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.claim_auto_topup(ada, jan, 75.0, t5, t5).await.unwrap(),
+            None
         );
         // Next month is its own window.
         let dec = "2026-12-02T09:15:00.000Z";

@@ -218,6 +218,28 @@ pub fn llm_auto_topup_unconfirmed(label: &str, attempt: i32) -> String {
     )
 }
 
+/// A tenant is near the end of this window's budget, and the window's
+/// automatic top-up is already spent: the key carries an earlier top-up (one
+/// given by hand, or this window's own) at least as large as the automatic
+/// one would have been. Nothing more is added automatically until the reset.
+pub fn llm_auto_topup_covered(label: &str) -> String {
+    format!(
+        ":warning: *LLM budget nearly spent, no auto top-up left this window:* `{label}`\n\
+         It is at 95% of its limit including an earlier top-up. Triage stops when it runs \
+         out, until the next reset. More by hand: `squelch-control llm topup {label}`"
+    )
+}
+
+/// A top-up crossed a window boundary on the way to the gateway, which granted
+/// it in the NEW window. It counts as that window's top-up.
+pub fn llm_auto_topup_anchored_late(label: &str) -> String {
+    format!(
+        ":battery: LLM budget auto top-up applied in the next window: `{label}`\n\
+         The write crossed a budget reset, so it counts as the new window's one top-up. \
+         The window that asked for it has closed."
+    )
+}
+
 /// A new address landed on the waitlist. Carries the name they typed, when
 /// there is one, and NEVER the address: the admin page is where that lives.
 /// Sent only for a NEW row, so resubmitting the form cannot page anybody.
@@ -353,6 +375,8 @@ mod tests {
             llm_auto_topup_applied("ethan"),
             llm_auto_topup_failed("ethan", "the LLM gateway refused the request", 2),
             llm_auto_topup_unconfirmed("ethan", 1),
+            llm_auto_topup_covered("ethan"),
+            llm_auto_topup_anchored_late("ethan"),
         ];
         for m in &msgs {
             assert!(m.contains("`ethan`"), "{m}");
@@ -370,6 +394,8 @@ mod tests {
         assert!(msgs[5].contains("llm topup ethan"), "{}", msgs[5]);
         assert!(msgs[6].contains("NOT CONFIRMED") && !msgs[6].contains("FAILED"));
         assert!(!msgs[6].contains("llm topup"), "{}", msgs[6]);
+        assert!(msgs[7].contains("no auto top-up left"), "{}", msgs[7]);
+        assert!(msgs[8].contains("next window"), "{}", msgs[8]);
         // No keys minted, no orphan line.
         assert!(!signup_incomplete("ethan", &err, None, None).contains("Orphaned"));
 

@@ -695,6 +695,10 @@ impl BifrostClient {
     /// (`mutateVirtualKeyBudgetOverride`). That version declares a
     /// `reset_budget_usage` field on the key update and never reads it, so
     /// there is no way to zero `current_usage` short of a new key.
+    ///
+    /// A 5xx is [`BifrostError::Unconfirmed`], not a refusal: that version
+    /// commits the override and only then reloads the key, and answers 500
+    /// when the reload fails, so the write may well have landed.
     pub async fn set_budget_override(
         &self,
         vk_id: &str,
@@ -722,6 +726,7 @@ impl BifrostClient {
         match resp.status().as_u16() {
             200 | 201 | 204 => Ok(()),
             401 | 403 => Err(BifrostError::Unauthorized),
+            500..=599 => Err(BifrostError::Unconfirmed),
             _ => Err(BifrostError::Failed),
         }
     }
@@ -762,7 +767,15 @@ impl BifrostClient {
     /// is an error. A write that timed out, or a read-back that fails or does
     /// not show the top-up, is [`BifrostError::Unconfirmed`]: the write may
     /// have landed.
-    pub async fn top_up_key(&self, vk_id: &str, amount_usd: f64) -> Result<(), BifrostError> {
+    ///
+    /// Answers the budget AS READ BACK, because the gateway anchors the grant
+    /// on its own clock: a write that crossed a window boundary lands in the
+    /// NEW window, and only `override_anchor_reset` says so.
+    pub async fn top_up_key(
+        &self,
+        vk_id: &str,
+        amount_usd: f64,
+    ) -> Result<BudgetState, BifrostError> {
         let find = || async {
             let key = self
                 .list_virtual_keys()
@@ -785,7 +798,7 @@ impl BifrostClient {
             Err(e) => return Err(e),
         }
         match find().await {
-            Ok(after) if (after.override_amount - amount_usd).abs() <= 0.005 => Ok(()),
+            Ok(after) if (after.override_amount - amount_usd).abs() <= 0.005 => Ok(after),
             _ => Err(BifrostError::Unconfirmed),
         }
     }
@@ -1740,6 +1753,11 @@ mod tests {
         rec.lock().unwrap().override_status = Some(404);
         let err = c.set_budget_override("vk-1", "b-1", 5.0).await.unwrap_err();
         assert!(matches!(err, BifrostError::Failed), "{err:?}");
+        // A 5xx may come after the write committed (the gateway saves, then
+        // reloads the key, and answers 500 if the reload fails).
+        rec.lock().unwrap().override_status = Some(500);
+        let err = c.set_budget_override("vk-1", "b-1", 5.0).await.unwrap_err();
+        assert!(matches!(err, BifrostError::Unconfirmed), "{err:?}");
     }
     /// A listing holding one minted key with the budgets given.
     fn listing_with(budgets: Value) -> Value {

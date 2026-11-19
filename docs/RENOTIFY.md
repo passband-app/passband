@@ -124,9 +124,9 @@ A quick clear is allowed only when all of these hold:
   arrival keeps its "still waiting" banner. This is what makes it safe to
   roll the daemon before the Mac release.
 - Its (trigger, `quick_clear`) pair is not paused by habits.
-- The last one fired at least `quick_clear::GAP_HOURS` (4) ago.
-- Fewer than `quick_clear::DAILY_CAP` (2) fired since local midnight. This is
-  its own budget: quick clears never spend the re-notify `daily_budget`, so a
+- The last one fired at least `quick_clear::GAP_HOURS` (72, three days) ago.
+- Fewer than `quick_clear::DAILY_CAP` (1) fired since local midnight, a
+  backstop behind the gap. This is its own budget: quick clears never spend the re-notify `daily_budget`, so a
   bill coming due in the evening still has its banner.
 
 **A held plan stands for an hour.** When the plan holds (too few, too small

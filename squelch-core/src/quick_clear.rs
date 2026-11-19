@@ -88,12 +88,13 @@ pub const CALIBRATION_MIN_SAMPLES: usize = 10;
 /// The multiplier's range.
 pub const CALIBRATION_MIN: f64 = 0.5;
 pub const CALIBRATION_MAX: f64 = 2.0;
-/// Quick-clear banners are at least this far apart.
-pub const GAP_HOURS: i64 = 4;
+/// Quick-clear banners are at least this far apart: three days. A nudge to
+/// clear mail that comes more often than that reads as nagging, not help.
+pub const GAP_HOURS: i64 = 72;
 /// At most this many quick-clear banners a day (owner's local day). Their
 /// own budget: they never spend the re-notify `daily_budget` a bill coming
 /// due later in the day needs.
-pub const DAILY_CAP: u32 = 2;
+pub const DAILY_CAP: u32 = 1;
 /// After a pass whose plan held (too few, too small a share), the backlog
 /// is not read again for this long: a held plan rarely changes in minutes,
 /// and the read is the smart-clear scan.

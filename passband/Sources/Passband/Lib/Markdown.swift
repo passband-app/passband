@@ -1,7 +1,7 @@
 // The composer's markdown scanner: one pass over the source producing styled
 // spans, consumed by the live editor (MarkdownTextView) and the review
 // preview. SCANNING ONLY — rendering to HTML happens in the daemon
-// (squelch-api/src/markdown.rs), from this same source; this side's job is to
+// (crates/squelch-api/src/markdown.rs), from this same source; this side's job is to
 // make the formatting visible while the markers stay on screen: `**asdf**`
 // keeps its stars and reads bold.
 //

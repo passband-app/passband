@@ -108,7 +108,7 @@
 # NEVER `kubectl rollout restart` the tenant Deployments to make them read a new
 # value. It restarts every tenant at once, and it records a `kubectl-rollout`
 # field manager on each Deployment. The warden's drift check
-# (squelch-warden/src/drift.rs, `foreign_managers`) treats any manager that is
+# (crates/squelch-warden/src/drift.rs, `foreign_managers`) treats any manager that is
 # not the warden as foreign, and the roller then skips that tenant ("needs a
 # person (another field manager…)") on every roll until somebody runs
 # `squelch-control reconcile <label>` for it, one mailbox blip each. The whole

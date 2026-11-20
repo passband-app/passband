@@ -3,7 +3,7 @@
 The procedure, start to finish, for getting a freshly cut `daemon-X.Y.Z` onto
 everything that runs it. This page is the checklist; it links out rather than
 re-explaining. The reasoning lives in `../../docs/RELEASING.md` (surfaces and
-tags) and `../../squelch-warden/README.md` (the roller).
+tags) and `../../crates/squelch-warden/README.md` (the roller).
 
 Budget: ten minutes of typing, then **one roller tick per tenant that is
 behind**, five minutes each, unattended. Nothing below needs watching while it converges.
@@ -21,7 +21,7 @@ can hold all of them.
 | The warden | `squelch-warden` | `20-warden.yaml` → `image:` | you apply it |
 | The roller | `squelch-warden` | `90-warden-roller.yaml` → `image:` (**must equal the line above**) | its next tick |
 | The model-seed pod | `squelchd` | `60-models.yaml` → `image:` | only when you re-seed weights; not part of a routine rollout |
-| The shared embedding service | `squelch-embed` | `65-embed.yaml` → `image:` | only when the wire contract (`squelch-embed/src/protocol.rs`), the model or the server changes; never as part of a routine rollout, though every daemon tag publishes one |
+| The shared embedding service | `squelch-embed` | `65-embed.yaml` → `image:` | only when the wire contract (`crates/squelch-embed/src/protocol.rs`), the model or the server changes; never as part of a routine rollout, though every daemon tag publishes one |
 | `control` (signup.passband.app) | `squelch-control` | not pinned | **merge to `main`**, which deploys it, independent of all of the above |
 
 The embed row is pinned on purpose to the release that last changed it, not to
@@ -282,7 +282,7 @@ onwards. This roll is its step 2.
 | `DOWN (no workload, and nothing recorded a cancellation)` | 1 | A job nobody finished left a mailbox with no pod. Most often a `reconcile` the CLI hung up on between the delete and the apply. The roller will not repair one unattended. | `squelch-control reconcile <label>`, and read "A reconcile can outrun the CLI" below first. |
 | `needs a person (a workload whose sealed credential Secret is gone…)` | 1 | That tenant cannot be rendered at all, so no run will ever converge it. The walk continues past it rather than halting, but the fleet is not converged while it is there. | The credential is unrecoverable from here: the owner re-consents, and `PUT /v1/tenants/<label>/credentials` puts them back. |
 | `needs a person (another field manager…)` | 2 | Somebody's `kubectl` owns part of that Deployment. It is out of every roll until repaired. | `squelch-control drift <label>`, then `reconcile <label>` when you can afford that mailbox to blip. |
-| Nothing at all in the log, one sentence | 1 | It never started: a refused config value, or an API server it could not reach. | Check `15-warden-config.yaml` against `squelch-warden/README.md`'s env table. |
+| Nothing at all in the log, one sentence | 1 | It never started: a refused config value, or an API server it could not reach. | Check `15-warden-config.yaml` against `crates/squelch-warden/README.md`'s env table. |
 
 ### A reconcile can outrun the CLI
 
@@ -320,7 +320,7 @@ Two different failures, two different messages, and they mean opposite things:
   and nothing was started. Fix the reachability and run it again.
 
 The CLI now allows **ten minutes** for `reconcile` alone (`RECONCILE_TIMEOUT` in
-`squelch-control/src/config.rs`; every other call, `drift` included, keeps 30
+`crates/squelch-control/src/config.rs`; every other call, `drift` included, keeps 30
 seconds). That covers the default warden with room to spare. **If you ever raise
 `SQUELCH_WARDEN_READY_TIMEOUT_SECS` above 300, raise that constant with it** —
 `control` cannot see the warden's configuration, so nothing enforces the pair and

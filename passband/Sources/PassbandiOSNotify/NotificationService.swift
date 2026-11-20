@@ -1,7 +1,7 @@
 // The notification service extension: what turns a blind push into a banner
 // that says something.
 //
-// The relay is blind BY DESIGN (see squelch-relay/src/handlers.rs) — it carries
+// The relay is blind BY DESIGN (see crates/squelch-relay/src/handlers.rs) — it carries
 // an event id, a collapse id, and a generic "New mail surfaced" alert, because
 // neither it nor Apple is entitled to know what the mail says. `mutable-content`
 // on that push hands the payload here first, inside the user's own device,

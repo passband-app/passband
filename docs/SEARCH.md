@@ -83,7 +83,7 @@ when the right row is #1, the panel gives the reader no reason to believe it.
 Facts, from the code, so the evaluation in §3 argues against what is there
 rather than what one remembers being there.
 
-- **Keyword leg** (`squelch-core/src/store/sqlite/search.rs`,
+- **Keyword leg** (`crates/squelch-core/src/store/sqlite/search.rs`,
   `search_filtered` / `fts_recall`): `messages_fts` is `fts5(subject, body)`
   with the DEFAULT tokenizer, so `unicode61` with no stemming ("passwords"
   does not match "password") and no prefix matching. The reader's text is

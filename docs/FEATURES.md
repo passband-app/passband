@@ -50,7 +50,7 @@ Two consequences worth knowing:
 
 ## Adding a flag
 
-1. **Name it** in `squelch-core/src/features.rs`: a `pub const` for the key and
+1. **Name it** in `crates/squelch-core/src/features.rs`: a `pub const` for the key and
    an entry in `KNOWN` with one sentence for the operator. The admin page is
    drawn from `KNOWN`, so this is required even for a flag only the apps read.
 
@@ -109,7 +109,7 @@ hosted pod sets the variable, so it is not a way around the admin page.
 Tick "Everyone" to turn a feature on for the whole fleet, new signups included.
 When it has settled, delete the flag: the `KNOWN` entry, the constant, and every
 check on it, in the daemon and the apps, and add the key to `RETIRED` in
-`squelch-core/src/features.rs` (a test there fails if a `KNOWN` key is ever a
+`crates/squelch-core/src/features.rs` (a test there fails if a `KNOWN` key is ever a
 retired one). Leftover rows in the two tables are harmless and saving the admin
 page does not touch them.
 

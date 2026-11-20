@@ -22,7 +22,7 @@ modules:
   # probe_success{job="blackbox-bifrost-llm"} is the fleet-level "are LLM calls
   # going through" signal.
   #
-  # THE BODY MUST MIRROR `classify_anthropic` IN squelch-core/src/triage/llm.rs.
+  # THE BODY MUST MIRROR `classify_anthropic` IN crates/squelch-core/src/triage/llm.rs.
   # The first cut of this module sent only model+max_tokens+messages, which
   # proved routing, auth, the allowlist, and budget — and nothing about the
   # request shape triage actually uses. That gap is dangerous rather than

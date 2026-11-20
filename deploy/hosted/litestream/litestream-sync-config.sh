@@ -66,7 +66,7 @@ K8S_NAMESPACE="${K8S_NAMESPACE:-tenants}"
 
 # The daemon's SQLite file inside its volume. This is SQUELCH_DB_PATH from the
 # tenant pod (/data/squelch.db) with the /data mount point stripped off; see
-# `daemon_env` in squelch-warden/src/objects.rs.
+# `daemon_env` in crates/squelch-warden/src/objects.rs.
 DB_FILENAME="${DB_FILENAME:-squelch.db}"
 
 # Object-storage prefix. A tenant's backup lands at <R2_PREFIX>/<label>/store.db.

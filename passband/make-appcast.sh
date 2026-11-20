@@ -35,7 +35,7 @@ NS='xmlns:passband="https://passband.app/xml-namespaces/appcast"'
 # QUIET RELEASES. A release tagged with the message `quiet`
 #   git tag -a passband-mac-0.0.21 -m quiet
 # is a hotfix nobody is told about: its item gets <passband:quiet>, which the
-# daemon reads to skip its release push (squelch-core/src/release_feed.rs) and
+# daemon reads to skip its release push (crates/squelch-core/src/release_feed.rs) and
 # the Mac reads to skip its "ready to install" banner (Updater.isQuiet). It
 # installs exactly like any other release. Only an ANNOTATED tag whose message
 # subject (first line) is `quiet` counts; a lightweight tag reads its commit's

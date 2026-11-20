@@ -155,11 +155,11 @@ consent provisions nothing**: the callback stops before the first warden call, h
 the invite code back unspent, and says all three permissions are needed. Better to
 lose a signup at the door than to hand somebody a tenant that half-works. (Google
 unions grants across a Cloud project, so a token reporting *more* than was asked for
-still passes; the check is a subset floor, never an exact match — `AUTH-FINDINGS.md`
+still passes; the check is a subset floor, never an exact match — `docs/AUTH-FINDINGS.md`
 has the reasoning and the test that pins it.)
 
 Implementation, and where the scope constants actually live:
-`squelch-control/README.md`, "One consent, both slots".
+`crates/squelch-control/README.md`, "One consent, both slots".
 
 ### The consent relay (broker for self-host)
 
@@ -221,7 +221,7 @@ docker run -v squelch-data:/data -p 8848:8848 ghcr.io/<org>/squelch
   consent-relay URL this bullet originally promised is dead for self-host; see
   the correction above). Config is already
   env-var driven, SQLite lives in the volume, and the file credential backend
-  (`squelch-core/src/credentials.rs`) already exists for headless hosts. This tier is
+  (`crates/squelch-core/src/credentials.rs`) already exists for headless hosts. This tier is
   mostly packaging plus the relay, not new architecture.
 - BYOK LLM via `ANTHROPIC_API_KEY` as today; ship a compose example and the
   tailnet/MCP story in the image README.
@@ -282,7 +282,7 @@ a lost Secret is re-consent rather than an escrow.
   app trades at `POST /client/pair` for its own device token. The token itself
   never rides in a link.
 
-Runbook: `deploy/hosted/SETUP.md`. Crate: `squelch-warden/README.md`.
+Runbook: `deploy/hosted/SETUP.md`. Crate: `crates/squelch-warden/README.md`.
 
 <details>
 <summary>The original single-VPS design, superseded</summary>

@@ -527,7 +527,7 @@ enum Analytics {
     /// "did anyone we invited ever open the app" is unanswerable. The `aid` is
     /// the join key, minted control-plane side. THIS APP never sends an email:
     /// control sets the hosted person's email and name on the aid itself, at
-    /// signup (squelch-control/src/posthog.rs), so naming people stays out of
+    /// signup (crates/squelch-control/src/posthog.rs), so naming people stays out of
     /// the one process that touches mail.
     ///
     /// THIS BYPASSES THE EVENT VOCABULARY ON PURPOSE. Every other string that

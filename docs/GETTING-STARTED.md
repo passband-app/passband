@@ -21,7 +21,7 @@ You need:
 - The Gmail account you want triaged.
 - The container image: `ghcr.io/passband-app/squelchd` is public, so a plain
   `docker pull` works with no registry login. Prefer building it yourself? From
-  a checkout of this repo: `docker build -f squelchd/Dockerfile -t squelchd .`
+  a checkout of this repo: `docker build -f crates/squelchd/Dockerfile -t squelchd .`
   — note the `-f`: the Dockerfile at the repo *root* builds the APNs relay,
   not the daemon. Budget 10–20 minutes for a cold source build, and swap the
   `image:` line below for your local tag.

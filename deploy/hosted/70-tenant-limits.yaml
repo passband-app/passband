@@ -210,7 +210,7 @@ spec:
     # database to about 4 GB. Sixty at that worst case is 240 GB, several
     # times the tenant volume, which is why this is a gate to measure at and
     # not a number to trust. A claim slot is spent by a cancelled tenant too (DELETE keeps the
-    # mail: squelch-warden/src/objects.rs), which is right here: its file is
+    # mail: crates/squelch-warden/src/objects.rs), which is right here: its file is
     # still on the disk.
     #
     # Before raising either, measure, on the node:
@@ -226,7 +226,7 @@ spec:
     # `requests.storage` together off that, never one alone.
     pods: "62"
     # One tenant is FOUR Secrets (identity, credential, LLM key, share token:
-    # `SECRETS_PER_TENANT` in squelch-warden/src/objects.rs), on top of the
+    # `SECRETS_PER_TENANT` in crates/squelch-warden/src/objects.rs), on top of the
     # namespace's own, which the warden's quota test counts: the ones the
     # warden's config carries a name for (set in its ConfigMap or defaulted in
     # config.rs: the wildcard certificate, the OAuth client, the APNs relay,

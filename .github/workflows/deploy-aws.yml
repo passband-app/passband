@@ -43,14 +43,12 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - .dockerignore
-      - Dockerfile
-      - Dockerfile.control
       - deploy/aws/docker/**
-      - squelch-control/**
-      - squelch-core/**
-      - squelch-httpauth/**
-      - squelch-relay/**
-      - squelch-ratelimit/**
+      - crates/squelch-control/**
+      - crates/squelch-core/**
+      - crates/squelch-httpauth/**
+      - crates/squelch-relay/**
+      - crates/squelch-ratelimit/**
       - deploy/aws/monitor/**
       - deploy/monitoring/**
       - passband-site/**
@@ -106,19 +104,17 @@ jobs:
               - Cargo.lock
               - rust-toolchain.toml
               - .dockerignore
-              - Dockerfile.control
-              - squelch-control/**
-              - squelch-core/**
-              - squelch-httpauth/**
+              - crates/squelch-control/**
+              - crates/squelch-core/**
+              - crates/squelch-httpauth/**
             relay:
               - Cargo.toml
               - Cargo.lock
               - rust-toolchain.toml
               - .dockerignore
-              - Dockerfile
-              - squelch-relay/**
-              - squelch-httpauth/**
-              - squelch-ratelimit/**
+              - crates/squelch-relay/**
+              - crates/squelch-httpauth/**
+              - crates/squelch-ratelimit/**
             bifrost:
               - deploy/aws/docker/Dockerfile.bifrost
             monitor:
@@ -160,8 +156,8 @@ jobs:
             ecs=$(jq -c --arg s "$1" --arg f "$2" --arg r "$3" \
               '. + [{service: $s, dockerfile: $f, repo: ("passband-" + $s), runner: $r}]' <<<"$ecs")
           }
-          if want control "$F_CONTROL"; then add control Dockerfile.control "$ARM"; fi
-          if want relay "$F_RELAY"; then add relay Dockerfile "$ARM"; fi
+          if want control "$F_CONTROL"; then add control crates/squelch-control/Dockerfile "$ARM"; fi
+          if want relay "$F_RELAY"; then add relay crates/squelch-relay/Dockerfile "$ARM"; fi
           if want bifrost "$F_BIFROST"; then add bifrost deploy/aws/docker/Dockerfile.bifrost ubuntu-latest; fi
           monitor=false; if want monitor "$F_MONITOR"; then monitor=true; fi
           site=false; if want site "$F_SITE"; then site=true; fi
@@ -242,8 +238,8 @@ jobs:
 
       # Cache: a registry ref in the service's own ECR repo (<repo>:buildcache),
       # the release-daemon.yml pattern. ECR needs image-manifest=true to store
-      # a cache manifest. Dockerfile.control cooks dependencies in a cargo-chef
-      # layer; the root Dockerfile (relay) has no chef stage and DESIGN.md
+      # a cache manifest. crates/squelch-control/Dockerfile cooks dependencies in a cargo-chef
+      # layer; crates/squelch-relay/Dockerfile has no chef stage and DESIGN.md
       # keeps it unchanged, so relay gets layer caching only.
       - id: build
         if: steps.existing.outputs.digest == ''

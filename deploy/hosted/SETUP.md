@@ -701,8 +701,8 @@ build anything. By hand, from a checkout:
 ```sh
 git clone https://github.com/passband-app/passband && cd passband
 
-docker build -f squelchd/Dockerfile -t ghcr.io/passband-app/squelchd:daemon-0.0.1 .
-docker build -f Dockerfile.warden -t ghcr.io/passband-app/squelch-warden:daemon-0.0.1 .
+docker build -f crates/squelchd/Dockerfile -t ghcr.io/passband-app/squelchd:daemon-0.0.1 .
+docker build -f crates/squelch-warden/Dockerfile -t ghcr.io/passband-app/squelch-warden:daemon-0.0.1 .
 docker push ghcr.io/passband-app/squelchd:daemon-0.0.1
 docker push ghcr.io/passband-app/squelch-warden:daemon-0.0.1
 ```
@@ -1058,7 +1058,7 @@ read or drain opens.
 **Rotation, and a Secret that was missing: never `kubectl rollout restart` the
 tenants.** That restarts every tenant at once and leaves a `kubectl-rollout`
 field manager on each Deployment. The warden's drift check
-(`squelch-warden/src/drift.rs`, `foreign_managers`) treats every manager but
+(`crates/squelch-warden/src/drift.rs`, `foreign_managers`) treats every manager but
 its own as foreign, and the roller skips such a tenant on every roll until it
 is repaired with `squelch-control reconcile <label>` (`ROLLOUT.md`, "The five
 things that actually bite", item 1). Instead create the Secret under a NEW name
@@ -2059,7 +2059,7 @@ squelch_embed_session_ready
 # the searches ahead of it. Backfill runs to seconds while a signup's first
 # sync is in progress, and a job that outlives its deadline (4.5 s interactive,
 # 25 s backfill: see INTERACTIVE_DEADLINE and BACKFILL_DEADLINE in
-# squelch-embed/src/protocol.rs) is
+# crates/squelch-embed/src/protocol.rs) is
 # dropped as `abandoned` rather than run for a caller that has given up.
 histogram_quantile(0.99,
   sum by (le, lane) (rate(squelch_embed_queue_wait_seconds_bucket[5m])))
@@ -2091,10 +2091,10 @@ backfilling hard, or one compromised pod flooding it, fills the backfill
 lane's share and holds the single forward pass, and every other tenant's
 backfill waits or gets 429s. The bounds keep that from becoming more than slow:
 each lane has its own share of queued texts (16 interactive, 96 backfill: see
-`INTERACTIVE_SHARE` and `BACKFILL_SHARE` in `squelch-embed/src/coalescer.rs`),
+`INTERACTIVE_SHARE` and `BACKFILL_SHARE` in `crates/squelch-embed/src/coalescer.rs`),
 interactive always runs first, and a body is at most 256 KiB, with about 32
 read and parsed at once and about 256 connections open (see `MAX_BODY_BYTES` in
-`squelch-embed/src/protocol.rs`, `BODY_PERMITS` and `MAX_CONNECTIONS` in
+`crates/squelch-embed/src/protocol.rs`, `BODY_PERMITS` and `MAX_CONNECTIONS` in
 `http.rs`). Searches can still be crowded out by a flood of searches, and every
 caller by a flood of bodies. The signal is `queue_full` on the interactive lane,
 or on lane `none` when the body permits run out, which the refusing-requests
@@ -2990,7 +2990,7 @@ In both states the Ingress is an allowlist, not a deny rule, and deliberately
 so: a deny rule has to enumerate every spelling of the thing it is refusing and
 fails open when it misses one. This fails closed. The two lists are
 `HUMAN_DOOR_PREFIXES` and `AGENT_DOOR_PREFIXES` in
-`squelch-warden/src/objects.rs`, with tests on both. A new unauthenticated
+`crates/squelch-warden/src/objects.rs`, with tests on both. A new unauthenticated
 route in the daemon needs a line in one of them, which is a list in code with a
 test on it rather than a controller annotation nobody reads.
 

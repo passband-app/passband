@@ -12,11 +12,11 @@ yanked = "deny"
 ignore = [
     # rsa: Marvin timing attack on RSA *private-key* operations. Pulled in by
     # jsonwebtoken's rust_crypto backend. Production only VERIFIES RS256 with a
-    # public JWK (squelch-mcp/src/auth.rs); the only private-key use is the
-    # test fixture signer (squelch-mcp/src/testing.rs). No fixed rsa release.
+    # public JWK (crates/squelch-mcp/src/auth.rs); the only private-key use is the
+    # test fixture signer (crates/squelch-mcp/src/testing.rs). No fixed rsa release.
     { id = "RUSTSEC-2023-0071", reason = "RSA private-key ops only in tests; prod verifies with public keys" },
     # crypto-bigint 0.5: timing variability. Reached through p256, which
-    # signs the relay's APNs provider JWT with ES256 (squelch-relay/src/jwt.rs).
+    # signs the relay's APNs provider JWT with ES256 (crates/squelch-relay/src/jwt.rs).
     # An attacker would need fine timing of signatures the relay makes on its
     # own key, from outside the box. No fixed 0.5.x. Leaves with a move of
     # jsonwebtoken to its aws_lc_rs backend, which also drops rsa above.

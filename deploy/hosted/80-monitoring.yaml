@@ -403,7 +403,7 @@ data:
         # from the daemon's own bound, not guessed: ~40 scalar series plus the
         # per-route latency histogram, which the daemon caps at 200 series of
         # 13 samples each (HTTP_SERIES_CAP x (HTTP_BUCKETS + Inf + sum + count)
-        # in squelch-core/src/metrics.rs) = 2600 at the cap, and a daemon at
+        # in crates/squelch-core/src/metrics.rs) = 2600 at the cap, and a daemon at
         # the cap is already reporting a bug through its drop counter. A real
         # daemon exercises ~20 routes and sits around 300. Change the cap or
         # the bucket count and re-do this sum, or the tenant that grows into
@@ -435,7 +435,7 @@ data:
       # Port 9464 is reachable from this agent alone, by that pod's
       # NetworkPolicy.
       #
-      # About 80 series today (squelch-embed/src/metrics.rs: 21 request
+      # About 80 series today (crates/squelch-embed/src/metrics.rs: 21 request
       # counters, two queue-wait histograms of 15, the inference and batch-size
       # histograms, a handful of gauges). The limit is headroom over that, so a
       # change that multiplies the series sheds this one target rather than

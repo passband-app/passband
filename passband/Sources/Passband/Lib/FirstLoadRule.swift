@@ -3,7 +3,7 @@
 //
 // CATCH-UP PRESENT MEANS RUNNING, whatever its numbers say. The daemon opens a
 // walk with `catchup_begin(inbox)`, counts `done` up to it, and only THEN lists
-// Sent and calls `catchup_begin_extend(inbox + sent)` (squelch-core/src/sync/
+// Sent and calls `catchup_begin_extend(inbox + sent)` (crates/squelch-core/src/sync/
 // mod.rs, the first run and the re-walk alike); `catchup_end` clears the pair
 // on finish and on bail. So between the two, /stats carries done == total for
 // a walk that is still going. Finished is catch_up ABSENT. Do not decide on

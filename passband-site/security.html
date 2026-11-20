@@ -272,7 +272,7 @@ Stale source comments are flagged, not trusted.</p>
 <code>on*</code> handlers, no <code>javascript:</code>/<code>data:</code> URLs, no forms, no nested browsing contexts,
 no <code>&lt;meta&gt;</code>/<code>&lt;link&gt;</code>/<code>&lt;base&gt;</code>.</p></div>
 <p class="lbl">Enforcement</p>
-<p><code>squelch-core/src/sync/html.rs:sanitize_email_html</code> - a closed
+<p><code>crates/squelch-core/src/sync/html.rs:sanitize_email_html</code> - a closed
 <code>ammonia::Builder</code> allow-list, run once at ingest before storage; pure, no I/O,
 fixture-tested in the same file. Four deliberate deviations from ammonia&#39;s
 defaults: <code>url_schemes</code> narrowed to <code>{http, https, mailto, cid}</code>; <code>&lt;style&gt;</code> kept with
@@ -416,9 +416,9 @@ pixel still needs remote images on before it fetches. <code>allowTrackers</code>
 warming can never report an open the reader never made.</li>
 <li><strong>The auth half of the gate.</strong> The <code>From</code> header is free text, so contact
 membership alone cannot authorize a tracker bypass.
-<code>squelch-core/src/sync/ingest.rs:extract_auth_pass</code> computes the verdict once at
+<code>crates/squelch-core/src/sync/ingest.rs:extract_auth_pass</code> computes the verdict once at
 ingest into <code>messages.auth_pass</code>;
-<code>squelch-api/src/handlers.rs:get_thread</code> ANDs it into <code>sender_known</code>. Gated
+<code>crates/squelch-api/src/handlers.rs:get_thread</code> ANDs it into <code>sender_known</code>. Gated
 there and not inside <code>is_known_contact</code>, because that call also feeds triage&#39;s
 known-contact importance floor, which must not move.
 The verdict is read from the <strong>TOPMOST</strong> <code>Authentication-Results</code> header: Gmail
@@ -776,7 +776,7 @@ owner replies, what they open, the fatigue score) is served by
 <code>GET /client/person</code> and <code>GET /client/relationships</code>, and read by triage, which
 is the human door&#39;s own backend. It holds counts and timestamps only, never
 email text. No <code>/mcp</code> tool serves any of it, and
-<code>squelch-mcp/tests/agent_door_wire.rs</code> (<code>no_read_tool_serves_the_relationship_ledger</code>)
+<code>crates/squelch-mcp/tests/agent_door_wire.rs</code> (<code>no_read_tool_serves_the_relationship_ledger</code>)
 fails if a read tool&#39;s response carries any ledger field.</p>
 <p class="sec-num">&sect;4b</p>
 <h2 id="s4b">Provider spam</h2>
@@ -844,7 +844,7 @@ FIRST and only then clears the flag locally, so a refused write leaves both
 sides agreeing. There is deliberately no route the other way: squelch cannot
 show anyone the effects of training a filter it does not read.</li>
 </ul>
-<p><strong>Guard tests.</strong> <code>squelch-core/src/store/sqlite/tests/spam.rs</code> seeds one spam row
+<p><strong>Guard tests.</strong> <code>crates/squelch-core/src/store/sqlite/tests/spam.rs</code> seeds one spam row
 beside one ordinary row with overlapping search terms and walks every listing at
 once, so a predicate dropped in a refactor fails there rather than in production.
 The sync suite asserts the &quot;not fetched routinely&quot; half against the mock&#39;s CALL
@@ -876,7 +876,7 @@ is useful out of the box without being able to send. That default is safe to hol
 <code>drafts</code> is the hard gate at all: a draft is a local row, marked as the
 agent&#39;s, that becomes mail only when the owner presses send. What it does
 cost is stated under the residual risks below.
-<code>squelch-core/src/agent_write.rs:AgentWriteAccess::load</code> reads it, and a
+<code>crates/squelch-core/src/agent_write.rs:AgentWriteAccess::load</code> reads it, and a
 STORED value this build does not recognize FAILS CLOSED to <code>none</code>, not to the
 unset default: &quot;the owner chose something we cannot read&quot; is not &quot;the owner
 never chose&quot;. The type has no <code>Default</code> impl so that a failed read can never
@@ -889,9 +889,9 @@ turning it off stops the next tool call, not the next restart.</p>
 <p class="lbl">Enforcement</p>
 <p>The agent door (<code>squelch-mcp</code>) holds a <code>dyn AgentMailer</code> and
 nothing else: no write credential, no message builder, no draft or outbox store
-call (<code>squelch-mcp/src/main.rs:the_mcp_crate_never_reaches_the_draft_store_itself</code>
+call (<code>crates/squelch-mcp/src/main.rs:the_mcp_crate_never_reaches_the_draft_store_itself</code>
 scans its source for those identifiers). The one implementation is
-<code>squelch-api/src/agent_write.rs:ApiAgentMailer</code>, which <code>squelchd serve</code> hands
+<code>crates/squelch-api/src/agent_write.rs:ApiAgentMailer</code>, which <code>squelchd serve</code> hands
 over via <code>ApiState::agent_mailer</code>. The standalone <code>squelch-mcp</code> binary passes
 none and offers neither tool. For each call the mailer:</p>
 <ul>
@@ -937,7 +937,7 @@ success row is best-effort once the mail has left.</li>
 <p>An agent&#39;s composition is deliberately narrower than the owner&#39;s: no
 attachments, no forward, no send group, no read tracking, no scheduling.</p>
 <p><strong>The draft card (MCP Apps).</strong> <code>create_draft</code> names a <code>ui://</code> resource
-(<code>squelch-mcp/src/draft_card.html</code>) that app-capable clients such as Claude
+(<code>crates/squelch-mcp/src/draft_card.html</code>) that app-capable clients such as Claude
 render in a sandboxed frame in place of the raw result. The HTML is static and
 holds no mail: the client hands it the tool&#39;s own arguments and result
 (subject, recipients, the body the agent wrote, the draft id), which the agent
@@ -1091,13 +1091,13 @@ reads every non-spam message, login codes included, because judging them is
 its job; translation reads foreign mail before its first triage for the same
 reason. Access is enforced where mail leaves toward an external reader (§4).
 A remote service with a per-tenant virtual key, reached over https only
-(<code>squelch-warden/src/config.rs</code>, <code>SQUELCH_WARDEN_LLM_BASE_URL</code>).</li>
+(<code>crates/squelch-warden/src/config.rs</code>, <code>SQUELCH_WARDEN_LLM_BASE_URL</code>).</li>
 <li><strong>The embedding service</strong> (<code>squelch-embed</code>, <code>docs/EMBED-SERVICE.md</code>) receives
 the subject and body, cut to <code>protocol::MAX_CHARS_PER_TEXT</code> (8192
 characters), of only the messages that pass
 the sealed gate below, the English of a translated one under the same gate,
 plus the text of every search query that takes the vector leg
-(<code>query_embed_text</code> in <code>squelch-core/src/store/sqlite/search.rs</code>). It is in
+(<code>query_embed_text</code> in <code>crates/squelch-core/src/store/sqlite/search.rs</code>). It is in
 use only when the operator sets <code>SQUELCH_WARDEN_EMBED_URL</code>; unset, each tenant
 embeds in-process, behind the same gate.</li>
 </ul>
@@ -1115,7 +1115,7 @@ embeds in-process, behind the same gate.</li>
 <figcaption>Self-host uses neither service: it embeds in-process and calls no process of ours.</figcaption>
 </figure>
 <p><strong>The sealed gate, at the store side.</strong> One predicate,
-<code>embeddable_mail_sql!</code> (<code>squelch-core/src/store/sqlite/mod.rs</code>), built from
+<code>embeddable_mail_sql!</code> (<code>crates/squelch-core/src/store/sqlite/mod.rs</code>), built from
 the canonical sealed predicates (<code>known_sealed_mail_sql!</code>, <code>sealed_mail_sql!</code>)
 rather than written a third time. A message may be embedded only when it is
 not spam, is not KNOWN sealed (an auth decision, a restriction by the model or
@@ -1169,18 +1169,18 @@ return of the exposure for as long as it lasts, and <code>deploy/hosted/ROLLOUT.
 says so where rollbacks are planned.</li>
 <li><strong>Spam</strong> is excluded by the same predicate (<code>m.is_spam = 0</code>), as before.</li>
 </ul>
-<p>The embedder itself checks nothing (<code>squelch-core/src/embed/remote.rs</code>, module
+<p>The embedder itself checks nothing (<code>crates/squelch-core/src/embed/remote.rs</code>, module
 docs): a second gate inside it would be one more thing to keep in step with the
-first. Tests: <code>squelch-core/src/store/sqlite/tests/embed_gate.rs</code> (every case
+first. Tests: <code>crates/squelch-core/src/store/sqlite/tests/embed_gate.rs</code> (every case
 seals through the agent pipeline with the legacy column still <code>normal</code>),
 <code>sync::tests::no_embedder_ever_reads_a_login_code</code>, and
 <code>translate_pass::tests::the_english_of_mail_that_may_be_sealed_reaches_no_embedder</code>.</p>
 <p><strong>What the embedding service does not do</strong>, each backed by code or a test:</p>
 <ul>
 <li><strong>Logs no text.</strong> Its log lines carry counts, statuses and error words. The
-session&#39;s error type carries nothing (<code>squelch-embed/src/session.rs</code>,
+session&#39;s error type carries nothing (<code>crates/squelch-embed/src/session.rs</code>,
 <code>SessionError</code>), and <code>no_text_or_address_reaches_metrics_or_logs</code> in
-<code>squelch-embed/src/http.rs</code> drives every path with a canary text and fails if
+<code>crates/squelch-embed/src/http.rs</code> drives every path with a canary text and fails if
 it reaches a log line or the metrics. A panic prints a fixed word, the
 thread name and a source location from the process&#39;s own hook, never the
 panic&#39;s payload,
@@ -1198,7 +1198,7 @@ every text to the longest, so tenant B&#39;s latency carried the token length of
 tenant A&#39;s text it happened to share a pass with. One pass per request
 removes the sharing; what tenant B can still observe is that the single
 worker was busy, which says someone was embedding something and nothing about
-what (<code>squelch-embed/src/coalescer.rs</code>, module docs).</li>
+what (<code>crates/squelch-embed/src/coalescer.rs</code>, module docs).</li>
 <li><strong>Caches nothing, and dedups nothing.</strong> A content-keyed shortcut is a
 cross-tenant oracle on latency: tenant B would learn that tenant A received a
 byte-identical message.</li>
@@ -1209,7 +1209,7 @@ are still different users on the node.</li>
 path, a header or the body (<code>EmbedRequest</code> is <code>deny_unknown_fields</code>, one
 field). The bearer token is one fleet-wide value, deliberately not per tenant.
 The accept loop discards the peer address before any handler runs
-(<code>squelch-embed/src/http.rs</code>, <code>serve</code>), so nothing can key a log, metric,
+(<code>crates/squelch-embed/src/http.rs</code>, <code>serve</code>), so nothing can key a log, metric,
 cache or limit on it.</li>
 <li><strong>Has no egress.</strong> Its NetworkPolicy has <code>egress: []</code>, not even DNS, and the
 weights are baked into the image, so a compromised embedder holding text in
@@ -1218,7 +1218,7 @@ monitoring agent on 9464.</li>
 <li><strong>Exports closed labels only.</strong> Every metric label value comes from an enum
 (<code>lane</code>: <code>interactive</code>, <code>backfill</code>, <code>none</code>; <code>outcome</code>: a closed set), and a
 test refuses any label outside those sets or anything shaped like an IP
-address (<code>squelch-embed/src/metrics.rs</code>).</li>
+address (<code>crates/squelch-embed/src/metrics.rs</code>).</li>
 </ul>
 <p><strong>What the shared token is worth.</strong> Against a compromised tenant, nothing: every
 tenant holds it. The boundary is the NetworkPolicy pair (each tenant&#39;s one
@@ -1232,7 +1232,7 @@ A compromised tenant pod (or one daemon backfilling hard) can keep the single
 worker busy and fill a lane&#39;s share, and the other tenants&#39; requests wait,
 expire or get 429s. What it cannot do is make that unbounded or read anything
 by it: every lane has a fixed share of queued texts (<code>INTERACTIVE_SHARE</code> 16,
-<code>BACKFILL_SHARE</code> 96 in <code>squelch-embed/src/coalescer.rs</code>), interactive is served
+<code>BACKFILL_SHARE</code> 96 in <code>crates/squelch-embed/src/coalescer.rs</code>), interactive is served
 first, every job has a deadline (<code>INTERACTIVE_DEADLINE</code>, <code>BACKFILL_DEADLINE</code> in
 <code>protocol.rs</code>), a body is at most 256 KiB (<code>MAX_BODY_BYTES</code>), and body parsing
 and open connections are capped (<code>BODY_PERMITS</code>, about 32, and
@@ -1292,7 +1292,7 @@ guard protected nothing. An older client&#39;s <code>override_guard</code> field
 <figcaption>The matched text itself never leaves the process: not in the response, a log, or the audit row.</figcaption>
 </figure>
 <p class="lbl">Enforcement</p>
-<p><code>squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
+<p><code>crates/squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
 <code>agent_write</code> before <code>perform_send</code>. Detects <code>pem_block</code>, <code>api_key</code> (vendor
 prefixes), <code>otp_code</code> (6–8 digits near an auth word), <code>long_hex</code> (≥32) and
 <code>long_base64</code> (≥40). URLs are scanned like everything else: a link
@@ -1401,7 +1401,7 @@ nothing reaches it today. The read-back is also capped at <strong>5s</strong>
 (<code>ECHO_FETCH_TIMEOUT_SECS</code>): the client&#39;s POST timeout is 15s and <code>action_send</code> has
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo&#39;s failures audited and swallowed; keep it out of core&#39;s write
-surface (the fetch lives in <code>squelch-api/src/write/gmail.rs</code>, core takes bytes).</p>
+surface (the fetch lives in <code>crates/squelch-api/src/write/gmail.rs</code>, core takes bytes).</p>
 </details>
 <details><summary>Scheduled send (audit contract)</summary>
 <p>The outbox door audits under three actions of
@@ -1519,7 +1519,7 @@ after its message has closed, so a partially streamed tool input never runs.</li
 never a parameter, a return value, or an error string - over sessions that refuse
 every redirect, because URLSession carries <code>x-api-key</code> verbatim across a hop.
 Hosted holds no key in the app at all: <code>POST /client/assistant/messages</code>
-(<code>squelch-api/src/assistant.rs</code>) relays with a daemon-held credential and streams
+(<code>crates/squelch-api/src/assistant.rs</code>) relays with a daemon-held credential and streams
 the bytes back, human door only, and 404s when no gateway is configured. The
 conversation body is treated like mail content and logged in neither direction.</li>
 <li><strong>Saved chats on disk.</strong> The conversation behind a question in search history is
@@ -1618,7 +1618,7 @@ it. That move is what the guard below exists for.</p>
 <ul>
 <li><strong>Never before the ask.</strong> Nothing prefetches, previews or probes an unsubscribe
 link: an unsubscribe may complete on a plain GET. The job starts from
-<code>POST /client/unsubscribe</code> with <code>auto: true</code> (<code>squelch-api/src/unsub_job.rs</code>),
+<code>POST /client/unsubscribe</code> with <code>auto: true</code> (<code>crates/squelch-api/src/unsub_job.rs</code>),
 human door only; the agent door has no unsubscribe route at all, and the
 assistant&#39;s tool goes through the confirm card (§6). <code>auto: true</code> also needs
 <code>confirm: true</code>, like every other route that acts for the user: without it
@@ -1638,7 +1638,7 @@ its endpoint. A link picked out of the body runs automatically only when its
 site matches the From domain&#39;s (<code>unsub_job::choose_plan</code>): a colleague&#39;s
 forward of a newsletter is authenticated mail from the colleague carrying
 someone else&#39;s footer, and following it would unsubscribe the colleague.</li>
-<li><strong>SSRF guard, in code, for every deployment</strong> (<code>squelch-api/src/unsub_fetch.rs</code>).
+<li><strong>SSRF guard, in code, for every deployment</strong> (<code>crates/squelch-api/src/unsub_fetch.rs</code>).
 http/https only, ports 80/443 only, no userinfo. Names resolve through a resolver
 that returns PUBLIC addresses only (no loopback, private, link-local, CGNAT,
 multicast, reserved, or v4-in-v6 forms of those); reqwest connects to exactly what
@@ -1650,7 +1650,7 @@ tenants also sit behind their NetworkPolicy; a self-host has only this, which
 is why it is not optional. One gap is inherent: a self-host on a network with
 global IPv6 can reach its LAN&#39;s devices at their global addresses on 80/443,
 because those addresses ARE public.</li>
-<li><strong>One action, and it has to prove itself</strong> (<code>squelch-api/src/unsub_html.rs</code>). A
+<li><strong>One action, and it has to prove itself</strong> (<code>crates/squelch-api/src/unsub_html.rs</code>). A
 form is submitted only when exactly one submit control plausibly unsubscribes
 (one lone button, or the one among several that says so), with no password or
 file field, no required choice left unmade, and NOTHING TYPED: an empty field
@@ -1662,7 +1662,7 @@ page&#39;s answer. The page that comes back must say the user is unsubscribed (i
 so many words, or by the page reader&#39;s verdict); otherwise the job hands the
 link to the user. Optional surveys are never answered.</li>
 <li><strong>The page reader is fenced, cheap, capped and billed</strong>
-(<code>squelch-core/src/triage/unsub_page.rs</code>). The page is untrusted input inside the
+(<code>crates/squelch-core/src/triage/unsub_page.rs</code>). The page is untrusted input inside the
 usual fence; any non-answer is <code>unclear</code>, which costs the user one click. Its
 calls bill to <code>unsub_page</code> and stop at a daily cap.</li>
 <li><strong>Bounded.</strong> 1 MiB bodies, per-request timeouts, a 45s job budget (slot wait
@@ -1672,8 +1672,8 @@ and runs on the blocking pool. A panic inside a job still settles its row.</li>
 <li><strong>The link stays out of logs and the audit.</strong> Audit rows carry the sender and the
 verdict; transport errors are reduced to their kind before they can be printed.</li>
 </ul>
-<p><strong>The browser rung</strong> (<code>squelch-api/src/unsub_browser.rs</code>, <code>unsub_cdp.rs</code>,
-<code>squelch-core/src/triage/unsub_agent.rs</code>). Everything above describes the plain
+<p><strong>The browser rung</strong> (<code>crates/squelch-api/src/unsub_browser.rs</code>, <code>unsub_cdp.rs</code>,
+<code>crates/squelch-core/src/triage/unsub_agent.rs</code>). Everything above describes the plain
 reader, which holds on every daemon. A daemon that was given a Browserbase key
 (every hosted tenant; a self-host only if it brings its own) has one more
 rung: a page the reader gave up on for a reason a real browser could fix
@@ -1759,8 +1759,8 @@ self-hosted daemon with no settings behaves exactly as it always has.</p></div>
 <div class="t stop"><span class="tag">Misconfigured</span><b>Shut</b><span>Answers 503 to everything; never falls back to Open</span></div>
 </div>
 </figure>
-<p><strong>Three modes</strong>, chosen once at startup by <code>squelch-mcp/src/auth.rs:AgentDoorAuth::from_env</code>
-and applied by <code>squelch-mcp/src/lib.rs:agent_door_router</code>, the only public way to
+<p><strong>Three modes</strong>, chosen once at startup by <code>crates/squelch-mcp/src/auth.rs:AgentDoorAuth::from_env</code>
+and applied by <code>crates/squelch-mcp/src/lib.rs:agent_door_router</code>, the only public way to
 build the HTTP agent door (the bare rmcp service is private to the crate):</p>
 <ul>
 <li><strong>Open.</strong> Neither <code>SQUELCH_MCP_OAUTH_ISSUER</code> nor <code>SQUELCH_MCP_PUBLIC_URL</code> is set.
@@ -1962,9 +1962,9 @@ it, and Passband&#39;s own writes always send <code>sendUpdates=none</code>.</p>
 <code>calendar_places</code> (the card&#39;s place per location text), <code>calendar_owned</code>
 (which event Passband made for which ghost, <code>gcal/own.rs</code>) and
 <code>calendar_event_guests</code> (an event&#39;s attendees, deleted with it by a trigger)
-(<code>squelch-core/src/store/sqlite/calendar.rs</code>) are written by the sync loop
-(<code>squelch-core/src/gcal/sync.rs</code>) and, one row at a time after Google accepted
-it, by the user&#39;s own write (<code>squelch-api/src/calendar_write.rs</code>); they are read
+(<code>crates/squelch-core/src/store/sqlite/calendar.rs</code>) are written by the sync loop
+(<code>crates/squelch-core/src/gcal/sync.rs</code>) and, one row at a time after Google accepted
+it, by the user&#39;s own write (<code>crates/squelch-api/src/calendar_write.rs</code>); they are read
 only by <code>handlers.rs:get_timeline</code> and those write handlers.
 Every query is scoped by <code>account_id</code>. A log line names a calendar by its
 position in the pass, never its id, which is usually an address.</li>
@@ -2022,7 +2022,7 @@ is written with the name and address as its location, so the address
 survives Gmail&#39;s copy being deleted. At most 100 calls per account per day (attempts counted in
 memory, spend in the usage ledger under <code>calendar_place</code>). No key, no call.
 The location text is never logged.</li>
-<li><strong>Calendar reminders</strong> (<code>gcal/remind.rs</code>, <code>squelch-api/src/calendar_remind.rs</code>,
+<li><strong>Calendar reminders</strong> (<code>gcal/remind.rs</code>, <code>crates/squelch-api/src/calendar_remind.rs</code>,
 <code>store/sqlite/calendar_remind.rs</code>; the owner&#39;s decision of 2026-10-29,
 against the recommendation to leave the description out and to template
 the banner&#39;s line). ONLY THE USER&#39;S EVENTS (<code>remind::attends</code>): an event
@@ -2113,7 +2113,7 @@ rebuild and in SQL at listing time, so a message that becomes sealed after its
 ghost was built stops serving it at once; a decision that does not parse feeds
 nothing.</li>
 </ul>
-<p><strong>The user&#39;s own writes</strong> (<code>squelch-api/src/calendar_write.rs</code>). <code>POST /client/calendar/events</code>, <code>PATCH</code> and <code>DELETE /client/calendar/events/{calendar_id}/{id}</code>,
+<p><strong>The user&#39;s own writes</strong> (<code>crates/squelch-api/src/calendar_write.rs</code>). <code>POST /client/calendar/events</code>, <code>PATCH</code> and <code>DELETE /client/calendar/events/{calendar_id}/{id}</code>,
 on the human door only, bearer authed, <code>no-store</code>. The order is fixed: the grant,
 the body (title 1 to 200 characters, refused rather than cut; one precision; the
 end after the start; place and description cut to 200 and 2000; all three lose

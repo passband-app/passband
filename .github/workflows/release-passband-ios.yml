@@ -56,7 +56,10 @@ concurrency:
 
 jobs:
   testflight:
-    runs-on: macos-26
+    # App Store Connect requires the iOS 27 SDK (Xcode 27) for uploads from
+    # April 2027 (ITMS-90725), and macos-26 tops out at Xcode 26.x. Xcode 27
+    # ships only on the xcode-27 image. Move to macos-27 once it exists.
+    runs-on: xcode-27
     # The signing and publishing secrets live in this GitHub environment,
     # which only this workflow's own release tags may deploy to, and only
     # admins may push those tags (tag ruleset). Another workflow or branch
@@ -76,6 +79,15 @@ jobs:
             f && /MARKETING_VERSION:/ {gsub(/"/,""); print $2; exit}' passband/project.yml)
           [ "${GITHUB_REF_NAME}" = "passband-ios-$PROJ" ] || {
             echo "tag ${GITHUB_REF_NAME} != passband-ios-$PROJ (project.yml iOS MARKETING_VERSION)"; exit 1; }
+
+      # The image's default Xcode decides the SDK, and an image update can
+      # move it. Fail here, in seconds, rather than upload a build Apple warns
+      # about or refuses.
+      - name: iOS SDK is 27 or later
+        run: |
+          xcodebuild -version
+          SDK=$(xcrun --sdk iphoneos --show-sdk-version)
+          [ "${SDK%%.*}" -ge 27 ] || { echo "::error::iOS SDK $SDK is older than 27 (ITMS-90725)"; exit 1; }
 
       - name: xcodegen
         run: brew install xcodegen

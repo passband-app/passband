@@ -1280,6 +1280,7 @@ fn the_line_rule_keeps_ordinary_lines_and_drops_steered_ones() {
     let good = [
         // concerts / shows
         "Your 2 tickets are in the Ticketmaster email",
+        "Tap to see the ticket in your confirmation email",
         "Doors open at 7, show at 8",
         "Doors open Oct 30, 2026",
         "Doors at 7:30pm, bring your ID",

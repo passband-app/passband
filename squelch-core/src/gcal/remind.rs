@@ -51,12 +51,13 @@ use crate::triage::text::{Untrusted, neutralize, truncate_trimmed};
 use crate::types::{GhostEvent, GhostState};
 
 /// Stored on each plan, so a later prompt can tell which rows to redo.
-pub const PROMPT_VERSION: &str = "calendar-remind-v2";
+pub const PROMPT_VERSION: &str = "calendar-remind-v3";
 /// The prompts whose plans still govern while they wait to be planned again
 /// ([`StoredPlan::governs`]): every version whose `remind`, lead and claims
 /// mean what they mean now. A future prompt that changes what a plan means
 /// leaves the older ones out, and their items fall to the fallback.
-pub const GOVERNING_PROMPTS: [&str; 2] = ["calendar-remind-v1", PROMPT_VERSION];
+pub const GOVERNING_PROMPTS: [&str; 3] =
+    ["calendar-remind-v1", "calendar-remind-v2", PROMPT_VERSION];
 /// The usage-ledger category. Runs the notify model, so
 /// [`crate::metrics::runs_notify_model`] lists it.
 pub const USAGE_CATEGORY: &str = "calendar_remind";
@@ -1577,10 +1578,14 @@ an appointment, 180 for a flight. An all-day item is reminded in the morning \
 whatever this says.
 
 line: one short sentence for the notification, at most 90 characters, that \
-helps at that moment, such as where the tickets are or what to bring. Plain \
+helps at that moment, such as what to bring or when doors open. Plain \
 words only: no links, no email addresses, no phone numbers, no booking codes, \
 and not the time, the date or the place, which are shown already. An empty \
-string when there is nothing useful to add.
+string when there is nothing useful to add. The reminder arrives on their \
+phone, where the mail already is, so never tell them to bring, print, find \
+or have ready a ticket, a boarding pass, a booking or a confirmation email. \
+When open is the mail that holds it, say what tapping shows instead, such as \
+\"Tap to see the ticket in your confirmation email\".
 
 open: what tapping the notification shows, as the number of one mail and, if \
 it is one of that mail's attachments, the attachment's number. Choose the \

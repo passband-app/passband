@@ -2,7 +2,7 @@
   "name": "passband-site",
   "private": true,
   "scripts": {
-    "build": "bun build ./main.tsx --outdir ./dist --minify",
+    "build": "bun build ./main.tsx ./track.ts --outdir ./dist --minify",
     "start": "bun run build && bun run server.ts"
   },
   "dependencies": {

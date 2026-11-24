@@ -106,7 +106,7 @@ Point any MCP client at your daemon:
 { "mcpServers": { "passband": { "type": "http", "url": "https://<box>.<tailnet>.ts.net/mcp" } } }
 ```
 
-Set `SQUELCH_MCP_ALLOWED_HOSTS` to that hostname, or `/mcp` answers 403. The agent gets ranked updates with a one-line "why", reading, threads, search, calendar, deadlines, shipments and sender rules. By default it can write drafts and nothing else. You can loosen or tighten that per mailbox under Settings > Agents. It never sees HTML, spam, or a login code. Full tool list: [squelch-mcp/README.md](squelch-mcp/README.md).
+Set `SQUELCH_MCP_ALLOWED_HOSTS` to that hostname, or `/mcp` answers 403. The agent gets ranked updates with a one-line "why", reading, threads, search, calendar, deadlines, shipments and sender rules. By default it can write drafts and nothing else. You can loosen or tighten that per mailbox under Settings > Agents. It never sees HTML, spam, or a login code. Full tool list: [crates/squelch-mcp/README.md](crates/squelch-mcp/README.md).
 
 ## How it works
 
@@ -144,23 +144,33 @@ cd passband && ./build.sh run          # the Mac app, no Xcode needed
 The iOS target needs Xcode (`xcodegen generate`, then `PassbandiOS`). Signing, releases and the tag namespaces are in [passband/RELEASING.md](passband/RELEASING.md) and [docs/RELEASING.md](docs/RELEASING.md).
 
 <details>
-<summary><b>Workspace layout</b></summary>
+<summary><b>Repo layout</b></summary>
 
-| Component | What it is |
+```
+crates/         the Rust workspace: daemon, doors, hosted services (table below)
+passband/       the Mac and iPhone app, one source tree
+passband-site/  passband.app
+deploy/         self-host guides, the hosted cluster's manifests, AWS (OpenTofu)
+docs/           design and operations docs, plus the triage eval results
+brand/          logos and icons
+scripts/        dev helpers
+```
+
+| Crate | What it is |
 |---|---|
-| [`squelchd`](squelchd/README.md) | the daemon binary: `auth`, `serve`, `pair`, `token` |
+| [`squelchd`](crates/squelchd/README.md) | the daemon binary: `auth`, `serve`, `pair`, `token` |
 | `squelch-core` | store, sync, mail providers, triage, extraction, calendar |
-| [`squelch-api`](squelch-api/README.md) | the human door (`/client`) and the `/console` pages |
-| [`squelch-mcp`](squelch-mcp/README.md) | the agent door (`/mcp`) |
+| [`squelch-api`](crates/squelch-api/README.md) | the human door (`/client`) and the `/console` pages |
+| [`squelch-mcp`](crates/squelch-mcp/README.md) | the agent door (`/mcp`) |
 | `squelch-httpauth`, `squelch-ratelimit` | shared auth and rate limiting |
-| [`squelch-tui`](squelch-tui/README.md) | terminal viewer for setup and debugging |
-| `passband` | the Mac and iPhone app, one source tree |
-| `passband-site` | [passband.app](https://passband.app) |
-| [`squelch-relay`](squelch-relay/README.md) | blind push and read-receipt relay |
+| [`squelch-tui`](crates/squelch-tui/README.md) | terminal viewer for setup and debugging |
+| [`squelch-relay`](crates/squelch-relay/README.md) | blind push and read-receipt relay |
 | `squelch-embed` | shared embedding service (hosted) |
-| [`squelch-control`](squelch-control/README.md), [`squelch-warden`](squelch-warden/README.md) | hosted only: signup, and the per-account provisioner |
-| [`squelch-broker`](squelch-broker/README.md) | consent relay; built, not deployed ([why](docs/BROKER.md)) |
-| `squelch-eval`, `evals` | triage evals |
+| [`squelch-control`](crates/squelch-control/README.md), [`squelch-warden`](crates/squelch-warden/README.md) | hosted only: signup, and the per-account provisioner |
+| [`squelch-broker`](crates/squelch-broker/README.md) | consent relay; built, not deployed ([why](docs/BROKER.md)) |
+| `squelch-eval` | triage evals ([results](docs/evals/README.md)) |
+
+Each service's Dockerfile sits in its crate; build from the repo root, e.g. `docker build -f crates/squelchd/Dockerfile .`
 
 </details>
 

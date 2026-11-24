@@ -154,7 +154,7 @@ flag.
 
 Hosted people are named in PostHog by control, not by the app: signup sends one
 `$set` with `email`, `name` and `hosted: true` on the `aid`
-(`squelch-control/src/posthog.rs`), and `squelch-control analytics identify`
+(`crates/squelch-control/src/posthog.rs`), and `squelch-control analytics identify`
 backfills everyone who signed up. The apps never send an address, so a
 self-hosted install stays a bare UUID. The control plane never sees an event.
 

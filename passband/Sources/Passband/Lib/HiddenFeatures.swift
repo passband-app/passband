@@ -3,7 +3,7 @@ import Foundation
 /// A feature this build has and does not show everybody yet.
 ///
 /// The key is the whole identity, and it is the SAME string the daemon and the
-/// control plane use (`squelch-core/src/features.rs`, whose `KNOWN` list is what
+/// control plane use (`crates/squelch-core/src/features.rs`, whose `KNOWN` list is what
 /// the operator's `/admin/features` page offers). A flag only the app reads
 /// still needs an entry there, or there is no box for anybody to tick.
 ///

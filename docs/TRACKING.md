@@ -111,7 +111,7 @@ mapping exists only in your daemon's `send_trackers` table. Rows live for
 seconds to minutes: the daemon drains every 60 seconds and the cursor deletes
 what it has durably stored. The steady state is an empty table.
 
-Run your own with the repo-root `Dockerfile`:
+Run your own with `crates/squelch-relay/Dockerfile` (build context: the repo root):
 
 ```
 SQUELCH_RELAY_AUTH_TOKEN=<64+ random chars, one unbroken line>

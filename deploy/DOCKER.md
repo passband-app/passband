@@ -25,11 +25,11 @@ takes SIGTERM directly for graceful shutdown.
 
 The package is public — `docker pull ghcr.io/passband-app/squelchd:latest`
 works with no registry login. To build the same image from source instead
-(context must be the workspace root; the repo-root Dockerfile builds the
-relay, not the daemon):
+(context must be the workspace root; `crates/squelch-relay/Dockerfile` builds
+the relay, not the daemon):
 
 ```sh
-docker build -f squelchd/Dockerfile -t squelchd .
+docker build -f crates/squelchd/Dockerfile -t squelchd .
 ```
 
 ## docker-compose.yml

@@ -43,7 +43,7 @@ Standing rules (DECIDED):
 
 - **Calendar records.** Triage emits `RecordProposal::Event { title, start,
   location, evidence }`, plus the wave 1 fields in §3.6
-  (`squelch-core/src/triage/decision.rs`, schema in `triage/agent.rs`). The structural detector in `triage/calendar.rs` covers
+  (`crates/squelch-core/src/triage/decision.rs`, schema in `triage/agent.rs`). The structural detector in `triage/calendar.rs` covers
   invites, updates, cancellations, RSVPs and reservations.
 - **A record is per message.** One dinner can be three records. Wave 1's
   ghosts (§3.6) link a confirmation to its later modification or cancellation
@@ -56,7 +56,7 @@ Standing rules (DECIDED):
 - **No calendar access** (as of this section's writing; signup asks for it
   since 2026-10-27, see §8). The only Google scopes were the three Gmail ones
   and the identity pair. Hosted signup and reconnect
-  require all three Gmail scopes as a floor (`squelch-control/src/oauth.rs`).
+  require all three Gmail scopes as a floor (`crates/squelch-control/src/oauth.rs`).
 - **One daemon is one mailbox.** The client holds one active account and keeps
   an event stream open for each of the others. Nothing merges across accounts
   today.
@@ -1018,7 +1018,7 @@ Only ghosts that pass `GhostEvent::verified()` link mail. A source message
 that is spam, trashed or sealed is never linked. A committed or going ghost
 that matches no event stands alone: its linked mail is its own sources.
 
-#### The plan (`squelch-core/src/gcal/remind.rs`)
+#### The plan (`crates/squelch-core/src/gcal/remind.rs`)
 
 Once per event version (a hash of the title, times, location, description,
 the user's answer, free/busy, the linked message ids, and each candidate's id
@@ -1248,7 +1248,7 @@ and leaving out events Google's own app already reminds about.
 Where the build settled something the design left open, or differs from it:
 
 - **The planner runs in the reminder worker, not after a sync pass**
-  (`squelch-api/src/calendar_remind.rs`). One worker: a plan pass and a fire
+  (`crates/squelch-api/src/calendar_remind.rs`). One worker: a plan pass and a fire
   pass at start, then a fire pass every 30 seconds, a plan pass first on
   every tenth (5 minutes). A sync
   pass only runs with a calendar grant, and committed ghosts are reminded
@@ -1486,7 +1486,7 @@ real calendar.
 - **Scope.** `calendar.events` (read and write events on every calendar the
   user can open) plus `calendar.calendarlist.readonly` (which calendars they
   subscribe to and show), asked for once
-  (`CALENDAR_SCOPES` in `squelch-core/src/config.rs`). "Calendar is granted"
+  (`CALENDAR_SCOPES` in `crates/squelch-core/src/config.rs`). "Calendar is granted"
   means a token's recorded scopes include `calendar.events`; the list scope is
   wanted, not required. Classification is still to be confirmed against
   Google's list at filing; the working assumption is sensitive, not
@@ -1725,7 +1725,7 @@ calendar" below; it has an audit trail instead. Ghosts are not editable, and
 promoting a ghost to a real event is later work.
 
 - **Routes** (human door, bearer authed, `no-store`, in
-  `squelch-api/src/calendar_write.rs`):
+  `crates/squelch-api/src/calendar_write.rs`):
   - `POST /client/calendar/events` with `{"calendar_id", "title", "start",
     "end", "all_day", "location"?, "description"?, "id"?}` answers 201 with
     the event in the timeline's shape. `id` is the new event's id, chosen by
@@ -2482,7 +2482,7 @@ What the flag gates:
   /client/calendar/events`, `PATCH` and `DELETE
   /client/calendar/events/{calendar_id}/{id}`, the reminder routes, `PUT
   /client/person/timezone`) answers the opaque 404 without it, after bearer
-  auth (`calendar_routes` in `squelch-api/src/lib.rs`). Agent MCP's
+  auth (`calendar_routes` in `crates/squelch-api/src/lib.rs`). Agent MCP's
   `search_calendar` is neither listed, described nor answered (`CalendarDoor`
   reads the same live feature set). `/client/stats` says
   `timeline: false` and carries no `calendar` object. The sync loop idles

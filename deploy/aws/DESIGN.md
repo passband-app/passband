@@ -52,7 +52,7 @@ Blackbox has NO public route, ever.
 ## Per-service contract
 
 ### control
-- Image built from the existing `Dockerfile.control` (unchanged), pushed to ECR.
+- Image built from the existing `crates/squelch-control/Dockerfile` (unchanged), pushed to ECR.
 - Secrets (Secrets Manager → ECS `secrets`): `SQUELCH_CONTROL_CLIENT_SECRET`,
   `_COOKIE_KEY`, `_WARDEN_TOKEN`, `_BIFROST_ADMIN_TOKEN`, `_ADMIN_TOKEN`,
   `_RESEND_API_KEY`, `_WORKOS_API_KEY`, `_ALERT_WEBHOOK_URL`, `_DATABASE_URL`.
@@ -60,11 +60,11 @@ Blackbox has NO public route, ever.
   `_WARDEN_URL`, `_BIFROST_URL`, `_TRUSTED_PROXY_HOPS=1` (the ALB appends one
   X-Forwarded-For hop; builder must confirm this matches how squelch-control
   counts hops), `_INVITE_FROM`, `_LLM_BUDGET_USD`, `_LLM_MODELS`,
-  `_ASSISTANT_MODELS`. Read `squelch-control/README.md` for the full table and
+  `_ASSISTANT_MODELS`. Read `crates/squelch-control/README.md` for the full table and
   include anything else it marks required.
 - NOT carried over: `SQUELCH_CONTROL_ALERT_WEBHOOK` (legacy name),
   `BIFROST_ADMIN_USERNAME`/`_PASSWORD` (read by nothing).
-- **Postgres TLS** (`squelch-control/src/pg_tls.rs`, used by `store.rs`
+- **Postgres TLS** (`crates/squelch-control/src/pg_tls.rs`, used by `store.rs`
   `connect`). TLS via `tokio-postgres-rustls`, chosen by the URL's `sslmode`: absent/`disable` keeps
   plaintext `NoTls` (local dev and tests);
   `require` and `verify-full` use rustls with the **AWS RDS global CA bundle**
@@ -75,10 +75,10 @@ Blackbox has NO public route, ever.
   like `squelch-control llm mint`).
 
 ### relay
-- Image from the existing root `Dockerfile`, unchanged.
+- Image from `crates/squelch-relay/Dockerfile`.
 - Secrets: `SQUELCH_RELAY_APNS_KEY`, `_AUTH_TOKEN`, `_PUSH_TOKEN`.
   Env: `_APNS_KEY_ID`, `_APNS_TEAM_ID`, `_APNS_TOPICS`, `_DB_PATH=/data/opens.sqlite3`,
-  plus anything else `squelch-relay/README.md` lists.
+  plus anything else `crates/squelch-relay/README.md` lists.
 - `/data` on EFS (encrypted, access point, single task, `desired_count = 1`,
   deployment min 0 / max 100 so two writers never overlap).
 

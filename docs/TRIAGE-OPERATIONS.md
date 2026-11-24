@@ -461,7 +461,7 @@ them is served to a client.
   and the reason codes (`not_enough_history`, `known_contact`, `wanted_by_rule`,
   `kept_recently`, `rarely_opened`, `cleared_unopened`, `skimmed`, `brief_looks`,
   `read_closely`, `never_clicked`, `high_volume`) live in
-  `squelch-core/src/triage/sender_fatigue.rs`.
+  `crates/squelch-core/src/triage/sender_fatigue.rs`.
 - Opens, dwell and clicks are recorded by Passband clients only. Mail read
   elsewhere looks ignored here, so the scores lean high. Smart clear (below)
   acts on the score: a sender at 75 or more has their unopened open Reading

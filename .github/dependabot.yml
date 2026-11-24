@@ -34,8 +34,7 @@ updates:
 
   - package-ecosystem: docker
     directories:
-      - /
-      - /squelchd
+      - /crates/*
       - /deploy/aws/docker
       - /deploy/aws/monitor
     schedule:

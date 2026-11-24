@@ -1,0 +1,5396 @@
+//! Configuration: `~/.config/squelch/config.toml`, with env-var overrides that
+//! always win. Every threshold and path is a [`Config`] field with a default, so
+//! a missing config file still yields a working system.
+
+use crate::error::CoreError;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+/// Canonical env var for the SQLite path (matches [`Config`]'s `db_path`).
+pub const ENV_DB_PATH: &str = "SQUELCH_DB_PATH";
+/// Legacy alias for [`ENV_DB_PATH`], silently accepted with a deprecation note.
+pub const ENV_DB_PATH_LEGACY: &str = "SQUELCH_DB";
+/// Canonical env var for the account email (matches [`Config`]'s `account_email`).
+pub const ENV_ACCOUNT_EMAIL: &str = "SQUELCH_ACCOUNT_EMAIL";
+/// Legacy alias for [`ENV_ACCOUNT_EMAIL`], silently accepted with a deprecation note.
+pub const ENV_ACCOUNT_EMAIL_LEGACY: &str = "SQUELCH_ACCOUNT";
+/// Account every binary falls back to when neither env var is set.
+pub const DEFAULT_ACCOUNT_EMAIL: &str = "me@localhost";
+/// Comma-separated extra hostnames for the agent door's DNS-rebinding guard,
+/// additive to the loopback defaults (a `tailscale serve` proxy rewrites `Host`).
+pub const ENV_MCP_ALLOWED_HOSTS: &str = "SQUELCH_MCP_ALLOWED_HOSTS";
+
+/// The one canonical default SQLite path, `~/.local/share/squelch/squelch.db`:
+/// every binary resolves here when no path is configured, so they cannot drift
+/// onto different db files. CWD-relative only when `HOME` is unset.
+pub fn default_db_path() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        let dir = PathBuf::from(home).join(".local/share/squelch");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("squelch.db");
+    }
+    PathBuf::from("squelch.db")
+}
+
+/// Read a canonical env var, falling back to a legacy alias with a deprecation
+/// note to stderr (the note carries no value).
+fn env_with_legacy(canonical: &str, legacy: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(canonical)
+        && !v.is_empty()
+    {
+        return Some(v);
+    }
+    if let Ok(v) = std::env::var(legacy)
+        && !v.is_empty()
+    {
+        eprintln!(
+            "squelch: {legacy} is deprecated; please use {canonical} instead (still honored for now)"
+        );
+        return Some(v);
+    }
+    None
+}
+
+/// The SQLite path for ALL binaries: `SQUELCH_DB_PATH` > legacy `SQUELCH_DB` >
+/// [`default_db_path`]. Single source of truth, so binaries cannot drift.
+pub fn resolve_db_path() -> PathBuf {
+    env_with_legacy(ENV_DB_PATH, ENV_DB_PATH_LEGACY)
+        .map(PathBuf::from)
+        .unwrap_or_else(default_db_path)
+}
+
+/// The account email for ALL binaries: `SQUELCH_ACCOUNT_EMAIL` > legacy
+/// `SQUELCH_ACCOUNT` > `default_email`.
+pub fn resolve_account_email(default_email: &str) -> String {
+    env_with_legacy(ENV_ACCOUNT_EMAIL, ENV_ACCOUNT_EMAIL_LEGACY)
+        .unwrap_or_else(|| default_email.to_string())
+}
+
+/// [`resolve_account_email`] against [`DEFAULT_ACCOUNT_EMAIL`]. The single
+/// source of truth for every binary, so they cannot drift onto separate
+/// accounts.
+pub fn account_email() -> String {
+    resolve_account_email(DEFAULT_ACCOUNT_EMAIL)
+}
+
+/// The agent-door DNS-rebinding allow-list: rmcp's loopback defaults PLUS
+/// `SQUELCH_MCP_ALLOWED_HOSTS`. Strictly additive — the loopback entries are
+/// never dropped and the guard is never widened to "any host". Entries may be
+/// bare hosts or `host:port` authorities; blanks are ignored.
+pub fn mcp_allowed_hosts() -> Vec<String> {
+    let mut hosts: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
+    if let Ok(raw) = std::env::var(ENV_MCP_ALLOWED_HOSTS) {
+        for h in raw.split(',') {
+            let h = h.trim();
+            if !h.is_empty() {
+                hosts.push(h.to_string());
+            }
+        }
+    }
+    hosts
+}
+
+/// THE ONE GMAIL SCOPE every consent requests (since 2026-10-27). Google
+/// describes it as "read, compose, and send emails": it covers reading,
+/// labels, archiving and sending, and not permanent deletion. One scope
+/// instead of three means one restricted permission on the consent screen
+/// and one to justify in verification. It is the only Gmail scope declared on
+/// the Cloud project's consent screen.
+///
+/// Token scope does not enforce the two-door split and never could: Google
+/// unions grants per Cloud project, so an access token covers every scope the
+/// user ever granted the project. What enforces it is that the agent door
+/// exposes no write tools, that the Write credential is loaded only by
+/// human-door action handlers, and that sealed rows are absent from every
+/// serving query. See `docs/SECURITY.md` §4.
+pub const GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
+
+/// The Gmail scopes a consent asks for: [`GMAIL_MODIFY_SCOPE`] alone.
+pub const GMAIL_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE];
+
+/// LEGACY, NEVER REQUESTED. Credentials minted before 2026-10-27 carry
+/// `gmail.readonly` (the old Read consent) and `gmail.send` (the old Write
+/// consent, beside modify). A stored or imported token is still accepted on
+/// them: `gmail.readonly` satisfies the Read slot. Nothing asks Google for
+/// either any more, and neither is declared on the consent screen.
+pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+pub const GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
+
+/// What the WRITE credential needs: [`GMAIL_MODIFY_SCOPE`], which also sends.
+pub const WRITE_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE];
+
+/// The OPTIONAL calendar grant. Requested by hosted signup, the hosted
+/// calendar consent (`/reconnect?calendar=1`, beside the Gmail scope) and
+/// `squelchd auth` (its optional calendar step, or `--calendar`); never REQUIRED by any flow, so a person who unticks it at
+/// Google keeps a working mailbox and simply has no calendar.
+///
+/// "Calendar is granted" means a token's recorded scopes include
+/// [`CALENDAR_EVENTS_SCOPE`]. [`CALENDAR_LIST_SCOPE`] is wanted and not
+/// required: without it only the primary calendar is read.
+///
+/// `calendar.events` rather than `calendar.events.owned` or `calendar.readonly`:
+/// the timeline shows events on calendars the user subscribes to but does not
+/// own, and later waves create and answer events. Nothing in this wave writes.
+pub const CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
+pub const CALENDAR_LIST_SCOPE: &str =
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+
+/// Both calendar scopes, in the order a consent asks for them.
+pub const CALENDAR_SCOPES: &[&str] = &[CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOPE];
+/// Google's basic-profile scope: the account's name and profile photo, and
+/// nothing about mail. Non-sensitive in Google's own classification.
+///
+/// REQUESTED, NEVER REQUIRED. It rides along on the Read consent so the client
+/// can show a face and a name instead of an initial and a mailbox local part,
+/// and every check that holds a grant against a request leaves it out: a
+/// person who unticks it, and every credential minted before it existed, has a
+/// token that syncs exactly as well. The only consumer is the sync loop's
+/// profile refresh, which treats a refusal as "no picture" and moves on.
+///
+/// The long spelling, not `profile`: Google accepts either on the request and
+/// echoes this one on the response, so one string serves both directions.
+pub const GOOGLE_PROFILE_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.profile";
+
+/// Which backend persists OAuth tokens: the OS keyring, or a mode-0600 JSON
+/// file (the only option on a headless box with no desktop keyring). Defaults
+/// to keyring on macOS, file everywhere else; and the keyring is the macOS
+/// keychain alone, so elsewhere `keyring` is refused up front, at boot or
+/// before a consent (`credentials::ensure_backend`), rather than linked for a
+/// box that never selects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialBackend {
+    Keyring,
+    File,
+}
+
+impl Default for CredentialBackend {
+    fn default() -> Self {
+        // The keyring is the macOS keychain; no other platform has a store in
+        // this build (`credentials::os_keyring`).
+        if cfg!(target_os = "macos") {
+            CredentialBackend::Keyring
+        } else {
+            CredentialBackend::File
+        }
+    }
+}
+
+impl CredentialBackend {
+    /// Case-insensitive parse of `credential_backend` / `SQUELCH_CRED_BACKEND`;
+    /// an unknown value leaves the caller on the platform default.
+    pub fn from_str_lenient(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "keyring" => Some(CredentialBackend::Keyring),
+            "file" => Some(CredentialBackend::File),
+            _ => None,
+        }
+    }
+}
+
+/// Which LLM provider Stage-2 talks to. Selected by KEY PREFIX at resolution
+/// time (see [`Stage2Config::resolve_llm`]) unless forced via the
+/// `stage2_provider` config field / `SQUELCH_STAGE2_PROVIDER` env var.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage2Provider {
+    Anthropic,
+    OpenAI,
+}
+
+impl Stage2Provider {
+    /// Case-insensitive parse of `stage2_provider` / `SQUELCH_STAGE2_PROVIDER`;
+    /// an unknown value leaves the caller on prefix sniffing.
+    pub fn from_str_lenient(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "anthropic" => Some(Stage2Provider::Anthropic),
+            "openai" => Some(Stage2Provider::OpenAI),
+            _ => None,
+        }
+    }
+
+    /// A stable lowercase label for the provider, surfaced on `/client/usage`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage2Provider::Anthropic => "anthropic",
+            Stage2Provider::OpenAI => "openai",
+        }
+    }
+
+    /// Default cost-ledger prices (USD per MTok in, out) — change with the model.
+    pub fn default_prices(self) -> (f64, f64) {
+        match self {
+            Stage2Provider::Anthropic => (1.0, 5.0),
+            Stage2Provider::OpenAI => (0.15, 0.60),
+        }
+    }
+}
+
+/// Gmail changed quotas for new projects in May 2026. Older projects may retain
+/// their previous quota; select legacy only after checking the Cloud console.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GmailQuotaProfile {
+    #[default]
+    Standard,
+    Legacy,
+}
+
+impl std::str::FromStr for GmailQuotaProfile {
+    type Err = &'static str;
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "standard" => Ok(Self::Standard),
+            "legacy" => Ok(Self::Legacy),
+            _ => Err("expected standard or legacy"),
+        }
+    }
+}
+
+/// Sync tunables.
+/// The deepest `sync.archive_days` is allowed to reach: twenty years. A bound
+/// at all so the walk's date arithmetic cannot overflow and its listing never
+/// asks Gmail for an instant before the epoch; this one because no mailbox
+/// this daemon can read is older.
+pub const ARCHIVE_DAYS_MAX: u32 = 7300;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncConfig {
+    /// Env: SQUELCH_GMAIL_QUOTA_PROFILE. Standard: 6,000 units/minute,
+    /// messages.get 20 units. Legacy: 15,000/minute, messages.get 5 units.
+    pub gmail_quota_profile: GmailQuotaProfile,
+    /// How many days of history to backfill on the initial sync.
+    pub backfill_days: u32,
+    /// HOW OLD BULK MAIL MAY BE AND STILL BE TRIAGED ON A WINDOW READ, in
+    /// days. The first backfill and a catch-up read `backfill_days` of inbox;
+    /// a message in it that carries a `List-Unsubscribe` header and that the
+    /// provider received longer ago than this is stored as an archive row
+    /// instead (findable by search, openable in the reader, no model call
+    /// unless something surfaces it). Mail without the header is triaged at
+    /// any age in the window, and so is list mail that a Surface or Filtered
+    /// sender rule matches or that reads as a bill, a calendar invitation, a
+    /// receipt or a shipment. Live arrivals are never affected.
+    ///
+    /// 7 because nothing a first load shows reaches further back than a week
+    /// (the Reading board) and three quarters of a typical month of inbox is
+    /// list mail: a new tenant spent a whole month's model budget in two days
+    /// triaging three-week-old newsletters. Set it to `backfill_days` or more
+    /// to triage the whole window again. Config file only: there is no
+    /// environment override.
+    pub backfill_bulk_triage_days: u32,
+    /// HOW FAR BACK THE ARCHIVE REACHES, in days: mail this old is fetched once
+    /// by a slow background walk and stored findable by search and openable in
+    /// the reader, with no model call at ingest. It is its own window and moves
+    /// none of the others: triage cutover, the blank-body heal, the spam page
+    /// and catch-up all keep reading `backfill_days`. Raising it resumes the
+    /// walk; 0 turns the archive off. Set in the config file only: there is
+    /// no environment override. Clamped to [`ARCHIVE_DAYS_MAX`] at load.
+    ///
+    /// FIVE YEARS BY DEFAULT (1825). Mail more than a year back is stored
+    /// LITE, its text without its HTML (`sync::ARCHIVE_LITE_AFTER_DAYS`), so
+    /// the four extra years cost a fraction of the first. A walk that finished
+    /// at the old default of 365 is not finished at this one, and resumes from
+    /// its cursor (the target is measured from now on every chunk).
+    pub archive_days: u32,
+    /// THE ARCHIVE WALK'S DISK FLOOR, in MiB: the walk stores nothing while
+    /// the filesystem holding the database has less than this free, and holds
+    /// off just the same when free space cannot be read. A year of bodies is
+    /// the largest thing this daemon writes, and a full disk fails the LIVE
+    /// ingest, not the walk.
+    ///
+    /// THE FLOOR IN FORCE IS THIS OR A FIFTH OF THE WHOLE FILESYSTEM (AT MOST
+    /// 5 GiB), WHICHEVER IS LARGER. A volume can be shared (every hosted tenant's
+    /// database sits on one), and a fixed number of MiB is then a floor for
+    /// all of them together; a share of the volume is one that still means
+    /// something there. Once held, the walk resumes at the floor plus a
+    /// tenth, so it does not start and stop around one number.
+    ///
+    /// 0 turns the free-space check off, the fifth included. Config file only.
+    pub archive_min_free_mb: u64,
+    /// THE ARCHIVE WALK'S CEILING ON ITS OWN DATABASE, in MiB: the walk stores
+    /// nothing while the database file plus its write-ahead log is this large
+    /// or larger. Free space is everybody's on a shared volume; this is the
+    /// one limit that is the account's alone. Live mail is never held by it.
+    /// 0 is no ceiling. Config file only.
+    pub archive_max_db_mb: u64,
+    /// How often (seconds) the incremental poll loop calls `history.list`; one
+    /// poll batch is the coalesced batch.
+    pub poll_secs: u64,
+    /// THE POLL INTERVAL THE LANE BACKS OFF TO while the mailbox is idle, in
+    /// seconds: after a tick that found nothing changed the wait doubles from
+    /// `poll_secs` up to this, and a tick that found a change, a manual
+    /// refresh, or a connected event stream (a client with the app open)
+    /// resets it to `poll_secs`. 0, the default, is no backoff: every tick
+    /// waits `poll_secs`, as it always has. Off by default because the poll
+    /// is how new mail is noticed, so the backoff is a trade of idle Gmail
+    /// requests for arrival latency up to this many seconds when no client
+    /// is connected, and that trade is the operator's to make.
+    /// Env: SQUELCH_IDLE_POLL_SECS.
+    pub idle_poll_secs: u64,
+    /// HOW MANY `messages.get` CALLS ARE IN FLIGHT AT ONCE while a window of
+    /// mail is fetched (the first backfill, a catch-up, a history walk).
+    ///
+    /// The fetch used to be one GET at a time, each awaited to completion and
+    /// then its embedding awaited too, before the next was even started. That
+    /// serialised network latency behind CPU work and left the Gmail budget
+    /// half idle. Overlapping the GETs lets the budget be the only limiter,
+    /// which is what it is for.
+    ///
+    /// 2, MEASURED. On a 30-day window of an ordinary mailbox (release build)
+    /// width 2 took about two thirds of the time of width 1, and width 4 was no
+    /// faster than width 2: from two onward the shared Gmail budget (about four
+    /// `messages.get` a second under the Standard profile) is the only limiter,
+    /// so a wider window buys nothing. What it costs is memory: every in-flight
+    /// message is a raw RFC 822 body held until it is ingested, plus its base64
+    /// carrier, and a message can be tens of megabytes. The first backfill is
+    /// already the peak of a hosted pod's life (see `crate::mem`), and an
+    /// OOM-kill there is a crash LOOP, not a crash: the restart re-lists the
+    /// same window in the same order and dies at the same message. Two is the
+    /// whole speed gain at half the exposure of four.
+    /// Env: SQUELCH_FETCH_CONCURRENCY. 0 is read as 1.
+    pub fetch_concurrency: usize,
+    /// HOW MANY SPAM MESSAGES one on-demand spam sync will fetch, newest first.
+    ///
+    /// The spam folder is not walked by the poll loop at all (see
+    /// `SyncEngine::sync_spam_window`); it is fetched when somebody opens the
+    /// page. That makes this a bound on how long that click can take. A real
+    /// mailbox holds thousands of spam messages in a month and the fetch is one
+    /// request per message, so an uncapped sync would be a tab that spins for
+    /// twenty minutes.
+    ///
+    /// 200 because the page answers ONE question — "did something real get
+    /// filtered?" — and that question is about recent mail. Somebody hunting
+    /// further back has Gmail, which is better at it.
+    pub spam_max: u32,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            gmail_quota_profile: GmailQuotaProfile::Standard,
+            backfill_days: 30,
+            backfill_bulk_triage_days: 7,
+            archive_days: 1825,
+            archive_min_free_mb: 2048,
+            archive_max_db_mb: 4096,
+            poll_secs: 5,
+            idle_poll_secs: 0,
+            fetch_concurrency: 2,
+            spam_max: 200,
+        }
+    }
+}
+
+/// Notification tunables: the whole non-structural policy for what earns a row
+/// in the `events` table, plus the FAST LANE's own knobs (docs/NOTIFY.md §11.5).
+///
+/// The block splits in two. The first three numbers answer "is this verdict
+/// worth a buzz, and did we get to it in time" and are read by
+/// [`crate::triage::events`] at every emission site, deliberate lane included.
+/// Everything after them belongs to the ingest-time fast lane: which model it
+/// asks, how long it may take, how much of it may run at once, and what it
+/// costs. A daemon with no LLM configured reads only the first three.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotifyConfig {
+    /// Fast-model importance at or above which a message qualifies for a push.
+    /// All model-assessed auth qualifies regardless of importance. Default 40:
+    /// over-notifying beats burying mail in FYE, so actionable automated
+    /// notices (the prompts' 40-59 band) push too.
+    /// Env: `SQUELCH_NOTIFY_MIN_IMPORTANCE`.
+    pub min_importance: u8,
+    /// THE FIRST-SIGHT TEST: mail whose `Date:` header is older than this when
+    /// we FIRST see it never becomes notifiable, whatever its verdict. Mail
+    /// dated in the FUTURE is out of the window too, so a sender-controlled
+    /// `Date:` cannot buy freshness (see [`crate::triage::events::is_fresh`]).
+    ///
+    /// It is applied ONCE, at ingest, and the answer is stamped on the row as
+    /// `triage.notify_eligible_at` — it is no longer re-asked at every emission
+    /// site. That is what stopped it eating notifications for mail that WAS
+    /// fresh when it arrived and simply waited behind a queue: past this window
+    /// the old check did not delay a notification, it deleted one. Default 900.
+    /// Env: `SQUELCH_NOTIFY_FRESHNESS_WINDOW_SECS`.
+    pub freshness_window_secs: u64,
+    /// THE RESCUE CEILING: how long after we first saw a message a verdict may
+    /// still buzz for it. Measured from `triage.notify_eligible_at` — the
+    /// moment WE saw it — never from the sender's `Date:`, so a slow model call
+    /// or a queue behind a backlog still lands. Past it the drop is COUNTED
+    /// (`squelchd_notify_decisions_total{decision="expired"}`) instead of
+    /// silent.
+    ///
+    /// One hour is the horizon past which "you probably have not seen this yet"
+    /// stops being true, and it is also what keeps a multi-hour gateway outage
+    /// from turning into a notification storm the moment it clears. Default
+    /// 3600. Env: `SQUELCH_NOTIFY_RESCUE_WINDOW_SECS`.
+    pub rescue_window_secs: u64,
+
+    // ---- the fast lane (docs/NOTIFY.md §11.5) ------------------------------
+    /// Enables the independent small-model notification assessment. Disabling
+    /// it leaves notification decisions to the full agent; no heuristic fallback
+    /// classifies auth or sender rules. Env: `SQUELCH_NOTIFY_FAST_ENABLED`.
+    pub fast_enabled: bool,
+    /// Legacy configuration compatibility only. Agent triage pushes all
+    /// model-assessed auth and does not use the retired sealed-notification gate.
+    /// Env: `SQUELCH_NOTIFY_SEALED_ENABLED`.
+    pub sealed_enabled: bool,
+    /// The model the fast lane asks. A SMALL one on purpose: the question it
+    /// answers ("does this deserve to interrupt the phone right now") is asked
+    /// on every eligible message, at ingest, in front of a user waiting for a
+    /// buzz, and the deliberate lane is right behind it with the capable model.
+    /// Qualified with the gateway's provider prefix at call time, never here,
+    /// because the prefix is a property of the endpoint (see
+    /// [`crate::triage::llm::qualify_gateway_model`]). Default
+    /// `claude-haiku-4-5`. Env: `SQUELCH_NOTIFY_MODEL`.
+    pub model: String,
+    /// Reasoning depth for the notify call, sent as `output_config.effort`.
+    /// `None` by default, which is what the default model REQUIRES: Haiku 4.5
+    /// 400s on every call that carries the field. Env: `SQUELCH_NOTIFY_EFFORT`
+    /// (`none`/`off` clears it).
+    pub effort: Option<String>,
+    /// Body characters the notify prompt may carry, through the same fence
+    /// every other prompt uses. 1500 rather than Stage-1's several thousand:
+    /// the interrupt-worthiness of a message is decided by its opening, and
+    /// tokens here are latency a user is waiting on. Env:
+    /// `SQUELCH_NOTIFY_MAX_BODY_CHARS`.
+    pub max_body_chars: usize,
+    /// Hard ceiling on ONE fast-lane model call, retries included (there are
+    /// none: the lane makes a single attempt and the deliberate lane is the
+    /// retry). Past it the lane records `unavailable` and gets out of the way.
+    /// 8 seconds is chosen from the other side: a notification that lands a
+    /// quarter minute after the mail did is not a notification, it is a
+    /// surprise. Env: `SQUELCH_NOTIFY_FAST_TIMEOUT_SECS`.
+    pub fast_timeout_secs: u64,
+    /// Fast-lane calls allowed in flight at once (semaphore permits). Bounds a
+    /// burst of mail into a bounded number of sockets and a bounded share of
+    /// the gateway's rate limit; anything over it waits rather than fails.
+    /// Env: `SQUELCH_NOTIFY_FAST_CONCURRENCY`.
+    pub fast_concurrency: usize,
+    /// Per-account-per-day cap on fast-lane calls, counted in the same
+    /// `wake_budget` ledger as the stages but on its OWN key. Like
+    /// [`RevisitPassConfig::daily_cap`] it takes NO `app_settings` override:
+    /// this is a runaway guard, not a working budget. 1000 messages a day is
+    /// well past a real mailbox's eligible volume, and at the default model's
+    /// prices it is small change. Env: `SQUELCH_NOTIFY_DAILY_CAP`.
+    pub daily_cap: u32,
+    /// Per-MTok input price of [`NotifyConfig::model`], for the usage ledger.
+    /// ITS OWN NUMBER, not Stage-1's: the `notify` category runs a different
+    /// model, and pricing it at the stage-1 rates every extractor shares would
+    /// bill Haiku calls at Opus prices and overstate the lane by ~25x. Default
+    /// 1.0 (Haiku 4.5). Env: `SQUELCH_NOTIFY_PRICE_IN_PER_MTOK`.
+    pub price_in_per_mtok: f64,
+    /// Per-MTok output price of [`NotifyConfig::model`]. Default 5.0. Env:
+    /// `SQUELCH_NOTIFY_PRICE_OUT_PER_MTOK`.
+    pub price_out_per_mtok: f64,
+}
+
+impl NotifyConfig {
+    /// The fast lane's deadline, bounded like every triage wait: at least a
+    /// second, at most a day (`agent_config::MAX_TIMEOUT_SECS`), so the
+    /// access call, its lease and the notification lease read one number
+    /// and an absurd setting cannot size a lease past what the arithmetic
+    /// on it assumes.
+    pub fn fast_deadline_secs(&self) -> u64 {
+        self.fast_timeout_secs
+            .clamp(1, crate::triage::agent_config::MAX_TIMEOUT_SECS)
+    }
+}
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            min_importance: 40,
+            freshness_window_secs: 900,
+            rescue_window_secs: 3600,
+            fast_enabled: true,
+            // ON since 0.0.6; the field doc names the client release it waited
+            // on.
+            sealed_enabled: true,
+            model: "claude-haiku-4-5".to_string(),
+            // Haiku 4.5 has no effort support, and sending the field is a 400.
+            effort: None,
+            max_body_chars: 1500,
+            fast_timeout_secs: 8,
+            fast_concurrency: 4,
+            daily_cap: 1000,
+            // claude-haiku-4-5 per-MTok (input / output).
+            price_in_per_mtok: 1.0,
+            price_out_per_mtok: 5.0,
+        }
+    }
+}
+
+/// The model behind smart clear's one question (`[smart_clear]`): has what this
+/// Reading mail is about already expired? See [`crate::triage::smart_clear`].
+///
+/// ITS OWN MODEL AND ITS OWN PRICES, the fourth pair in the ledger. It is not
+/// the notify model (too small to do date arithmetic over sixty summaries
+/// reliably) and not Stage-1's (far more than the question needs), so both
+/// cost estimators price its category off the two numbers here. Change the
+/// model and these prices move with it, or the estimate drifts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmartClearConfig {
+    /// The model asked. Default `claude-sonnet-5`, which the hosted gateway's
+    /// allow-list carries in both spellings (verified 2026-10-05; it does NOT
+    /// carry `claude-sonnet-5-5`). Qualified with the gateway's provider
+    /// prefix at call time, like every other model here.
+    pub model: String,
+    /// Reasoning depth, sent as `output_config.effort`. Default `low`: the
+    /// question is date arithmetic, and the owner is waiting on the answer.
+    pub effort: Option<String>,
+    /// USD per million input tokens for `model`. Default 2.0, the list price
+    /// of `claude-sonnet-5` (Anthropic first-party API rates as of
+    /// 2026-09-25).
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, same source.
+    pub price_out_per_mtok: f64,
+}
+
+impl Default for SmartClearConfig {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-5".to_string(),
+            effort: Some("low".to_string()),
+            // claude-sonnet-5 per-MTok (input / output).
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+        }
+    }
+}
+
+/// Auto-translate (docs/TRANSLATION.md): mail in another language is
+/// translated to English in the refine lane. ON by default and file-only: the
+/// feature takes hold when the daemon version rolls, so there is deliberately
+/// no env var and no warden knob behind any of this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateConfig {
+    /// Whether the translate pass runs at all. Detection at ingest is local and
+    /// free, so this gates only the model spend. Default `true`.
+    pub enabled: bool,
+    /// The model that translates. Qualified with the gateway's provider prefix
+    /// at call time, never here (see
+    /// [`crate::triage::llm::qualify_gateway_model`]). Default
+    /// `claude-sonnet-5`, which every tenant's Bifrost allow-list already
+    /// carries.
+    pub model: String,
+    /// USD per million input tokens for `model`, for the usage estimators
+    /// (`metrics::estimate_cost_usd` and `/client/usage`), which price the
+    /// `translate` ledger category here rather than letting it fall through
+    /// to the Stage-1 arm. Default 2.0, Claude Sonnet 5's list price.
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, Claude
+    /// Sonnet 5's list price.
+    pub price_out_per_mtok: f64,
+    /// Per-account-per-day spend cap in US dollars, priced at
+    /// [`Self::price_in_per_mtok`] / [`Self::price_out_per_mtok`] from the
+    /// `translate` usage ledger: a runaway guard on the tenant's LLM key,
+    /// which translation shares with triage. Each message's cost is
+    /// ESTIMATED before its call to decide whether it fits what is left
+    /// today, and the day's spend is SETTLED from the usage the provider
+    /// actually reported. Over it, live rows stay `pending` until the next
+    /// UTC day (and triage does not wait for them), backfill rows are queued
+    /// `deferred`. No `app_settings` override. Default 0.50: at Sonnet 5's
+    /// prices, roughly a hundred short messages a day, or twenty of 5,000
+    /// characters.
+    pub daily_budget_usd: f64,
+}
+
+impl Default for TranslateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "claude-sonnet-5".to_string(),
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+            daily_budget_usd: 0.50,
+        }
+    }
+}
+
+impl Config {
+    /// Whether a translator will ever work a queued row: translation is on
+    /// and an LLM is configured. The same two facts
+    /// [`crate::translate::TranslateClient::from_config`] needs. The human
+    /// door asks it so it never tells the reader "Translating..." about a
+    /// row nothing will translate.
+    pub fn translation_active(&self) -> bool {
+        self.translate.enabled && self.stage2.resolve_llm().is_some()
+    }
+}
+
+/// Scheduled re-evaluation tunables for agent triage's revisit jobs, in plain
+/// numbers so they round-trip through TOML and env vars.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RevisitPassConfig {
+    /// Master switch. Off means verdicts are never revisited and mail whose
+    /// moment has passed stays where it was filed. Env: `SQUELCH_REVISIT_ENABLED`.
+    pub enabled: bool,
+    /// Re-evaluations attempted per sync cycle. Env:
+    /// `SQUELCH_REVISIT_BATCH_PER_CYCLE`.
+    pub batch_per_cycle: usize,
+    /// Per-account-per-day cap on bounded revisit investigations, enforced in
+    /// addition to shared account, thread and sender limits. It takes no
+    /// app_settings override. Env: `SQUELCH_REVISIT_DAILY_CAP`.
+    pub daily_cap: u32,
+    /// Revisits stored per message per pass. Env: `SQUELCH_REVISIT_MAX_PER_MESSAGE`.
+    pub max_per_message: usize,
+    /// Total re-evaluations one message may ever receive: the termination
+    /// guarantee for a verdict that keeps asking to be looked at again. Env:
+    /// `SQUELCH_REVISIT_MAX_LIFETIME`.
+    pub max_per_message_lifetime: u32,
+    /// Nearest a revisit may be scheduled (hours). Env: `SQUELCH_REVISIT_MIN_LEAD_HOURS`.
+    pub min_lead_hours: i64,
+    /// Furthest out a revisit may be scheduled (days); beyond this it is dropped
+    /// as a hallucinated date. Env: `SQUELCH_REVISIT_MAX_HORIZON_DAYS`.
+    pub max_horizon_days: i64,
+    /// Revisits closer together than this are one revisit (hours). Env:
+    /// `SQUELCH_REVISIT_DEDUPE_HOURS`.
+    pub dedupe_window_hours: i64,
+}
+
+impl Default for RevisitPassConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            batch_per_cycle: 10,
+            // ~$2/day at the Stage-1 per-call price. Re-evaluation is a trickle
+            // by design — a handful of rows come due on any given day — so a cap
+            // this size is a runaway guard, not a working budget.
+            daily_cap: 50,
+            max_per_message: 4,
+            max_per_message_lifetime: 6,
+            min_lead_hours: 1,
+            max_horizon_days: 400,
+            dedupe_window_hours: 12,
+        }
+    }
+}
+
+impl RevisitPassConfig {
+    // Every duration goes through a clamp. `Duration::days` PANICS out of
+    // range, and these numbers come from an operator's TOML or env:
+    // `SQUELCH_REVISIT_MAX_HORIZON_DAYS` with one too many digits would
+    // otherwise take down the triage worker the first time a verdict
+    // scheduled anything. A typo deserves the default, not a crash.
+
+    /// Nearest a revisit may be scheduled.
+    pub fn min_lead(&self) -> chrono::Duration {
+        hours_or(self.min_lead_hours, chrono::Duration::hours(1))
+    }
+
+    /// Furthest out a revisit may be scheduled.
+    pub fn max_horizon(&self) -> chrono::Duration {
+        days_or(self.max_horizon_days, chrono::Duration::days(400))
+    }
+
+    /// Revisits closer together than this are one revisit.
+    pub fn dedupe_window(&self) -> chrono::Duration {
+        hours_or(self.dedupe_window_hours, chrono::Duration::hours(12))
+    }
+}
+
+/// The furthest out any revisit knob may reach, in days. A decade is already
+/// past the point where "look again then" means anything, and the ceiling is
+/// what keeps `now + horizon` inside the range [`chrono::DateTime`] can hold —
+/// that addition panics on overflow, and it runs on the sync task.
+const REVISIT_MAX_DAYS: i64 = 3650;
+
+/// `hours` as a [`chrono::Duration`], clamped to [`REVISIT_MAX_DAYS`] and
+/// floored at zero; `fallback` if it somehow still does not fit.
+fn hours_or(hours: i64, fallback: chrono::Duration) -> chrono::Duration {
+    let bounded = hours.clamp(0, REVISIT_MAX_DAYS * 24);
+    chrono::Duration::try_hours(bounded).unwrap_or(fallback)
+}
+
+/// `days` as a [`chrono::Duration`], clamped to [`REVISIT_MAX_DAYS`] and floored
+/// at zero (a zero horizon schedules nothing, as it always has); `fallback` if
+/// it somehow still does not fit.
+fn days_or(days: i64, fallback: chrono::Duration) -> chrono::Duration {
+    let bounded = days.clamp(0, REVISIT_MAX_DAYS);
+    chrono::Duration::try_days(bounded).unwrap_or(fallback)
+}
+
+/// APNs pusher config; see [`crate::push`] for the task itself.
+///
+/// `relay_url` IS THE FEATURE FLAG: absent (the default), the pusher is never
+/// spawned and no socket is ever opened toward anyone. Nothing here configures
+/// content, because the relay is blind — the push carries an event id and a
+/// collapse id and nothing else.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PusherConfig {
+    /// Base URL of the squelch relay (e.g. `https://relay.example.com`). The
+    /// pusher POSTs to `{relay_url}/v1/push`. Env: `SQUELCH_RELAY_URL`.
+    /// `None` => the pusher task is not spawned at all.
+    pub relay_url: Option<String>,
+    /// Bearer presented to the relay: its `SQUELCH_RELAY_AUTH_TOKEN` for a
+    /// self-hosted daemon (push AND the opens drain), or its push-only
+    /// `SQUELCH_RELAY_PUSH_TOKEN` for a hosted tenant. Env: `SQUELCH_RELAY_TOKEN`.
+    /// Prefer the env var over config.toml — this is secret material, and it is
+    /// NEVER logged.
+    pub relay_token: Option<String>,
+    /// Optional `apns-topic` (bundle id) override, forwarded verbatim. Must be in
+    /// the relay's own allowlist. Env: `SQUELCH_RELAY_TOPIC`.
+    pub topic: Option<String>,
+    /// The FALLBACK APNs environment (`production` | `sandbox`), for devices
+    /// that did not declare their own at registration. Normalized by the
+    /// pusher; a value the relay would refuse is dropped with a warning.
+    /// Env: `SQUELCH_RELAY_APNS_ENV`.
+    pub environment: Option<String>,
+}
+
+/// Outbound read-tracking config; see [`crate::tracking`].
+///
+/// `base_url` IS THE FEATURE FLAG for MINTING: absent (the default), no send
+/// ever gets a pixel no matter what the client asks for, and the human door
+/// reports tracking as unconfigured so the client can hide the toggle. It is
+/// deliberately separate from `[pusher] relay_url` — the pixel has to be
+/// reachable from a stranger's mail client, which the relay may or may not be.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrackingConfig {
+    /// PUBLIC base URL that reaches this daemon's `/t/:token` route (e.g.
+    /// `https://track.example.com`); the pixel is `{base_url}/t/{token}`.
+    /// Env: `SQUELCH_TRACK_URL`. `None` => tracking is off for every send.
+    pub base_url: Option<String>,
+}
+
+/// Smart re-notify's tunables (issue #625, docs/RENOTIFY.md). WHETHER it runs
+/// is the `renotify` hidden feature ([`crate::features::RENOTIFY`]), per
+/// tenant; this is only HOW. Every field is in minutes or a count, and every
+/// one has an env override, because hosted has no config file to edit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RenotifyConfig {
+    /// How long the Mac app must have been disconnected for its next
+    /// connection to count as the owner arriving. Default 120.
+    /// Env: `SQUELCH_RENOTIFY_MIN_OFFLINE_MINS`.
+    pub min_offline_mins: u64,
+    /// How long the connection must then stay up before the banner fires, in
+    /// SECONDS: lets the app's own replay land first and drops a wake that
+    /// sleeps again at once. Default 30. Env: `SQUELCH_RENOTIFY_SETTLE_SECS`.
+    pub online_settle_secs: u64,
+    /// Minutes after a meeting ends before its window opens. Default 3.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_END_DELAY_MINS`.
+    pub meeting_end_delay_mins: u64,
+    /// How long that window stays open. Default 10.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_END_WINDOW_MINS`.
+    pub meeting_end_window_mins: u64,
+    /// A timed event longer than this is a block, not a meeting: its end is no
+    /// trigger. Default 240. Env: `SQUELCH_RENOTIFY_MAX_MEETING_MINS`.
+    pub max_meeting_mins: u64,
+    /// Hold when a meeting starts within this many minutes. Default 15.
+    /// Env: `SQUELCH_RENOTIFY_MEETING_GUARD_MINS`.
+    pub meeting_guard_mins: u64,
+    /// The working day in the owner's zone, `[start, end)` hours. Defaults 7
+    /// and 20. Env: `SQUELCH_RENOTIFY_WORK_START_HOUR`,
+    /// `SQUELCH_RENOTIFY_WORK_END_HOUR`.
+    pub work_start_hour: u32,
+    pub work_end_hour: u32,
+    /// Banners per local day. Default 4. Env: `SQUELCH_RENOTIFY_DAILY_BUDGET`.
+    pub daily_budget: u32,
+    /// Messages one banner names. Default 3. Env: `SQUELCH_RENOTIFY_MAX_ITEMS`.
+    pub max_items: usize,
+    /// Re-notifies per message, ever. Default 2.
+    /// Env: `SQUELCH_RENOTIFY_MAX_PER_MESSAGE`.
+    pub max_per_message: u32,
+    /// The first notification must be at least this old. Default 30.
+    /// Env: `SQUELCH_RENOTIFY_MIN_AGE_MINS`.
+    pub min_age_mins: u64,
+    /// ... and at most this old. Default 4320 (three days).
+    /// Env: `SQUELCH_RENOTIFY_MAX_AGE_MINS`.
+    pub max_age_mins: u64,
+    /// Wait after a re-notify before the same message may come again, doubled
+    /// per re-notify already spent on it. Default 180.
+    /// Env: `SQUELCH_RENOTIFY_COOLDOWN_MINS`.
+    pub cooldown_mins: u64,
+    /// Mail in For your eyes with a due date comes back this many minutes
+    /// before it, opened or not. Default 1440 (a day).
+    /// Env: `SQUELCH_RENOTIFY_DUE_LEAD_MINS`.
+    pub due_lead_mins: u64,
+    /// ... and stays eligible this long after it. Default 720.
+    /// Env: `SQUELCH_RENOTIFY_DUE_GRACE_MINS`.
+    pub due_grace_mins: u64,
+    /// The hour a date-only due date is read as, in the owner's zone.
+    /// Default 17. Env: `SQUELCH_RENOTIFY_DUE_DAY_HOUR`.
+    pub due_day_hour: u32,
+}
+
+impl Default for RenotifyConfig {
+    fn default() -> Self {
+        Self {
+            min_offline_mins: 120,
+            online_settle_secs: 30,
+            meeting_end_delay_mins: 3,
+            meeting_end_window_mins: 10,
+            max_meeting_mins: 240,
+            meeting_guard_mins: 15,
+            work_start_hour: 7,
+            work_end_hour: 20,
+            daily_budget: 4,
+            max_items: 3,
+            max_per_message: 2,
+            min_age_mins: 30,
+            max_age_mins: 4320,
+            cooldown_mins: 180,
+            due_lead_mins: 1440,
+            due_grace_mins: 720,
+            due_day_hour: 17,
+        }
+    }
+}
+
+/// Prometheus scrape-endpoint config; see [`crate::metrics`].
+///
+/// `bind` IS THE FEATURE FLAG: absent (the default), the listener is never
+/// opened and nothing can scrape this daemon. It is a SEPARATE address from the
+/// doors on purpose — `/metrics` carries no credential, so it is reachable only
+/// from wherever the operator points it (loopback, or a private interface a
+/// scraper reaches), never from whatever fronts `/client/*`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Host:port for the metrics listener (e.g. `127.0.0.1:9848`).
+    /// Env: `SQUELCH_METRICS_BIND`. `None` => no listener is opened at all.
+    pub bind: Option<String>,
+}
+
+/// The tenant CONSOLE, the browser-facing half of the human door.
+///
+/// `sso_url` IS THE FEATURE FLAG for the Google sign-in button: absent (the
+/// default, and the whole self-host posture), the console renders the
+/// pasted-code form alone. It is a LINK TARGET and nothing more, so no trust
+/// flows from it; whatever comes back is a pairing code the store adjudicates on
+/// its own terms.
+///
+/// `allow_insecure_cookie` IS AN ESCAPE HATCH and is documented as one where it
+/// is read (`squelch-api`'s console): it drops `Secure` from the session cookie
+/// on a non-loopback origin, which means the cookie (a live device token) can
+/// cross a network in the clear. It exists for the self-host who serves the
+/// console over plain http on a LAN and cannot front it with TLS. Default off,
+/// the login page says so out loud when it is on, and the daemon warns at
+/// startup.
+///
+/// It is READ AS A STATEMENT ABOUT THE WHOLE ORIGIN, not as a cookie flag: the
+/// console also builds its pairing deep link with `http://`, compares `Origin`
+/// against that same `http://` origin for CSRF, and stops offering the SSO link.
+/// The first two are the point (with the hatch shut, a plain-http LAN console
+/// renders a login form and then refuses the POST from it), and the third is the
+/// cost of turning it on somewhere that really is https. `Site::origin_is_https`
+/// in `squelch-api`'s console is the one place all four are decided.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConsoleConfig {
+    /// The control plane's origin behind the console's "Continue with Google"
+    /// link (e.g. `https://signup.passband.email`).
+    /// Env: `SQUELCH_CONSOLE_SSO_URL`. `None` => no button.
+    pub sso_url: Option<String>,
+    /// Declare this console plain-http off loopback: session cookie WITHOUT
+    /// `Secure`, `http://` deep link, `http://` CSRF origin, no SSO link.
+    /// Env: `SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE`, spelled exactly `true`.
+    /// Anything else (including `1` and `yes`) leaves it off: an operator who
+    /// mistypes this one gets the safe answer.
+    pub allow_insecure_cookie: bool,
+}
+
+/// BYOK carrier-API credentials, plus the cadence the poller keeps.
+///
+/// CREDENTIALS ARE THE FEATURE FLAG, one carrier at a time: a carrier whose
+/// creds are absent — or only half there — is never polled, and when
+/// [`CarriersConfig::any_enabled`] is false no carrier API is contacted at all.
+/// Nothing in this table turns polling on by itself; the four knobs only pace a
+/// poller that credentials have already enabled.
+///
+/// Every secret can come from the environment instead of the file
+/// (`SQUELCH_UPS_CLIENT_ID`, …), and an env PAIR materializes a carrier the TOML
+/// never mentions — that is how a container is configured. Secrets are never
+/// logged: each cred struct hand-writes a `Debug` that redacts them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CarriersConfig {
+    /// Baseline poll cadence (hours) for an in-flight shipment.
+    /// Env: `SQUELCH_CARRIERS_POLL_INTERVAL_HOURS`.
+    pub poll_interval_hours: u64,
+    /// The tighter cadence (minutes) for a shipment that is OUT FOR DELIVERY,
+    /// where the next interesting state change is an hour away, not a day.
+    /// Env: `SQUELCH_CARRIERS_OFD_POLL_INTERVAL_MINS`.
+    pub ofd_poll_interval_mins: u64,
+    /// Give up on a shipment this many days after it was first seen: a tracking
+    /// number nobody ever delivers must not be polled forever.
+    /// Env: `SQUELCH_CARRIERS_MAX_AGE_DAYS`.
+    pub max_age_days: u32,
+    /// Consecutive per-shipment API failures tolerated before it is dropped.
+    /// Env: `SQUELCH_CARRIERS_MAX_FAILURES`.
+    pub max_failures: u32,
+    /// Hide a shipment from the human door's listing once nothing user-visible
+    /// has changed about it for this many days AND no carrier is vouching for
+    /// it (never polled, permanently rejected, or no longer being asked about).
+    /// A package a carrier is still answering for is never hidden for age. A
+    /// LISTING concern, like [`CarriersConfig::max_failures`], which is why it
+    /// lives here rather than in its own table: the same `[carriers]` block
+    /// already decides when a row stops being shown.
+    ///
+    /// `0` DISABLES the filter entirely (nothing is ever hidden for silence).
+    /// Env: `SQUELCH_CARRIERS_STALE_AFTER_DAYS`.
+    pub stale_after_days: u32,
+    /// `[carriers.ups]`. `None` (or half a pair) => UPS is never polled.
+    pub ups: Option<UpsCarrierConfig>,
+    /// `[carriers.fedex]`. `None` (or half a pair) => FedEx is never polled.
+    pub fedex: Option<FedexCarrierConfig>,
+    /// `[carriers.usps]`. `None` (or half a pair) => USPS is never polled.
+    pub usps: Option<UspsCarrierConfig>,
+    /// `[carriers.dhl]`. `None` (or a blank key) => DHL is never polled.
+    pub dhl: Option<DhlCarrierConfig>,
+}
+
+impl Default for CarriersConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_hours: 6,
+            ofd_poll_interval_mins: 60,
+            max_age_days: 45,
+            max_failures: 5,
+            stale_after_days: 10,
+            ups: None,
+            fedex: None,
+            usps: None,
+            dhl: None,
+        }
+    }
+}
+
+impl CarriersConfig {
+    /// `true` when at least one carrier is FULLY configured. This is the feature
+    /// flag for the whole poller: false means no carrier API is ever contacted,
+    /// so an operator who configured nothing gets no outbound traffic and no
+    /// background task.
+    pub fn any_enabled(&self) -> bool {
+        self.ups.as_ref().is_some_and(UpsCarrierConfig::enabled)
+            || self.fedex.as_ref().is_some_and(FedexCarrierConfig::enabled)
+            || self.usps.as_ref().is_some_and(UspsCarrierConfig::enabled)
+            || self.dhl.as_ref().is_some_and(DhlCarrierConfig::enabled)
+    }
+
+    /// The listing half of this block, as the value both doors carry.
+    pub fn list_policy(&self) -> ShipmentListPolicy {
+        ShipmentListPolicy {
+            retired_at_failures: self.max_failures,
+            stale_after_days: self.stale_after_days,
+        }
+    }
+}
+
+/// Config-derived listing policy for shipments. Both doors hold one so the
+/// agent door cannot drift from the human door's view (it did: the agent door
+/// used to hardcode the built-in `max_failures` and ignore the operator's).
+///
+/// EVERY RULE IN HERE IS READ-SIDE. Nothing it hides is deleted, nothing it
+/// hides stops being polled, and every hidden row comes back on its own the
+/// moment something about it changes — see
+/// [`Store::list_shipments`](crate::store::Store::list_shipments).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShipmentListPolicy {
+    /// Permanent poll failures at which the poller retires a row, and so the
+    /// point past which its carrier no longer vouches for it in the listing.
+    /// Shape is no part of it. From `[carriers] max_failures`.
+    pub retired_at_failures: u32,
+    /// Days without a user-visible change after which a row NO CARRIER IS
+    /// VOUCHING FOR is hidden. `0` disables the filter. From `[carriers]
+    /// stale_after_days`.
+    pub stale_after_days: u32,
+}
+
+impl ShipmentListPolicy {
+    /// Resolve the policy against the clock, ONCE per request, into the value
+    /// both doors judge every row by. `None` when the window is off, or too
+    /// large for chrono to represent (an operator writing an enormous number
+    /// to mean "never" gets exactly that rather than an overflow).
+    pub fn silence(&self, now: chrono::DateTime<chrono::Utc>) -> Option<Silence> {
+        if self.stale_after_days == 0 {
+            return None;
+        }
+        let cutoff = chrono::Duration::try_days(self.stale_after_days as i64)
+            .and_then(|window| now.checked_sub_signed(window))?;
+        Some(Silence {
+            cutoff,
+            retired_at_failures: self.retired_at_failures,
+        })
+    }
+}
+
+/// THE ONE SILENCE RULE, shared by both doors so they cannot disagree about
+/// which packages exist. A package is hidden when nothing has happened to it
+/// since `cutoff` AND no carrier is vouching for it.
+///
+/// A carrier vouches while its last ANSWER for the number (`last_answered_at`,
+/// which a mere attempt never moves) is inside the window and it has not since
+/// rejected the number into retirement (`poll_failures` under
+/// `retired_at_failures`; the cap rather than zero, because one counted
+/// rejection from a carrier that answers again six hours later is a blip and
+/// must not blink the parcel off the list). So a row with no pollable number,
+/// no configured key, a retired number, one whose answers stopped coming, or
+/// one polling has aged past `[carriers] max_age_days` all count as unvouched.
+///
+/// AGE ALONE HIDES NOTHING: a package a carrier is still answering for stays
+/// listed however long it sits, because that silence is the carrier's word
+/// rather than our ignorance. Shape is no part of any of this; it is evidence
+/// for the agent, never a listing rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Silence {
+    /// Nothing seen since this instant is silence.
+    pub cutoff: chrono::DateTime<chrono::Utc>,
+    /// The poller's retirement cap, past which a carrier no longer vouches.
+    pub retired_at_failures: u32,
+}
+
+impl Silence {
+    /// `last_seen` is the newest thing known about the package; `observation`
+    /// is its carrier row, if it has one.
+    pub fn hides(
+        &self,
+        last_seen: chrono::DateTime<chrono::Utc>,
+        observation: Option<&crate::types::Shipment>,
+    ) -> bool {
+        if last_seen >= self.cutoff {
+            return false;
+        }
+        let vouched = observation.is_some_and(|s| {
+            s.last_answered_at.is_some_and(|at| at >= self.cutoff)
+                && s.poll_failures < self.retired_at_failures
+        });
+        !vouched
+    }
+}
+
+impl Default for ShipmentListPolicy {
+    fn default() -> Self {
+        CarriersConfig::default().list_policy()
+    }
+}
+
+impl From<&CarriersConfig> for ShipmentListPolicy {
+    fn from(c: &CarriersConfig) -> Self {
+        c.list_policy()
+    }
+}
+
+/// One half of a credential, trimmed, or `None` when absent or blank. BLANK IS
+/// ABSENT everywhere here, so a `client_id = ""` left behind in a config cannot
+/// half-enable a carrier and send an empty string at someone's auth endpoint.
+fn cred_half(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// UPS OAuth client credentials (the client-credentials grant). BOTH halves are
+/// required; either one alone leaves UPS off.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UpsCarrierConfig {
+    /// Env: `SQUELCH_UPS_CLIENT_ID`.
+    pub client_id: Option<String>,
+    /// Env: `SQUELCH_UPS_CLIENT_SECRET`. Secret material, NEVER logged.
+    pub client_secret: Option<String>,
+}
+
+impl UpsCarrierConfig {
+    /// The complete pair, or `None` when either half is missing or blank.
+    pub fn credentials(&self) -> Option<(&str, &str)> {
+        Some((cred_half(&self.client_id)?, cred_half(&self.client_secret)?))
+    }
+
+    /// UPS is enabled iff a complete pair resolves.
+    pub fn enabled(&self) -> bool {
+        self.credentials().is_some()
+    }
+}
+
+/// Hand-written so the secret half can never ride out through a stray `{:?}`.
+impl std::fmt::Debug for UpsCarrierConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpsCarrierConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// FedEx OAuth client credentials. Both halves required.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct FedexCarrierConfig {
+    /// Env: `SQUELCH_FEDEX_CLIENT_ID`.
+    pub client_id: Option<String>,
+    /// Env: `SQUELCH_FEDEX_CLIENT_SECRET`. Secret material, NEVER logged.
+    pub client_secret: Option<String>,
+}
+
+impl FedexCarrierConfig {
+    /// The complete pair, or `None` when either half is missing or blank.
+    pub fn credentials(&self) -> Option<(&str, &str)> {
+        Some((cred_half(&self.client_id)?, cred_half(&self.client_secret)?))
+    }
+
+    /// FedEx is enabled iff a complete pair resolves.
+    pub fn enabled(&self) -> bool {
+        self.credentials().is_some()
+    }
+}
+
+/// Hand-written so the secret half can never ride out through a stray `{:?}`.
+impl std::fmt::Debug for FedexCarrierConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FedexCarrierConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// USPS OAuth consumer credentials. Both halves required.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UspsCarrierConfig {
+    /// Env: `SQUELCH_USPS_CONSUMER_KEY`.
+    pub consumer_key: Option<String>,
+    /// Env: `SQUELCH_USPS_CONSUMER_SECRET`. Secret material, NEVER logged.
+    pub consumer_secret: Option<String>,
+}
+
+impl UspsCarrierConfig {
+    /// The complete pair, or `None` when either half is missing or blank.
+    pub fn credentials(&self) -> Option<(&str, &str)> {
+        Some((
+            cred_half(&self.consumer_key)?,
+            cred_half(&self.consumer_secret)?,
+        ))
+    }
+
+    /// USPS is enabled iff a complete pair resolves.
+    pub fn enabled(&self) -> bool {
+        self.credentials().is_some()
+    }
+}
+
+/// Hand-written so the secret half can never ride out through a stray `{:?}`.
+impl std::fmt::Debug for UspsCarrierConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UspsCarrierConfig")
+            .field("consumer_key", &self.consumer_key)
+            .field(
+                "consumer_secret",
+                &self.consumer_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// DHL API key, plus the one carrier-specific budget we keep. DHL's free tier is
+/// 250 calls/day and the key is the WHOLE credential, so there is no pair here.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DhlCarrierConfig {
+    /// Env: `SQUELCH_DHL_API_KEY`. Secret material, NEVER logged.
+    pub api_key: Option<String>,
+    /// Calls/day ceiling for DHL. Default 200, deliberately UNDER the 250/day
+    /// free tier so a busy day cannot spend an operator into a bill.
+    /// Env: `SQUELCH_DHL_DAILY_CAP` (honored only when DHL is already
+    /// configured — a cap alone must never conjure a carrier).
+    pub daily_cap: u32,
+}
+
+impl Default for DhlCarrierConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            daily_cap: 200,
+        }
+    }
+}
+
+impl DhlCarrierConfig {
+    /// The key, or `None` when it is missing or blank.
+    pub fn api_key(&self) -> Option<&str> {
+        cred_half(&self.api_key)
+    }
+
+    /// DHL is enabled iff a key resolves.
+    pub fn enabled(&self) -> bool {
+        self.api_key().is_some()
+    }
+}
+
+/// Hand-written so the key can never ride out through a stray `{:?}`.
+impl std::fmt::Debug for DhlCarrierConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DhlCarrierConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("daily_cap", &self.daily_cap)
+            .finish()
+    }
+}
+
+/// Default embedding-weights cache dir, a sibling of the sqlite db under the
+/// XDG data dir; CWD-relative only when `HOME` is unset.
+pub fn default_embed_cache_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local/share/squelch")
+            .join("models");
+    }
+    PathBuf::from("squelch-models")
+}
+
+/// On-box semantic-recall tunables (fastembed, ONNX, CPU; weights download once
+/// to `cache_dir`). `model` and `dims` MUST agree with each other and with the
+/// `message_vecs` vec0 `float[N]` in `store/schema.sql` — the store asserts this
+/// at open time, and changing `dims` means resetting the db.
+///
+/// `Debug` is written by hand so `token` never reaches a `{:?}` (of this, or
+/// of the [`Config`] that holds it).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmbedConfig {
+    /// fastembed model, written as a full `model_code`. Default:
+    /// `"Xenova/bge-small-en-v1.5"` (BGE-small-en-v1.5, fp32, 384-dim, English).
+    /// The full code is the point: fastembed also ships
+    /// `Qdrant/bge-small-en-v1.5-onnx-Q`, the int8 build of the same family, and
+    /// the bare family name this used to default to picked between the two at
+    /// random per boot. Short aliases still parse and still mean the fp32 code;
+    /// anything that could name more than one model is refused at startup.
+    pub model: String,
+    /// Embedding dimensionality; must match `model` and the vec0 table width.
+    pub dims: usize,
+    /// Where ONNX weights cache on disk. Default: [`default_embed_cache_dir`].
+    pub cache_dir: PathBuf,
+    /// Characters of `subject + body` fed to the embedder per message. Default
+    /// 1000. A pair with `max_tokens` AT INGEST: keep this near tokens x 4 so we
+    /// neither pad past what the model reads nor truncate twice at different
+    /// places. The pairing covers ingest only. A query is embedded raw
+    /// (`semantic_search` / `hybrid_search` hand `embedder.embed` the query text
+    /// as typed), so nothing cuts a long query but `max_tokens`.
+    pub max_chars: usize,
+    /// Tokens the model reads per text (fastembed `max_length`). Default 256,
+    /// not the model's 512 ceiling: attention scratch is quadratic in sequence
+    /// length and a batch pads to its longest member, so on the fp32 model, at
+    /// a `backfill_batch` of 8, a pass of 512-token texts adds +324 MB against
+    /// +123 MB at 256 (at batch 1, +44 MB against +13 MB); at a larger batch
+    /// the same ratio applies to a far larger base. The subject and first ~1000
+    /// characters are where recall lives; long newsletters lose their tails.
+    /// The chars-to-tokens ratio above is an English one, and the pinned model's
+    /// vocabulary is English-only, so this is not the knob where CJK recall is
+    /// decided. CLAMPED by [`EmbedConfig::settings`]; 0 is not "unlimited".
+    pub max_tokens: usize,
+    /// Backfill batch size: how many missing-vector messages to embed per
+    /// `embed_batch` call. SMALL ON PURPOSE. The memory a batch takes is not
+    /// given back when the batch ends, so this number does not set a transient
+    /// peak, it sets a permanent RSS floor for the daemon. Measured at the
+    /// model's 512-token ceiling, the cap before `max_tokens` existed: a batch
+    /// of 64 costs +1.7 GB (int8) to +2.7 GB (fp32) of RSS that is never
+    /// released, against a hosted pod limit of 1 Gi; a batch of 8 costs +324 MB;
+    /// a batch of 1 costs +21-44 MB. At the shipped `max_tokens` of 256 the same
+    /// batch of 8 costs about +123 MB and a batch of 1 about +13 MB; the ratio
+    /// between batch sizes is the point and it does not move. A batch of 64 gets
+    /// a hosted daemon OOM-killed.
+    ///
+    /// Throughput is not what this trades against, because the pass is only
+    /// ever draining what ingest could not embed at the time and ingest embeds
+    /// one message at a time. On a first run the daemon holds the backfill
+    /// until the embedder has settled (see `SyncEngine::with_embedder_gate`),
+    /// so the queue this drains is leftovers rather than the whole mailbox.
+    pub backfill_batch: usize,
+    /// Seconds of no embedding or semantic search before the daemon DROPS the
+    /// ONNX session and hands the heap back. `0` disables it and keeps the
+    /// session loaded for the life of the process, which is what every release
+    /// before this one did.
+    ///
+    /// The session is 85-90% of a tenant daemon's memory: measured on a hosted
+    /// pod, loading it costs ~195 MB and a batch pass another ~324 MB, and
+    /// dropping it plus one `malloc_trim` takes the process from ~520 MB back to
+    /// ~40 MB. A mailbox is idle nearly all the time, so the default keeps that
+    /// memory for ten minutes past the last use and then gives it up. The bill
+    /// is ~200 ms on the next embed or search, spent reloading from the weights
+    /// already on disk.
+    ///
+    /// A FLOOR APPLIES. The daemon's reaper only looks every 60 seconds, so the
+    /// effective window is this value rounded up to the next tick: setting 5
+    /// gets an unload somewhere between 5 and 65 seconds after the last use,
+    /// not at 5. Anything at or above the ten-minute default is unaffected by
+    /// the rounding.
+    pub idle_unload_secs: u64,
+    /// Base URL of the shared per-node embedding service
+    /// (docs/EMBED-SERVICE.md), e.g. `http://squelch-embed:8850`. Env:
+    /// `SQUELCH_EMBED_URL`, which the warden renders on hosted tenants.
+    ///
+    /// THIS IS THE WHOLE SWITCH, and it is exclusive. `None` (the default, and
+    /// every self-hosted daemon) embeds in-process exactly as before. `Some`
+    /// sends text to the service and builds NO local ONNX session, ever: not
+    /// at startup, not as a fallback when the service is down. A daemon that
+    /// quietly loaded a local model whenever the service blinked would be a
+    /// pod quietly costing the 300-500 MB this exists to remove. With a URL,
+    /// `model`, `dims` and `max_tokens` must still equal the service's (they
+    /// decide which vector space the store is in) and a disagreement refuses
+    /// to build the embedder; `cache_dir` and `idle_unload_secs` are unused.
+    pub url: Option<String>,
+    /// Bearer token presented to the embedding service. Env:
+    /// `SQUELCH_EMBED_TOKEN`. Optional: absent sends no `Authorization`
+    /// header. Secret material, NEVER logged; prefer the env var over
+    /// config.toml.
+    pub token: Option<String>,
+}
+
+impl std::fmt::Debug for EmbedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            model,
+            dims,
+            cache_dir,
+            max_chars,
+            max_tokens,
+            backfill_batch,
+            idle_unload_secs,
+            url,
+            token,
+        } = self;
+        f.debug_struct("EmbedConfig")
+            .field("model", model)
+            .field("dims", dims)
+            .field("cache_dir", cache_dir)
+            .field("max_chars", max_chars)
+            .field("max_tokens", max_tokens)
+            .field("backfill_batch", backfill_batch)
+            .field("idle_unload_secs", idle_unload_secs)
+            .field("url", url)
+            .field("token", &token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl Default for EmbedConfig {
+    fn default() -> Self {
+        Self {
+            model: crate::embed::DEFAULT_MODEL_CODE.to_string(),
+            dims: 384,
+            cache_dir: default_embed_cache_dir(),
+            max_chars: crate::embed::DEFAULT_EMBED_MAX_CHARS,
+            max_tokens: crate::embed::DEFAULT_EMBED_MAX_TOKENS,
+            backfill_batch: 8,
+            idle_unload_secs: 600,
+            url: None,
+            token: None,
+        }
+    }
+}
+
+impl EmbedConfig {
+    /// Build the resolved [`crate::embed::EmbedSettings`] the embedder needs.
+    ///
+    /// `max_tokens` is CLAMPED here, to
+    /// [`EMBED_MAX_TOKENS_FLOOR`](crate::embed::EMBED_MAX_TOKENS_FLOOR) ..=
+    /// [`EMBED_MAX_TOKENS_CEILING`](crate::embed::EMBED_MAX_TOKENS_CEILING).
+    /// A small value is not a smaller budget and 0 is NOT "unlimited" the way it
+    /// reads elsewhere: fastembed passes `max_length` to tokenizers, which
+    /// truncates at `max_length - n_added_tokens`, and `n_added_tokens` is 2 for
+    /// this model's `[CLS]` and `[SEP]`. At 0 or 1 that subtraction wraps a
+    /// `usize` (release builds carry no overflow checks), truncation stops
+    /// happening at all, and the setting UNCAPS the memory it exists to cap. At
+    /// 2 every text truncates to zero content tokens and every vector comes out
+    /// identical.
+    /// The ceiling is the model's own position budget; asking for more only pays
+    /// for padding.
+    ///
+    /// A clamp that fires says so on stderr, once, beside the line naming the
+    /// model: an operator who wrote a number and got a different one has to be
+    /// able to find that out from the log rather than from a memory graph.
+    pub fn settings(&self) -> crate::embed::EmbedSettings {
+        let max_tokens = self.max_tokens.clamp(
+            crate::embed::EMBED_MAX_TOKENS_FLOOR,
+            crate::embed::EMBED_MAX_TOKENS_CEILING,
+        );
+        if max_tokens != self.max_tokens {
+            eprintln!(
+                "squelch: embed max_tokens {} is out of range, using {max_tokens} (allowed {}-{})",
+                self.max_tokens,
+                crate::embed::EMBED_MAX_TOKENS_FLOOR,
+                crate::embed::EMBED_MAX_TOKENS_CEILING,
+            );
+        }
+        crate::embed::EmbedSettings {
+            model_name: self.model.clone(),
+            dims: self.dims,
+            cache_dir: self.cache_dir.clone(),
+            max_tokens,
+        }
+    }
+}
+
+/// Resolved (present) OAuth client credentials.
+#[derive(Debug, Clone)]
+pub struct OAuthClientConfig {
+    pub client_id: String,
+    /// Google's Desktop client secret. EMPTY, and never sent, for
+    /// [`OAuthIssuer::Microsoft`]: an Entra "Mobile and desktop" app is a
+    /// public client, has no secret, and its token endpoint refuses a request
+    /// that presents one.
+    pub client_secret: String,
+    /// Whose identity platform mints and refreshes this client's tokens.
+    pub issuer: OAuthIssuer,
+}
+
+/// The identity platform behind an [`OAuthClientConfig`]: which authorize
+/// and token endpoints a consent and every refresh talk to. Picked from the
+/// daemon's `provider`, never from anything a token or blob says about itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OAuthIssuer {
+    /// Google (Gmail).
+    #[default]
+    Google,
+    /// The Microsoft identity platform v2.0 (Outlook), on the `common`
+    /// tenant, which serves personal accounts and work or school ones alike.
+    Microsoft,
+}
+
+/// Microsoft's authorize endpoint (`common` tenant).
+pub const MICROSOFT_AUTH_URL: &str =
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+/// Microsoft's token endpoint (`common` tenant).
+pub const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+
+/// PASSBAND'S OWN ENTRA APP, built in so a self-host needs no Azure portal
+/// visit: a public client (no secret), so shipping its id in the binary gives
+/// nothing away. `microsoft_client_id` in the config file overrides it.
+pub const PASSBAND_MICROSOFT_CLIENT_ID: &str = "ac4b9805-c059-4564-a201-58d100df8067";
+
+/// Is `id` shaped like an Entra application id (a GUID, 8-4-4-4-12 hex)?
+/// Google OAuth client ids never are.
+pub fn is_entra_app_id(id: &str) -> bool {
+    let parts: Vec<&str> = id.trim().split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The Graph scopes an Outlook consent asks for, in one consent stored in
+/// both mail slots (as Gmail's `gmail.modify` is): read and move mail, send
+/// it, name the account, and `offline_access`, without which Microsoft issues
+/// no refresh token at all and the credential dies within the hour. Plus
+/// `Calendars.ReadWrite`, asked up front so Outlook calendar (not built yet)
+/// needs no second consent; mail never requires it.
+pub const OUTLOOK_MAIL_READWRITE_SCOPE: &str = "https://graph.microsoft.com/Mail.ReadWrite";
+pub const OUTLOOK_MAIL_SEND_SCOPE: &str = "https://graph.microsoft.com/Mail.Send";
+pub const OUTLOOK_MAIL_READ_SCOPE: &str = "https://graph.microsoft.com/Mail.Read";
+pub const OUTLOOK_USER_READ_SCOPE: &str = "https://graph.microsoft.com/User.Read";
+pub const OUTLOOK_OFFLINE_SCOPE: &str = "offline_access";
+pub const OUTLOOK_CALENDAR_SCOPE: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
+pub const OUTLOOK_SCOPES: &[&str] = &[
+    OUTLOOK_MAIL_READWRITE_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_USER_READ_SCOPE,
+    OUTLOOK_CALENDAR_SCOPE,
+    OUTLOOK_OFFLINE_SCOPE,
+];
+/// What a mail-slot refresh asks for: the consent minus calendar. Microsoft
+/// refuses a refresh that names a scope the user never granted, so a token
+/// consented before calendar was added must still refresh.
+pub const OUTLOOK_MAIL_SCOPES: &[&str] = &[
+    OUTLOOK_MAIL_READWRITE_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_USER_READ_SCOPE,
+    OUTLOOK_OFFLINE_SCOPE,
+];
+
+impl OAuthIssuer {
+    pub fn auth_url(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "https://accounts.google.com/o/oauth2/v2/auth",
+            OAuthIssuer::Microsoft => MICROSOFT_AUTH_URL,
+        }
+    }
+
+    pub fn token_url(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "https://oauth2.googleapis.com/token",
+            OAuthIssuer::Microsoft => MICROSOFT_TOKEN_URL,
+        }
+    }
+
+    /// The company, for messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            OAuthIssuer::Google => "Google",
+            OAuthIssuer::Microsoft => "Microsoft",
+        }
+    }
+}
+
+/// Importance scores (0-100) assigned by the Stage-1 rules engine per rung.
+/// Tunable so operators can bias what surfaces without recompiling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Stage1Config {
+    /// Bills/past-due always surface via their tier; this is the raw score.
+    pub bill_importance: u8,
+    /// A message matched a `Surface` sender rule.
+    pub rule_surface_importance: u8,
+    /// A message matched a `Squelch` sender rule.
+    pub rule_squelch_importance: u8,
+    /// A message matched a `Filtered` rule (deferred to Stage-2).
+    pub rule_filtered_importance: u8,
+    /// Sender appears in the user's Sent mail (known contact).
+    pub known_contact_importance: u8,
+    /// Ops/monitoring alert from an automated sender.
+    pub alert_importance: u8,
+    /// Newsletter / receipt / cold-sales noise.
+    pub noise_importance: u8,
+    /// Ambiguous fall-through (unknown sender, no pattern) -> Stage-2.
+    pub fallthrough_importance: u8,
+    /// Bill-shaped mail from an UNKNOWN sender. Deliberately moderate: a scam
+    /// "past-due" must surface for a Stage-2 look, never land confident PastDue.
+    pub bill_unknown_sender_importance: u8,
+    /// Sanity dampener: an extracted bill amount strictly greater than this
+    /// (dollars) is treated as absurd and shaves confidence (never raises tier).
+    /// Default $50,000 — a real household bill essentially never exceeds this.
+    pub bill_absurd_amount_threshold: f64,
+
+    // ---- Stage-1 LLM pass (the model run on every non-sealed email) --------
+    // The heuristic fields above are its WITNESS and its offline fallback, never
+    // an alternative verdict. Key, provider, and endpoint come from [`Stage2Config::resolve_llm`]; only the fields below
+    // are Stage-1's own.
+    /// The Stage-1 model id string. Default `claude-opus-5-5`: triage is the
+    /// product, so the pass that sees every email runs the best model there is,
+    /// and the two stages differ by `effort` and context rather than by model.
+    /// Env: `SQUELCH_STAGE1_MODEL`.
+    pub model: String,
+    /// Reasoning depth for Stage-1 (`low`/`medium`/`high`/`xhigh`/`max`), sent
+    /// as `output_config.effort`. `low` is deliberate: Stage-1 reads a compact
+    /// row and the router, not the model's own thinking, decides what deserves
+    /// a harder look. Set to `None` when pointing `model` at one that rejects
+    /// the field (Haiku 4.5, Sonnet 4.5). Env: `SQUELCH_STAGE1_EFFORT`.
+    pub effort: Option<String>,
+    /// Cap on the flattened email body (chars) fed into the UNTRUSTED block.
+    /// Env: `SQUELCH_STAGE1_MAX_BODY_CHARS`.
+    pub max_body_chars: usize,
+    /// How many queued rows to refine per sync cycle. Env:
+    /// `SQUELCH_STAGE1_BATCH_PER_CYCLE`.
+    pub batch_per_cycle: usize,
+    /// Global per-account-per-day call cap — the only cap Stage-1 has, since it
+    /// must see every email, and SHARED with the specialist extractors.
+    ///
+    /// THIS IS A DOLLAR CEILING WEARING A COUNT. At the defaults below (opus-5-5
+    /// at $4/$20 per MTok, a 6000-char body, and thinking billing against
+    /// [`crate::triage::llm::MAX_TOKENS`]) a Stage-1 call runs on the order of
+    /// four cents, so this number times four cents is the most one account can
+    /// spend here in a day. It was 1000 when the pass ran a small model with a
+    /// 400-token ceiling and a 1500-char body; the model swap changed the price
+    /// per call on four axes at once, and the cap had to come down with it.
+    /// Re-derive it whenever `model`, `max_body_chars`, or the prices move.
+    /// Env: `SQUELCH_STAGE1_GLOBAL_DAILY_CAP`.
+    pub global_daily_cap: u32,
+    /// Per-million-input-token price (USD) for the Stage-1 model. Default 4.0
+    /// (claude-opus-5-5). Env: `SQUELCH_STAGE1_PRICE_IN_PER_MTOK`.
+    pub price_in_per_mtok: f64,
+    /// Per-million-output-token price (USD) for the Stage-1 model. Default 20.0
+    /// (claude-opus-5-5). Env: `SQUELCH_STAGE1_PRICE_OUT_PER_MTOK`.
+    pub price_out_per_mtok: f64,
+}
+
+impl Default for Stage1Config {
+    fn default() -> Self {
+        Self {
+            bill_importance: 95,
+            rule_surface_importance: 80,
+            rule_squelch_importance: 10,
+            rule_filtered_importance: 30,
+            known_contact_importance: 70,
+            alert_importance: 75,
+            noise_importance: 15,
+            fallthrough_importance: 40,
+            bill_unknown_sender_importance: 55,
+            bill_absurd_amount_threshold: 50_000.0,
+            // Stage-1 LLM defaults. Same model as Stage-2; see there.
+            model: "claude-opus-5-5".to_string(),
+            effort: Some("low".to_string()),
+            // 6000, not 1500: the old cap was sized for a 200K-context small
+            // model and routinely cut the body before the part that decides the
+            // verdict (the amount, the date, the ask). The model reading this
+            // now has a 1M window.
+            max_body_chars: 6000,
+            batch_per_cycle: 10,
+            // ~$20/day worst case at ~4c a call. Comfortably above what even a
+            // heavy mailbox spends (Stage-1 sees every inbound message, and the
+            // extractors share this counter), and low enough that a runaway
+            // cannot quietly bill an order of magnitude more than the pass costs.
+            global_daily_cap: 500,
+            price_in_per_mtok: 4.0,
+            price_out_per_mtok: 20.0,
+        }
+    }
+}
+
+/// Prompt-cache multipliers on the per-MTok INPUT price, for costing the
+/// ledger's cache-token columns at read time. Anthropic's standard rates for
+/// the cache our `cache_control` blocks ask for: the ONE-HOUR TTL (see
+/// `triage::llm::CacheControl` for why), whose writes bill at 2x the input
+/// price where the 5-minute write is 1.25x. Reads are 0.05x on Claude Opus
+/// 5.5 (the triage model), against 0.1x on Opus 5 and Haiku 4.5; the notify
+/// and access lanes on Haiku never reach the cache minimum, so the triage
+/// rate is the one that prices real tokens. Change the write multiplier with
+/// the TTL and the read multiplier with the model.
+///
+/// Known drift: the daily ledger holds one cache_creation total, so rows
+/// written before the 1-hour TTL (at 1.25x) are re-priced at 2x here, and so
+/// would every row if a gateway dropped the `ttl` field. The per-TTL split
+/// is stored per run in `agent_triage_runs.metadata_json.usage[].cache_creation`,
+/// for every run (nothing schedules `store/sqlite/retention.rs`'s pruning);
+/// pricing from it needs a ledger column, which is a follow-up.
+pub const CACHE_WRITE_INPUT_MULT: f64 = 2.0;
+pub const CACHE_READ_INPUT_MULT: f64 = 0.05;
+
+/// Stage-2 LLM triage tunables. The pass runs only over rows Stage-1 refined but
+/// left non-confident: `stage1_model_used IS NOT NULL AND needs_stage2=1 AND
+/// model_used IS NULL AND sensitivity='normal'` — that last clause is what keeps
+/// sealed mail away from the model. Enabled by key presence alone; env overrides
+/// are `SQUELCH_MODEL` and `SQUELCH_STAGE2_*`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Stage2Config {
+    /// Anthropic API key; the `ANTHROPIC_API_KEY` env var wins over it. Absent,
+    /// Stage-2 disables gracefully and rows stay queued. NEVER logged.
+    pub anthropic_api_key: Option<String>,
+    /// Force the provider (`anthropic` / `openai`), overriding key-prefix
+    /// sniffing. Env: `SQUELCH_STAGE2_PROVIDER`.
+    pub stage2_provider: Option<Stage2Provider>,
+    /// Anthropic-wire base URL override: when set (and the resolved provider is
+    /// Anthropic), every LLM call posts to `<base>/v1/messages` instead of
+    /// api.anthropic.com. This is the hosted fleet's knob for routing tenant
+    /// daemons through our Bifrost gateway. It exists in production while
+    /// `SyncEngine::with_api_base` stays `#[cfg(test)]`-only because the threat
+    /// model differs: that hook would re-aim the tenant's GOOGLE BEARER (an
+    /// exfiltration primitive), whereas this one redirects a scoped, revocable,
+    /// budget-capped virtual key WE issue. It is operator-set, https-enforced
+    /// (plain http only for loopback, so tests/dev mocks work), and never
+    /// logged; a non-conforming value is announced once on stderr and treated
+    /// as absent. Env: `SQUELCH_ANTHROPIC_BASE_URL`.
+    pub anthropic_base_url: Option<String>,
+    /// Model id, written verbatim into the request's `model` field and stored as
+    /// `model_used` on applied rows. Defaults to the SAME model as Stage-1:
+    /// escalation buys more context (and, for a new account's watched jobs,
+    /// more thinking), not a bigger brain.
+    pub model: String,
+    /// Reasoning depth, sent as `output_config.effort`. This is the triage
+    /// agent's effort too. `low` by default: replaying a sample of triaged
+    /// mail through the agent at `low` matched the `xhigh` run on every
+    /// placement and security metric, halved latency and cut cost by about a
+    /// third, because output tokens were two thirds of the bill
+    /// (`docs/evals/results/2026-10-triage-model-comparison.md`). This is the
+    /// STEADY-STATE effort: the jobs a new account's user is waiting on run
+    /// at [`Self::onboarding_effort`] for its first [`Self::onboarding_days`],
+    /// everything else at this from day one. Env: `SQUELCH_STAGE2_EFFORT`.
+    pub effort: Option<String>,
+    /// Effort for the triage agent's WATCHED jobs while the account is new,
+    /// in place of [`Self::effort`]: the store's foreground lane
+    /// (`AgentJob::foreground`: an arrival's first classification, a heal
+    /// of an arrival not yet classified, a person's one-message request),
+    /// the mail somebody is waiting on. `xhigh`: the first days are the first
+    /// impression, and the eval's few disagreements (4 FYE items `low`
+    /// buried) are the kind of miss that costs trust before it has been
+    /// earned. After the window the account drops to `effort`.
+    ///
+    /// Everything else runs at `effort` from day one: the history a new
+    /// account backfills (`backfill` jobs, or `migration` jobs for an
+    /// account the agent cut over), revisits, the heals and refreshes of
+    /// mail already classified, and a person's WINDOW re-triage (`manual:`
+    /// over days of mail, which the lane keeps off the arrival reserve for
+    /// the same reason: one click is hundreds of jobs). That is a deliberate
+    /// trade: the backfill is what a new account's first lists are made of,
+    /// and the eval found `low` placing it the same for 37% less a run and
+    /// half the latency, with its 4-of-93 buried FYE items the price. It is
+    /// also the 200-a-day background budget for the whole window, so the old
+    /// rule's cost was a new tenant's first thousand runs at 1.6x. Access
+    /// checks are not here: they run on the notify lane's model and effort.
+    /// Env: `SQUELCH_STAGE2_ONBOARDING_EFFORT` (`none`/`off` clears it,
+    /// which is `effort` for the window too; `SQUELCH_STAGE2_ONBOARDING_DAYS=0`
+    /// is the other way to say that).
+    pub onboarding_effort: Option<String>,
+    /// Length of the onboarding window in days, counted from the account's
+    /// `created_at`. 0 disables it. Env: `SQUELCH_STAGE2_ONBOARDING_DAYS`.
+    pub onboarding_days: u32,
+    /// Cap on the flattened email body (chars) fed into the UNTRUSTED block.
+    /// The body is truncated to this and the truncation is noted in-band.
+    pub max_body_chars: usize,
+    /// How many queued rows to process per sync cycle (fetch cap).
+    pub batch_per_cycle: usize,
+    /// Per-thread-per-day API-call cap (the circuit breaker). Incremented
+    /// BEFORE the call so retry storms can't exceed it.
+    pub thread_daily_cap: u32,
+    /// Global per-account-per-day API-call cap. Same increment-before
+    /// discipline, counted via a `thread_id='__global__'` sentinel row in
+    /// `wake_budget`. Like Stage-1's, this is a dollar ceiling in disguise: an
+    /// escalated call carries a 12000-char body plus thread and sender context,
+    /// so it runs a few cents. See
+    /// [`Stage1Config::global_daily_cap`].
+    pub global_daily_cap: u32,
+    /// Per-sender-per-day API-call cap, so one chatty sender fanning many
+    /// threads cannot burn the budget. Counted via a `thread_id='sender:<addr>'`
+    /// sentinel row in `wake_budget` (no real Gmail thread id starts with
+    /// `sender:`). Env: `SQUELCH_STAGE2_SENDER_DAILY_CAP`.
+    pub sender_daily_cap: u32,
+    /// Queued rows older than this are marked `model_used='stale-skip'` instead
+    /// of spending a call: they keep their Stage-1 values, and neither consume
+    /// budget nor sit queued forever. Env: `SQUELCH_STAGE2_MAX_AGE_DAYS`.
+    pub max_age_days: u32,
+    /// Per-MTok input price (USD), used only for the `est_cost_usd_today` figure
+    /// on `/client/stats`. Change-with-model, together with
+    /// `price_out_per_mtok`. Env: `SQUELCH_STAGE2_PRICE_IN_PER_MTOK`.
+    pub price_in_per_mtok: f64,
+    /// Per-MTok output price (USD). Change-with-model. Env:
+    /// `SQUELCH_STAGE2_PRICE_OUT_PER_MTOK`.
+    pub price_out_per_mtok: f64,
+}
+
+impl Default for Stage2Config {
+    fn default() -> Self {
+        Self {
+            anthropic_api_key: None,
+            stage2_provider: None,
+            anthropic_base_url: None,
+            // Stage-2 is the ESCALATION pass: same model as Stage-1, more
+            // context (more thinking only for a new account's watched
+            // jobs). This is also the agent's model
+            // (`SQUELCH_MODEL`), and Opus 5.5 is the current Opus at $4/$20
+            // against Opus 5's $5/$25 with cache reads at a quarter of the
+            // price. Effort stays explicit rather than leaning on Opus 5.5's
+            // own default (`medium`): `low` is the measured choice, see the
+            // field doc.
+            model: "claude-opus-5-5".to_string(),
+            effort: Some("low".to_string()),
+            onboarding_effort: Some("xhigh".to_string()),
+            onboarding_days: 5,
+            // Roomier than Stage-1's: an escalated row is one where the detail
+            // that settles it may be deep in the body.
+            max_body_chars: 12_000,
+            batch_per_cycle: 10,
+            thread_daily_cap: 3,
+            // ~$12/day worst case at ~10c a call; see the field doc.
+            global_daily_cap: 120,
+            sender_daily_cap: 5,
+            max_age_days: 7,
+            // claude-opus-5-5 per-MTok (input / output).
+            price_in_per_mtok: 4.0,
+            price_out_per_mtok: 20.0,
+        }
+    }
+}
+
+/// A fully resolved LLM destination: the key, the wire it speaks, and the exact
+/// endpoint URL every call posts to. Produced once at startup by
+/// [`Stage2Config::resolve_llm`] so no call site re-derives (and none can
+/// disagree on) where the key is sent. No `Debug` on purpose: `api_key` is key
+/// material and must never reach a log line.
+pub struct ResolvedLlm {
+    pub api_key: String,
+    pub provider: Stage2Provider,
+    pub url: String,
+}
+
+/// WRITTEN BY HAND, and only `Clone`.
+///
+/// The fast lane (docs/NOTIFY.md §11.5) is an `Arc`-held struct built once from
+/// clones of what the engine already resolved, so it needs a copy of this. A
+/// `#[derive]` would be the obvious way to get one and is exactly what must not
+/// happen here: a derive list is where `Debug` gets added later, by someone
+/// adding a field and reaching for the usual attribute, and `Debug` on this
+/// struct puts an API key in whatever log line formats it. Spelling the one
+/// wanted impl out leaves nothing to append to.
+impl Clone for ResolvedLlm {
+    fn clone(&self) -> Self {
+        Self {
+            api_key: self.api_key.clone(),
+            provider: self.provider,
+            url: self.url.clone(),
+        }
+    }
+}
+
+/// The hosted assistant relay's credential + endpoint, resolved by
+/// [`Stage2Config::resolve_assistant`]. Like [`ResolvedLlm`], no `Debug` on
+/// purpose: `api_key` is key material and must never reach a log line.
+pub struct ResolvedAssistant {
+    pub api_key: String,
+    pub url: String,
+}
+
+impl Stage2Config {
+    /// The triage agent's effort for a WATCHED job of an account created
+    /// at `created_at`, as of `now`: [`Self::onboarding_effort`] inside the
+    /// first [`Self::onboarding_days`], [`Self::effort`] after. An unknown
+    /// creation time gets the steady-state effort, so a missing row can
+    /// never pin an account at the expensive setting, and a cleared
+    /// `onboarding_effort` is the steady-state effort inside the window too,
+    /// never an omitted field (which would be the provider's default, above
+    /// `low`). Private: the per-job choice is [`Self::effort_for_job`], and
+    /// a caller that asked this for a background job would be the bug it
+    /// replaced.
+    fn effort_for_account(
+        &self,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<&str> {
+        let onboarding = created_at.is_some_and(|created| {
+            now.signed_duration_since(created)
+                < chrono::Duration::days(i64::from(self.onboarding_days))
+        });
+        if onboarding {
+            self.onboarding_effort.as_deref().or(self.effort.as_deref())
+        } else {
+            self.effort.as_deref()
+        }
+    }
+
+    /// The triage agent's effort for one job: the onboarding window's for a
+    /// job somebody is waiting on (`watched`, see
+    /// [`Self::onboarding_effort`]), the steady-state [`Self::effort`] for
+    /// everything else, however new the account. The creation time is asked
+    /// for only when the answer depends on it: never for a background job,
+    /// and never when there is no window (no days, no effort of its own, or
+    /// no steady-state effort at all) for it to fall inside.
+    pub fn effort_for_job(
+        &self,
+        watched: bool,
+        created_at: impl FnOnce() -> Option<chrono::DateTime<chrono::Utc>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<&str> {
+        // No steady-state effort means a model with no effort support
+        // (`SQUELCH_STAGE2_EFFORT=none`), which the onboarding one would
+        // 400 against on every call.
+        let window =
+            self.onboarding_days > 0 && self.onboarding_effort.is_some() && self.effort.is_some();
+        if watched && window {
+            self.effort_for_account(created_at(), now)
+        } else {
+            self.effort.as_deref()
+        }
+    }
+
+    /// Resolve the LLM key, provider, and endpoint in one shot. Key source,
+    /// first match wins: `SQUELCH_STAGE2_API_KEY` > `ANTHROPIC_API_KEY` >
+    /// `OPENAI_API_KEY` > config `anthropic_api_key`. Provider precedence:
+    /// explicit `stage2_provider` override > `sk-ant-` prefix sniff > (a valid
+    /// `anthropic_base_url` is set => Anthropic) > OpenAI — the base-URL arm
+    /// exists because a gateway virtual key (`sk-bf-...`) is not `sk-ant-`
+    /// shaped, yet an operator who pointed the daemon at an Anthropic-compatible
+    /// gateway has already declared the wire. The URL is the provider's
+    /// production endpoint unless the Anthropic wire carries a valid
+    /// `anthropic_base_url`, in which case it is `<base>/v1/messages`; the
+    /// override never applies to OpenAI. Empty strings count as absent, and key
+    /// material is never logged.
+    ///
+    /// HOSTED LEGACY NOTE: a tenant pod rendered before the shared-key bridge
+    /// was removed still carries a raw `ANTHROPIC_API_KEY` alongside the
+    /// gateway base URL, so this resolves the raw key and every call 401s
+    /// against the gateway (which accepts only virtual keys) until
+    /// `squelch-control llm mint` re-applies the Deployment. The sync passes
+    /// treat those 401s as config-level — rows stay queued — so the backlog
+    /// survives until the re-apply.
+    pub fn resolve_llm(&self) -> Option<ResolvedLlm> {
+        // Validate the override BEFORE provider inference: a rejected URL is
+        // absent everywhere, so it cannot flip a key onto the Anthropic wire
+        // and then fall back to posting it at api.anthropic.com.
+        let base_url = self.validated_base_url();
+
+        let (key, inferred) = if let Some(key) = env_nonempty("SQUELCH_STAGE2_API_KEY") {
+            // Explicit var: sniff the provider from the prefix; a set base URL
+            // breaks the tie for non-Anthropic-shaped keys (see above).
+            let provider = if key.starts_with("sk-ant-") || base_url.is_some() {
+                Stage2Provider::Anthropic
+            } else {
+                Stage2Provider::OpenAI
+            };
+            (key, provider)
+        } else if let Some(key) = env_nonempty("ANTHROPIC_API_KEY") {
+            (key, Stage2Provider::Anthropic)
+        } else if let Some(key) = env_nonempty("OPENAI_API_KEY") {
+            (key, Stage2Provider::OpenAI)
+        } else if let Some(key) = self.anthropic_api_key.clone().filter(|s| !s.is_empty()) {
+            (key, Stage2Provider::Anthropic)
+        } else {
+            return None;
+        };
+
+        // Config force-override wins over the inferred provider.
+        let provider = self.stage2_provider.unwrap_or(inferred);
+        let url = match (provider, base_url) {
+            (Stage2Provider::Anthropic, Some(base)) => {
+                format!("{}/v1/messages", base.trim_end_matches('/'))
+            }
+            _ => crate::triage::llm::provider_url(provider).to_string(),
+        };
+        Some(ResolvedLlm {
+            api_key: key,
+            provider,
+            url,
+        })
+    }
+
+    /// Resolve the hosted assistant relay's key + endpoint. Some ONLY when BOTH
+    /// `SQUELCH_ASSISTANT_API_KEY` and a valid `anthropic_base_url` are present:
+    /// an assistant virtual key only works at the gateway, and without a gateway
+    /// there is nothing to relay to — self-host BYOK lives in the app, not here.
+    /// The URL is `<base>/v1/messages`, exactly as [`Stage2Config::resolve_llm`]
+    /// builds it, and the env var is read lazily at call time like every other
+    /// key source. Empty strings count as absent, and key material is never
+    /// logged.
+    pub fn resolve_assistant(&self) -> Option<ResolvedAssistant> {
+        let base = self.validated_base_url()?;
+        let api_key = env_nonempty("SQUELCH_ASSISTANT_API_KEY")?;
+        Some(ResolvedAssistant {
+            api_key,
+            url: format!("{}/v1/messages", base.trim_end_matches('/')),
+        })
+    }
+
+    /// The `anthropic_base_url` override, or `None` when it is unset, blank, or
+    /// fails the transport check: https anywhere, plain http only for loopback
+    /// (dev/test mocks). A rejected value is announced on stderr and then
+    /// treated as absent, so a typo'd override disables the gateway loudly
+    /// instead of sending our key in cleartext.
+    fn validated_base_url(&self) -> Option<&str> {
+        let base = self
+            .anthropic_base_url
+            .as_deref()
+            .filter(|s| !s.is_empty())?;
+        if base_url_transport_ok(base) {
+            Some(base)
+        } else {
+            eprintln!(
+                "squelch: stage2.anthropic_base_url / SQUELCH_ANTHROPIC_BASE_URL must be https \
+                 (plain http is loopback-only) with no query or fragment — override ignored, \
+                 using the provider's production endpoint"
+            );
+            None
+        }
+    }
+
+    /// Key + provider only; compat shim over [`Stage2Config::resolve_llm`].
+    pub fn resolve_key_and_provider(&self) -> Option<(String, Stage2Provider)> {
+        self.resolve_llm().map(|r| (r.api_key, r.provider))
+    }
+
+    /// Just the API key, for callers that only need presence.
+    pub fn resolve_api_key(&self) -> Option<String> {
+        self.resolve_llm().map(|r| r.api_key)
+    }
+
+    /// Stage-2 is enabled iff an API key is resolvable.
+    pub fn enabled(&self) -> bool {
+        self.resolve_llm().is_some()
+    }
+}
+
+/// `true` when `base` is safe to send an API key to: https anywhere, or http
+/// terminating on this machine (127.0.0.0/8, `::1`, `localhost`). Anything that
+/// does not parse as a URL fails too, as does a base carrying a query or
+/// fragment — `/v1/messages` is appended to this string, so a `?` or `#` in it
+/// would produce a mangled join; better to fail loudly than post at a typo.
+fn base_url_transport_ok(base: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(base) else {
+        return false;
+    };
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return false;
+    }
+    match parsed.scheme() {
+        "https" => true,
+        "http" => match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Read an env var, returning `None` when unset or empty.
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|s| !s.is_empty())
+}
+
+/// Overwrite `slot` from env var `name` when it is set, non-blank, and parses as
+/// `T`. TRIMMED, and BLANK IS "UNSET": an exported-but-empty var must never
+/// clear a configured value, and neither must one carrying nothing but spaces.
+/// The whitespace half is not pedantry — `SQUELCH_EMBED_MODEL="   "` used to set
+/// a pin that `resolve_model` then trims back to empty, which takes semantic
+/// recall off for that run. Same rule the warden's `var()` follows, so a value
+/// means the same thing whichever door it comes through.
+fn env_override<T: std::str::FromStr>(name: &str, slot: &mut T) {
+    if let Ok(v) = std::env::var(name) {
+        let v = v.trim();
+        if !v.is_empty()
+            && let Ok(parsed) = v.parse::<T>()
+        {
+            *slot = parsed;
+        }
+    }
+}
+
+/// [`env_override`] for an `Option<T>` slot: a usable value sets `Some`, and an
+/// unset/blank/unparseable var leaves whatever the config file supplied.
+fn env_override_opt<T: std::str::FromStr>(name: &str, slot: &mut Option<T>) {
+    if let Ok(v) = std::env::var(name)
+        && !v.is_empty()
+        && let Ok(parsed) = v.parse::<T>()
+    {
+        *slot = Some(parsed);
+    }
+}
+
+/// [`env_override_opt`] for the reasoning-effort slots, where CLEARING the value
+/// has to be expressible: an operator who repoints a stage at a model with no
+/// effort support (Haiku 4.5, Sonnet 4.5) must be able to drop the field, since
+/// sending it to such a model is a 400 on every call. `none`/`off` clear it;
+/// anything else sets it verbatim (the API, not this parser, is the authority on
+/// which level names are valid).
+fn env_override_effort(name: &str, slot: &mut Option<String>) {
+    if let Ok(v) = std::env::var(name) {
+        let v = v.trim();
+        if v.is_empty() {
+            return;
+        }
+        *slot = match v.to_ascii_lowercase().as_str() {
+            "none" | "off" => None,
+            _ => Some(v.to_string()),
+        };
+    }
+}
+
+/// [`env_override_opt`] for a secret that lives INSIDE an optional credential
+/// struct: a usable value materializes that struct — a container gets its
+/// carriers entirely from the environment, with no `[carriers.ups]` table on
+/// disk to attach to — and then writes the named half.
+///
+/// Trimmed, and blank is "unset", which is the relay block's rule: an
+/// exported-but-empty var neither clobbers a configured secret nor conjures a
+/// carrier out of nothing. Because a carrier needs BOTH halves to count, a lone
+/// id still leaves it disabled.
+fn env_override_cred<T: Default>(
+    name: &str,
+    holder: &mut Option<T>,
+    half: impl FnOnce(&mut T) -> &mut Option<String>,
+) {
+    if let Ok(v) = std::env::var(name) {
+        let v = v.trim();
+        if !v.is_empty() {
+            *half(holder.get_or_insert_default()) = Some(v.to_string());
+        }
+    }
+}
+
+// ---- Stage-2 daily-cap runtime-override plumbing ---------------------------
+// Three layers, highest wins: an `app_settings` runtime override (applied
+// without a restart) > config/env > [`Stage2Config::default`]. These constants
+// are the shared `app_settings.key` names, so store, sync pass, and API cannot
+// drift.
+
+/// `app_settings.key` for the per-thread-per-day Stage-2 cap override.
+pub const APP_SETTING_THREAD_DAILY_CAP: &str = "stage2_thread_daily_cap";
+/// `app_settings.key` for the per-sender-per-day Stage-2 cap override.
+pub const APP_SETTING_SENDER_DAILY_CAP: &str = "stage2_sender_daily_cap";
+/// `app_settings.key` for the global-per-account-per-day Stage-2 cap override.
+pub const APP_SETTING_GLOBAL_DAILY_CAP: &str = "stage2_global_daily_cap";
+/// `app_settings.key` for the global-per-account-per-day Stage-1 cap override.
+pub const APP_SETTING_STAGE1_GLOBAL_DAILY_CAP: &str = "stage1_global_daily_cap";
+
+/// Inclusive bounds a Stage-2 daily-cap value must fall within (validated by the
+/// human door before persisting an override).
+pub const STAGE2_CAP_MIN: u32 = 1;
+pub const STAGE2_CAP_MAX: u32 = 100_000;
+
+/// Which layer supplied a Stage-2 daily cap. `Config` covers both TOML and env
+/// (both mean "operator-set"); the runtime override layer is reported separately
+/// by the API, so it has no variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapSource {
+    Default,
+    Config,
+}
+
+impl CapSource {
+    /// Stable lowercase label for the wire (`"default"` / `"config"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapSource::Default => "default",
+            CapSource::Config => "config",
+        }
+    }
+}
+
+/// The config/env-layer source of each Stage-2 daily cap, computed at load and
+/// threaded to the human door ("override" is decided later from `app_settings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stage2CapSources {
+    pub thread_daily_cap: CapSource,
+    pub sender_daily_cap: CapSource,
+    pub global_daily_cap: CapSource,
+    /// The config/env-layer source of the Stage-1 global daily cap.
+    pub stage1_global_daily_cap: CapSource,
+}
+
+impl Default for Stage2CapSources {
+    fn default() -> Self {
+        Self {
+            thread_daily_cap: CapSource::Default,
+            sender_daily_cap: CapSource::Default,
+            global_daily_cap: CapSource::Default,
+            stage1_global_daily_cap: CapSource::Default,
+        }
+    }
+}
+
+/// A cap is `Config`-sourced if the TOML `[stage2]` table carries its key OR its
+/// env var is set (non-empty); otherwise it fell through to the built-in default.
+fn cap_source(stage2_tbl: Option<&toml::Table>, key: &str, env_var: &str) -> CapSource {
+    let in_toml = stage2_tbl.map(|t| t.contains_key(key)).unwrap_or(false);
+    let in_env = std::env::var(env_var)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if in_toml || in_env {
+        CapSource::Config
+    } else {
+        CapSource::Default
+    }
+}
+
+/// [`Stage2CapSources`] for a (possibly absent) config path. A missing or
+/// unparseable file contributes no TOML keys; env can still promote a cap.
+fn stage2_cap_sources_for(path: Option<&std::path::Path>) -> Stage2CapSources {
+    let parsed: Option<toml::Table> = path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| text.parse::<toml::Table>().ok());
+    let stage2_tbl: Option<toml::Table> = parsed
+        .as_ref()
+        .and_then(|t| t.get("stage2").and_then(|v| v.as_table()).cloned());
+    let stage1_tbl: Option<toml::Table> = parsed
+        .as_ref()
+        .and_then(|t| t.get("stage1").and_then(|v| v.as_table()).cloned());
+    let s = stage2_tbl.as_ref();
+    Stage2CapSources {
+        thread_daily_cap: cap_source(s, "thread_daily_cap", "SQUELCH_STAGE2_THREAD_DAILY_CAP"),
+        sender_daily_cap: cap_source(s, "sender_daily_cap", "SQUELCH_STAGE2_SENDER_DAILY_CAP"),
+        global_daily_cap: cap_source(s, "global_daily_cap", "SQUELCH_STAGE2_GLOBAL_DAILY_CAP"),
+        stage1_global_daily_cap: cap_source(
+            stage1_tbl.as_ref(),
+            "global_daily_cap",
+            "SQUELCH_STAGE1_GLOBAL_DAILY_CAP",
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// Google OAuth client id (from your own GCP "Desktop app" client).
+    pub client_id: Option<String>,
+    /// Google OAuth client secret.
+    pub client_secret: Option<String>,
+    /// The single Gmail account this v0 instance manages. Also the keyring key.
+    pub account_email: Option<String>,
+    /// Which kind of mailbox `account_email` is: `"gmail"` or `"outlook"`
+    /// (Outlook.com, Hotmail, Microsoft 365, over Graph). Decides the OAuth
+    /// client and endpoints, and binds the account's `accounts.provider` row
+    /// on first boot. Config file only. UNSET means "infer it"
+    /// ([`Self::infer_provider`]): a file-backed credential minted by
+    /// Microsoft makes the daemon Outlook, which is how a hosted tenant (env
+    /// only, no config file) knows; otherwise Gmail. Read it through
+    /// [`Self::mail_provider`].
+    pub provider: Option<crate::mail::MailProvider>,
+    /// The Entra app (client) id an Outlook daemon authorizes as, when not
+    /// Passband's built-in one.
+    pub microsoft_client_id: Option<String>,
+    /// That app's secret, for a confidential (Web) Entra app. Empty for a
+    /// public "Mobile and desktop" app, which is what self-hosting uses.
+    pub microsoft_client_secret: Option<String>,
+
+    /// Path to the SQLite store.
+    pub db_path: PathBuf,
+    /// Which backend persists OAuth tokens (`keyring`, the macOS keychain, on
+    /// macOS only; `file` anywhere). Defaults per platform (keyring on macOS,
+    /// file elsewhere). Override with `SQUELCH_CRED_BACKEND`.
+    pub credential_backend: CredentialBackend,
+    /// Path to the JSON credentials file used by the `file` backend. Defaults to
+    /// `~/.config/squelch/credentials.json`. Ignored by the keyring backend.
+    pub credentials_path: Option<PathBuf>,
+    /// Default minimum importance for surfacing updates.
+    pub default_min_importance: u8,
+    /// How aggressively to squelch. Placeholder; the triage agent owns semantics.
+    pub squelch_level: u8,
+    /// Stage-1 rules-engine tuning.
+    pub stage1: Stage1Config,
+    /// Agent-owned triage and server ranking tuning.
+    pub triage: crate::triage::agent_config::AgentTriageConfig,
+    /// Stage-2 LLM triage tuning (Anthropic API, budgets).
+    pub stage2: Stage2Config,
+    /// Sync tunables (backfill window, poll interval).
+    pub sync: SyncConfig,
+    /// On-box semantic-recall (v1) tunables (embedding model, dims, cache dir).
+    pub embed: EmbedConfig,
+    /// Notification-event emission policy: the importance threshold, the
+    /// first-sight freshness test, and the rescue ceiling a late verdict has to
+    /// beat.
+    pub notify: NotifyConfig,
+    /// Smart clear's model pass: which model, at what effort, at what price.
+    pub smart_clear: SmartClearConfig,
+    /// Scheduled re-evaluation: how often triage looks at its own past verdicts.
+    pub revisit: RevisitPassConfig,
+    /// APNs pusher: the blind relay's URL + bearer. Absent `relay_url` means the
+    /// task is never spawned.
+    pub pusher: PusherConfig,
+    /// Outbound read tracking. Absent `base_url` means no send is ever tracked.
+    pub tracking: TrackingConfig,
+    /// Prometheus scrape endpoint. Absent `bind` means the listener is never
+    /// opened.
+    pub metrics: MetricsConfig,
+    /// The tenant console. Absent `sso_url` means no Google sign-in button,
+    /// which is the self-host posture.
+    pub console: ConsoleConfig,
+    /// BYOK carrier APIs. No credentials anywhere means no carrier is ever
+    /// polled, which is the default.
+    pub carriers: CarriersConfig,
+    /// Auto-translate. Defaults only; read from the `[translate]` table.
+    pub translate: TranslateConfig,
+    /// Smart re-notify's tunables; whether it runs is a hidden feature.
+    pub renotify: RenotifyConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            client_id: None,
+            client_secret: None,
+            account_email: None,
+            provider: None,
+            microsoft_client_id: None,
+            microsoft_client_secret: None,
+            db_path: default_db_path(),
+            credential_backend: CredentialBackend::default(),
+            credentials_path: None,
+            default_min_importance: 0,
+            squelch_level: 0,
+            stage1: Stage1Config::default(),
+            triage: crate::triage::agent_config::AgentTriageConfig::default(),
+            stage2: Stage2Config::default(),
+            sync: SyncConfig::default(),
+            embed: EmbedConfig::default(),
+            notify: NotifyConfig::default(),
+            smart_clear: SmartClearConfig::default(),
+            revisit: RevisitPassConfig::default(),
+            pusher: PusherConfig::default(),
+            tracking: TrackingConfig::default(),
+            metrics: MetricsConfig::default(),
+            console: ConsoleConfig::default(),
+            carriers: CarriersConfig::default(),
+            translate: TranslateConfig::default(),
+            renotify: RenotifyConfig::default(),
+        }
+    }
+}
+
+impl Config {
+    /// Default config path: `~/.config/squelch/config.toml`.
+    pub fn default_path() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join(".config").join("squelch").join("config.toml"))
+    }
+
+    /// Load config from the default path (if present), applying env-var
+    /// overrides. A missing file is not an error — defaults are used.
+    pub fn load() -> Self {
+        let mut cfg = match Self::default_path() {
+            Some(p) => Self::from_path(&p).unwrap_or_default(),
+            None => Self::default(),
+        };
+        cfg.apply_env_overrides();
+        cfg.infer_provider();
+        cfg
+    }
+
+    /// [`Config::load`], plus where each Stage-2 daily cap came from — the human
+    /// door reports that on `/client/triage-config`.
+    pub fn load_with_cap_sources() -> (Self, Stage2CapSources) {
+        let path = Self::default_path();
+        let mut cfg = match &path {
+            Some(p) => Self::from_path(p).unwrap_or_default(),
+            None => Self::default(),
+        };
+        // Sources are read from the raw TOML + env BEFORE env is folded into cfg
+        // (folding is lossy — it collapses "explicitly set" into the value).
+        let sources = stage2_cap_sources_for(path.as_deref());
+        cfg.apply_env_overrides();
+        cfg.infer_provider();
+        (cfg, sources)
+    }
+
+    /// [`Config::load_from`], plus the cap sources. See
+    /// [`Config::load_with_cap_sources`].
+    pub fn load_from_with_cap_sources(path: &std::path::Path) -> (Self, Stage2CapSources) {
+        let mut cfg = Self::from_path(path).unwrap_or_default();
+        let sources = stage2_cap_sources_for(Some(path));
+        cfg.apply_env_overrides();
+        cfg.infer_provider();
+        (cfg, sources)
+    }
+
+    /// Parse a config from a specific TOML file. Returns `None` if the file is
+    /// absent or unparseable (callers fall back to defaults).
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        let text = std::fs::read_to_string(path).ok()?;
+        toml::from_str(&text).ok()
+    }
+
+    /// Env-var overrides (highest precedence). Env always wins over the file so
+    /// operators can override without editing config.
+    fn apply_env_overrides(&mut self) {
+        // The two legacy-alias vars keep their own helper: they accept a
+        // deprecated second name and note the deprecation on stderr.
+        if let Some(p) = env_with_legacy(ENV_DB_PATH, ENV_DB_PATH_LEGACY) {
+            self.db_path = PathBuf::from(p);
+        }
+        env_override("SQUELCH_MIN_IMPORTANCE", &mut self.default_min_importance);
+        env_override_opt("SQUELCH_TRIAGE_MODEL", &mut self.triage.agent.model);
+        env_override(
+            "SQUELCH_TRIAGE_DAILY_RUN_CAP",
+            &mut self.triage.agent.daily_run_cap,
+        );
+        env_override(
+            "SQUELCH_TRIAGE_BACKGROUND_DAILY_RUN_CAP",
+            &mut self.triage.agent.background_daily_run_cap,
+        );
+        env_override(
+            "SQUELCH_TRIAGE_ACCESS_DAILY_RUN_CAP",
+            &mut self.triage.agent.access_daily_run_cap,
+        );
+        env_override(
+            "SQUELCH_TRIAGE_MAX_ATTEMPTS",
+            &mut self.triage.agent.max_attempts,
+        );
+        env_override(
+            "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
+            &mut self.triage.agent.outage_retry_secs,
+        );
+        env_override_opt(
+            "SQUELCH_TRIAGE_REVIEW_MODEL",
+            &mut self.triage.agent.review_model,
+        );
+        env_override(
+            "SQUELCH_TRIAGE_MAX_TURNS",
+            &mut self.triage.agent.max_model_turns,
+        );
+        env_override(
+            "SQUELCH_TRIAGE_MAX_TOOL_CALLS",
+            &mut self.triage.agent.max_tool_calls,
+        );
+        env_override(
+            "SQUELCH_TRIAGE_TIMEOUT_SECS",
+            &mut self.triage.agent.timeout_secs,
+        );
+        // Bounded like the caps below, and said: the outage interval is the
+        // throttle ladder's ceiling, so it cannot be shorter than the
+        // ladder's first wait, and neither it nor a model turn may be longer
+        // than a day, which every lease and deadline built on them assumes.
+        // A value out of range used to be accepted and silently exceeded (a
+        // 20 s interval got 15 to 30 s throttle waits), and an operator who
+        // set one must not meet a boot panic on upgrade.
+        {
+            use crate::triage::agent_config::{MAX_TIMEOUT_SECS, MIN_OUTAGE_RETRY_SECS};
+            let outage = &mut self.triage.agent.outage_retry_secs;
+            if !(MIN_OUTAGE_RETRY_SECS..=MAX_TIMEOUT_SECS).contains(outage) {
+                let clamped = (*outage).clamp(MIN_OUTAGE_RETRY_SECS, MAX_TIMEOUT_SECS);
+                eprintln!(
+                    "squelch: config triage.agent.outage_retry_secs={outage} is out of range \
+                     ({MIN_OUTAGE_RETRY_SECS}..={MAX_TIMEOUT_SECS}); clamping to {clamped}"
+                );
+                *outage = clamped;
+            }
+            let timeout = &mut self.triage.agent.timeout_secs;
+            if *timeout > MAX_TIMEOUT_SECS {
+                eprintln!(
+                    "squelch: config triage.agent.timeout_secs={timeout} is past the day \
+                     limit; clamping to {MAX_TIMEOUT_SECS}"
+                );
+                *timeout = MAX_TIMEOUT_SECS;
+            }
+            // The background and access lanes fit under the total together
+            // (`lane_caps`): a lowered total cuts what was set, which is said
+            // once here rather than refused.
+            let agent = &self.triage.agent;
+            let (background, access) = agent.lane_caps();
+            if (background, access) != (agent.background_daily_run_cap, agent.access_daily_run_cap)
+            {
+                eprintln!(
+                    "squelch: config triage.agent caps background={} access={} do not fit \
+                     daily_run_cap={} together; in force: background {background}, access {access}",
+                    agent.background_daily_run_cap, agent.access_daily_run_cap, agent.daily_run_cap
+                );
+            }
+            // The access check's cap is in characters, its size limit in
+            // bytes: six bytes a character at most (a control character is
+            // written as `\u00XX`), plus the rest of the input, must fit, or
+            // a body read to the cap is refused on every attempt and the job
+            // fails for good. Never clamped to nothing (validation refuses a
+            // zero cap, and the daemon should boot); a limit too small for a
+            // sender and a subject fails every access check loudly instead.
+            let context = &mut self.triage.context;
+            let most = (context
+                .max_context_bytes
+                .saturating_sub(crate::triage::agent_config::ACCESS_INPUT_SLACK_BYTES)
+                / 6)
+            .max(1);
+            if context.access_body_chars > most {
+                eprintln!(
+                    "squelch: config triage.context.access_body_chars={} cannot fit \
+                     max_context_bytes={}; clamping to {most}",
+                    context.access_body_chars, context.max_context_bytes
+                );
+                context.access_body_chars = most;
+            }
+        }
+        env_override(
+            "SQUELCH_TRIAGE_CONCURRENCY",
+            &mut self.triage.agent.concurrency,
+        );
+        env_override_opt("SQUELCH_CLIENT_ID", &mut self.client_id);
+        env_override_opt("SQUELCH_CLIENT_SECRET", &mut self.client_secret);
+        if let Some(v) = env_with_legacy(ENV_ACCOUNT_EMAIL, ENV_ACCOUNT_EMAIL_LEGACY) {
+            self.account_email = Some(v);
+        }
+        env_override("SQUELCH_BACKFILL_DAYS", &mut self.sync.backfill_days);
+        // The archive's settings have no environment override, so this is
+        // the file's number (or the default) being bounded.
+        if self.sync.archive_days > ARCHIVE_DAYS_MAX {
+            eprintln!(
+                "squelch: config sync.archive_days={} is past the {ARCHIVE_DAYS_MAX}-day limit; \
+                 clamping to {ARCHIVE_DAYS_MAX}",
+                self.sync.archive_days
+            );
+            self.sync.archive_days = ARCHIVE_DAYS_MAX;
+        }
+        env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
+        env_override("SQUELCH_IDLE_POLL_SECS", &mut self.sync.idle_poll_secs);
+        env_override(
+            "SQUELCH_FETCH_CONCURRENCY",
+            &mut self.sync.fetch_concurrency,
+        );
+        env_override(
+            "SQUELCH_GMAIL_QUOTA_PROFILE",
+            &mut self.sync.gmail_quota_profile,
+        );
+        // A per-pod memory knob, so it has to be reachable without editing a
+        // config file inside a container image. 0 pins the session in memory.
+        env_override(
+            "SQUELCH_EMBED_IDLE_UNLOAD_SECS",
+            &mut self.embed.idle_unload_secs,
+        );
+        env_override("SQUELCH_SQUELCH_LEVEL", &mut self.squelch_level);
+        env_override(
+            "SQUELCH_NOTIFY_MIN_IMPORTANCE",
+            &mut self.notify.min_importance,
+        );
+        for (name, slot) in [
+            (
+                "SQUELCH_RENOTIFY_MIN_OFFLINE_MINS",
+                &mut self.renotify.min_offline_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_SETTLE_SECS",
+                &mut self.renotify.online_settle_secs,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_END_DELAY_MINS",
+                &mut self.renotify.meeting_end_delay_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_END_WINDOW_MINS",
+                &mut self.renotify.meeting_end_window_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MAX_MEETING_MINS",
+                &mut self.renotify.max_meeting_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MEETING_GUARD_MINS",
+                &mut self.renotify.meeting_guard_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MIN_AGE_MINS",
+                &mut self.renotify.min_age_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_MAX_AGE_MINS",
+                &mut self.renotify.max_age_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_COOLDOWN_MINS",
+                &mut self.renotify.cooldown_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_LEAD_MINS",
+                &mut self.renotify.due_lead_mins,
+            ),
+            (
+                "SQUELCH_RENOTIFY_DUE_GRACE_MINS",
+                &mut self.renotify.due_grace_mins,
+            ),
+        ] {
+            env_override(name, slot);
+        }
+        env_override(
+            "SQUELCH_RENOTIFY_WORK_START_HOUR",
+            &mut self.renotify.work_start_hour,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_WORK_END_HOUR",
+            &mut self.renotify.work_end_hour,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_DAILY_BUDGET",
+            &mut self.renotify.daily_budget,
+        );
+        env_override(
+            "SQUELCH_RENOTIFY_MAX_PER_MESSAGE",
+            &mut self.renotify.max_per_message,
+        );
+        env_override("SQUELCH_RENOTIFY_MAX_ITEMS", &mut self.renotify.max_items);
+        env_override(
+            "SQUELCH_RENOTIFY_DUE_DAY_HOUR",
+            &mut self.renotify.due_day_hour,
+        );
+        // The two notify WINDOWS, both reachable without editing a config file
+        // inside a container image. The freshness one never had an override at
+        // all, which made the one knob that decides whether a tenant's mail can
+        // notify AT ALL unreachable on hosted; the rescue one ships with its own
+        // from the day it exists.
+        env_override(
+            "SQUELCH_NOTIFY_FRESHNESS_WINDOW_SECS",
+            &mut self.notify.freshness_window_secs,
+        );
+        env_override(
+            "SQUELCH_NOTIFY_RESCUE_WINDOW_SECS",
+            &mut self.notify.rescue_window_secs,
+        );
+        // ---- the fast lane -------------------------------------------------
+        // Every knob reachable from the environment, because the deployment
+        // that most needs to move one is hosted, where there is no config file
+        // to edit. The two switches take the lenient bool parse the other flags
+        // do, so an unreadable value leaves the setting where it was rather
+        // than silently inverting it.
+        env_override("SQUELCH_NOTIFY_FAST_ENABLED", &mut self.notify.fast_enabled);
+        env_override(
+            "SQUELCH_NOTIFY_SEALED_ENABLED",
+            &mut self.notify.sealed_enabled,
+        );
+        env_override("SQUELCH_NOTIFY_MODEL", &mut self.notify.model);
+        // `env_override_effort`, not the plain one: repointing the lane at a
+        // model with no effort support has to be able to CLEAR the field, since
+        // sending it to such a model is a 400 on every call.
+        env_override_effort("SQUELCH_NOTIFY_EFFORT", &mut self.notify.effort);
+        env_override(
+            "SQUELCH_NOTIFY_MAX_BODY_CHARS",
+            &mut self.notify.max_body_chars,
+        );
+        env_override(
+            "SQUELCH_NOTIFY_FAST_TIMEOUT_SECS",
+            &mut self.notify.fast_timeout_secs,
+        );
+        env_override(
+            "SQUELCH_NOTIFY_FAST_CONCURRENCY",
+            &mut self.notify.fast_concurrency,
+        );
+        env_override("SQUELCH_NOTIFY_DAILY_CAP", &mut self.notify.daily_cap);
+        env_override(
+            "SQUELCH_NOTIFY_PRICE_IN_PER_MTOK",
+            &mut self.notify.price_in_per_mtok,
+        );
+        env_override(
+            "SQUELCH_NOTIFY_PRICE_OUT_PER_MTOK",
+            &mut self.notify.price_out_per_mtok,
+        );
+        // Which embedding weights this daemon loads. An env var so a fleet-wide
+        // pin can be moved without cutting a new image, and validated where
+        // every other spelling is, by `FastEmbedder::new`: an unresolvable value
+        // there disables semantic recall rather than taking the daemon down.
+        env_override("SQUELCH_EMBED_MODEL", &mut self.embed.model);
+        // ---- APNs pusher (blind relay) -------------------------------------
+        // The relay token is never echoed anywhere.
+        for (name, slot) in [
+            ("SQUELCH_RELAY_URL", &mut self.pusher.relay_url),
+            ("SQUELCH_RELAY_TOKEN", &mut self.pusher.relay_token),
+            ("SQUELCH_RELAY_TOPIC", &mut self.pusher.topic),
+            ("SQUELCH_RELAY_APNS_ENV", &mut self.pusher.environment),
+            // ---- Outbound read tracking ------------------------------------
+            // Same rule as the relay block: trimmed, and a blank value is
+            // "unset" rather than "configured with nothing", so an exported-but-
+            // empty var cannot mint pixels pointing at "/t/<token>".
+            ("SQUELCH_TRACK_URL", &mut self.tracking.base_url),
+            // ---- Prometheus scrape endpoint --------------------------------
+            // Same rule again: an exported-but-empty var leaves the listener
+            // closed rather than trying to bind an empty address.
+            ("SQUELCH_METRICS_BIND", &mut self.metrics.bind),
+            // ---- The tenant console ----------------------------------------
+            // Same rule again: an exported-but-empty var leaves the Google
+            // button off the page rather than rendering one that points at "".
+            ("SQUELCH_CONSOLE_SSO_URL", &mut self.console.sso_url),
+            // ---- The shared embedding service ------------------------------
+            // Same rule again, and here it decides where the model runs: an
+            // exported-but-empty URL must leave the daemon embedding in-process
+            // rather than pointing it at "" and building no embedder at all.
+            // The token is never echoed anywhere.
+            ("SQUELCH_EMBED_URL", &mut self.embed.url),
+            ("SQUELCH_EMBED_TOKEN", &mut self.embed.token),
+        ] {
+            if let Ok(v) = std::env::var(name) {
+                let v = v.trim();
+                if !v.is_empty() {
+                    *slot = Some(v.to_string());
+                }
+            }
+        }
+        // The console's plain-http escape hatch. A BOOL, so it takes the same
+        // lenient parse the other flags do and an unreadable value leaves the
+        // setting where it was, which is off.
+        env_override(
+            "SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE",
+            &mut self.console.allow_insecure_cookie,
+        );
+
+        // Lenient enum parse (trim + lowercase, unknown value keeps the current
+        // one), so not the strict `FromStr` helper.
+        if let Ok(v) = std::env::var("SQUELCH_CRED_BACKEND")
+            && let Some(b) = CredentialBackend::from_str_lenient(&v)
+        {
+            self.credential_backend = b;
+        }
+        // `var_os`, not `var`: a credentials path may be non-UTF-8, and an empty
+        // value is honored as-is here rather than treated as unset.
+        if let Some(p) = std::env::var_os("SQUELCH_CREDENTIALS_PATH") {
+            self.credentials_path = Some(PathBuf::from(p));
+        }
+
+        // ---- Stage-2 overrides ---------------------------------------------
+        // The API key itself is resolved lazily via env in
+        // `Stage2Config::resolve_llm`; no need to copy it here.
+        if let Ok(v) = std::env::var("SQUELCH_STAGE2_PROVIDER")
+            && let Some(p) = Stage2Provider::from_str_lenient(&v)
+        {
+            self.stage2.stage2_provider = Some(p);
+        }
+        env_override_opt(
+            "SQUELCH_ANTHROPIC_BASE_URL",
+            &mut self.stage2.anthropic_base_url,
+        );
+        env_override("SQUELCH_MODEL", &mut self.stage2.model);
+        env_override_effort("SQUELCH_STAGE2_EFFORT", &mut self.stage2.effort);
+        env_override_effort(
+            "SQUELCH_STAGE2_ONBOARDING_EFFORT",
+            &mut self.stage2.onboarding_effort,
+        );
+        env_override(
+            "SQUELCH_STAGE2_ONBOARDING_DAYS",
+            &mut self.stage2.onboarding_days,
+        );
+        env_override(
+            "SQUELCH_STAGE2_MAX_BODY_CHARS",
+            &mut self.stage2.max_body_chars,
+        );
+        env_override(
+            "SQUELCH_STAGE2_BATCH_PER_CYCLE",
+            &mut self.stage2.batch_per_cycle,
+        );
+        env_override(
+            "SQUELCH_STAGE2_THREAD_DAILY_CAP",
+            &mut self.stage2.thread_daily_cap,
+        );
+        env_override(
+            "SQUELCH_STAGE2_GLOBAL_DAILY_CAP",
+            &mut self.stage2.global_daily_cap,
+        );
+        env_override(
+            "SQUELCH_STAGE2_SENDER_DAILY_CAP",
+            &mut self.stage2.sender_daily_cap,
+        );
+        env_override("SQUELCH_STAGE2_MAX_AGE_DAYS", &mut self.stage2.max_age_days);
+        env_override(
+            "SQUELCH_STAGE2_PRICE_IN_PER_MTOK",
+            &mut self.stage2.price_in_per_mtok,
+        );
+        env_override(
+            "SQUELCH_STAGE2_PRICE_OUT_PER_MTOK",
+            &mut self.stage2.price_out_per_mtok,
+        );
+
+        // ---- Stage-1 LLM overrides -----------------------------------------
+        // ---- Revisit overrides ----------------------------------------------
+        env_override("SQUELCH_REVISIT_ENABLED", &mut self.revisit.enabled);
+        env_override(
+            "SQUELCH_REVISIT_BATCH_PER_CYCLE",
+            &mut self.revisit.batch_per_cycle,
+        );
+        env_override("SQUELCH_REVISIT_DAILY_CAP", &mut self.revisit.daily_cap);
+        env_override(
+            "SQUELCH_REVISIT_MAX_PER_MESSAGE",
+            &mut self.revisit.max_per_message,
+        );
+        env_override(
+            "SQUELCH_REVISIT_MAX_LIFETIME",
+            &mut self.revisit.max_per_message_lifetime,
+        );
+        env_override(
+            "SQUELCH_REVISIT_MIN_LEAD_HOURS",
+            &mut self.revisit.min_lead_hours,
+        );
+        env_override(
+            "SQUELCH_REVISIT_MAX_HORIZON_DAYS",
+            &mut self.revisit.max_horizon_days,
+        );
+        env_override(
+            "SQUELCH_REVISIT_DEDUPE_HOURS",
+            &mut self.revisit.dedupe_window_hours,
+        );
+
+        env_override("SQUELCH_STAGE1_MODEL", &mut self.stage1.model);
+        env_override_effort("SQUELCH_STAGE1_EFFORT", &mut self.stage1.effort);
+        env_override(
+            "SQUELCH_STAGE1_MAX_BODY_CHARS",
+            &mut self.stage1.max_body_chars,
+        );
+        env_override(
+            "SQUELCH_STAGE1_BATCH_PER_CYCLE",
+            &mut self.stage1.batch_per_cycle,
+        );
+        env_override(
+            "SQUELCH_STAGE1_GLOBAL_DAILY_CAP",
+            &mut self.stage1.global_daily_cap,
+        );
+        env_override(
+            "SQUELCH_STAGE1_PRICE_IN_PER_MTOK",
+            &mut self.stage1.price_in_per_mtok,
+        );
+        env_override(
+            "SQUELCH_STAGE1_PRICE_OUT_PER_MTOK",
+            &mut self.stage1.price_out_per_mtok,
+        );
+
+        // ---- BYOK carrier APIs ---------------------------------------------
+        // Secrets, handled the relay block's way: trimmed, blank is "unset",
+        // never echoed anywhere (each cred struct's `Debug` redacts them). The
+        // one difference is that a value MATERIALIZES its carrier when the TOML
+        // never mentioned one, because that is how a container is configured —
+        // and since a carrier needs both halves, a lone id leaves it off.
+        env_override_cred("SQUELCH_UPS_CLIENT_ID", &mut self.carriers.ups, |c| {
+            &mut c.client_id
+        });
+        env_override_cred("SQUELCH_UPS_CLIENT_SECRET", &mut self.carriers.ups, |c| {
+            &mut c.client_secret
+        });
+        env_override_cred("SQUELCH_FEDEX_CLIENT_ID", &mut self.carriers.fedex, |c| {
+            &mut c.client_id
+        });
+        env_override_cred(
+            "SQUELCH_FEDEX_CLIENT_SECRET",
+            &mut self.carriers.fedex,
+            |c| &mut c.client_secret,
+        );
+        env_override_cred("SQUELCH_USPS_CONSUMER_KEY", &mut self.carriers.usps, |c| {
+            &mut c.consumer_key
+        });
+        env_override_cred(
+            "SQUELCH_USPS_CONSUMER_SECRET",
+            &mut self.carriers.usps,
+            |c| &mut c.consumer_secret,
+        );
+        env_override_cred("SQUELCH_DHL_API_KEY", &mut self.carriers.dhl, |c| {
+            &mut c.api_key
+        });
+        env_override(
+            "SQUELCH_CARRIERS_POLL_INTERVAL_HOURS",
+            &mut self.carriers.poll_interval_hours,
+        );
+        env_override(
+            "SQUELCH_CARRIERS_OFD_POLL_INTERVAL_MINS",
+            &mut self.carriers.ofd_poll_interval_mins,
+        );
+        env_override(
+            "SQUELCH_CARRIERS_MAX_AGE_DAYS",
+            &mut self.carriers.max_age_days,
+        );
+        env_override(
+            "SQUELCH_CARRIERS_MAX_FAILURES",
+            &mut self.carriers.max_failures,
+        );
+        env_override(
+            "SQUELCH_CARRIERS_STALE_AFTER_DAYS",
+            &mut self.carriers.stale_after_days,
+        );
+        // Only when DHL already exists: a budget must never conjure a carrier
+        // (the api_key override above is the only thing that can).
+        if let Some(dhl) = self.carriers.dhl.as_mut() {
+            env_override("SQUELCH_DHL_DAILY_CAP", &mut dhl.daily_cap);
+        }
+
+        // Range-guard the caps, matching POST /client/triage-config's
+        // validation: a cap of 0 would silently block EVERY row each cycle
+        // (`used >= cap` holds at 0). Clamps with a warning rather than
+        // erroring, and runs last so it guards the TOML and env layers both.
+        for (name, cap) in [
+            ("stage2.thread_daily_cap", &mut self.stage2.thread_daily_cap),
+            ("stage2.sender_daily_cap", &mut self.stage2.sender_daily_cap),
+            ("stage2.global_daily_cap", &mut self.stage2.global_daily_cap),
+            ("stage1.global_daily_cap", &mut self.stage1.global_daily_cap),
+        ] {
+            if !(STAGE2_CAP_MIN..=STAGE2_CAP_MAX).contains(cap) {
+                let clamped = (*cap).clamp(STAGE2_CAP_MIN, STAGE2_CAP_MAX);
+                eprintln!(
+                    "squelch: config {name}={cap} is out of range \
+                     ({STAGE2_CAP_MIN}..={STAGE2_CAP_MAX}); clamping to {clamped}"
+                );
+                *cap = clamped;
+            }
+        }
+
+        // Same idea for the carrier cadences: a ZERO interval is a spin loop
+        // against somebody else's rate-limited API, so it gets a floor of 1
+        // rather than a config that quietly hammers UPS.
+        for (name, interval) in [
+            (
+                "carriers.poll_interval_hours",
+                &mut self.carriers.poll_interval_hours,
+            ),
+            (
+                "carriers.ofd_poll_interval_mins",
+                &mut self.carriers.ofd_poll_interval_mins,
+            ),
+        ] {
+            if *interval == 0 {
+                eprintln!("squelch: config {name}=0 would poll without pause; clamping to 1");
+                *interval = 1;
+            }
+        }
+    }
+
+    /// Resolve the credentials-file path for the `file` backend: the configured
+    /// path if set, else `~/.config/squelch/credentials.json`.
+    pub fn resolve_credentials_path(&self) -> PathBuf {
+        if let Some(p) = &self.credentials_path {
+            return p.clone();
+        }
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join(".config").join("squelch").join("credentials.json"))
+            .unwrap_or_else(|| PathBuf::from("credentials.json"))
+    }
+
+    /// Load config from an explicit path (if present), then apply env overrides.
+    /// A missing file is fine — you can drive everything from the environment.
+    pub fn load_from(path: &std::path::Path) -> Self {
+        let mut cfg = Self::from_path(path).unwrap_or_default();
+        cfg.apply_env_overrides();
+        cfg.infer_provider();
+        cfg
+    }
+
+    /// Fetch OAuth client credentials, erroring with a helpful message if the
+    /// user hasn't set up their GCP client yet.
+    pub fn oauth_client(&self) -> Result<OAuthClientConfig, CoreError> {
+        if self.mail_provider() == crate::mail::MailProvider::Outlook {
+            return self.microsoft_client();
+        }
+        let client_id = self.client_id.clone().filter(|s| !s.is_empty());
+        let client_secret = self.client_secret.clone().filter(|s| !s.is_empty());
+        match (client_id, client_secret) {
+            (Some(client_id), Some(client_secret)) => Ok(OAuthClientConfig {
+                client_id,
+                client_secret,
+                issuer: OAuthIssuer::Google,
+            }),
+            _ => Err(CoreError::Credential(format!(
+                "missing OAuth client credentials. Create a Google Cloud \"Desktop app\" \
+                 OAuth client (with the Gmail API enabled) and set client_id/client_secret in {} \
+                 or via SQUELCH_CLIENT_ID / SQUELCH_CLIENT_SECRET.",
+                Self::default_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.config/squelch/config.toml".to_string())
+            ))),
+        }
+    }
+
+    /// The mailbox provider: the configured one, else Gmail. Call
+    /// [`Self::infer_provider`] first where an unset value should be learned
+    /// from the stored credential.
+    pub fn mail_provider(&self) -> crate::mail::MailProvider {
+        self.provider.unwrap_or_default()
+    }
+
+    /// Fill an UNSET `provider` from the stored Read credential: Outlook when
+    /// Microsoft minted it. Only the FILE backend is read (a hosted tenant's,
+    /// and any headless host's); a keychain read here could put a permission
+    /// prompt in front of startup, so a keyring self-host sets `provider`
+    /// explicitly. A configured value is never changed, and nothing found
+    /// leaves it unset (Gmail).
+    pub fn infer_provider(&mut self) {
+        if self.provider.is_some() || self.credential_backend != CredentialBackend::File {
+            return;
+        }
+        let Some(email) = self.account_email.clone().filter(|e| !e.trim().is_empty()) else {
+            return;
+        };
+        let path = self.resolve_credentials_path();
+        if let Ok(token) = crate::credentials::load_token_file(
+            &path,
+            &email,
+            crate::credentials::CredentialKind::Read,
+        ) && crate::credentials::token_issuer(&token) == Some(OAuthIssuer::Microsoft)
+        {
+            self.provider = Some(crate::mail::MailProvider::Outlook);
+        }
+    }
+
+    /// The Outlook client.
+    ///
+    /// - `microsoft_client_id` (+ `microsoft_client_secret`) when set.
+    /// - Else `client_id`/`client_secret` when the id is an Entra app id (a
+    ///   GUID): how a HOSTED tenant gets the confidential "Passband Hosted"
+    ///   app, through the same env names a Gmail tenant uses for Google's.
+    ///   A Google id (`*.apps.googleusercontent.com`) is never a GUID, so a
+    ///   Google secret left in the config can never reach Microsoft.
+    /// - Else Passband's built-in public app, with no secret.
+    fn microsoft_client(&self) -> Result<OAuthClientConfig, CoreError> {
+        let nonempty = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        if let Some(id) = nonempty(&self.microsoft_client_id) {
+            return Ok(OAuthClientConfig {
+                client_id: id,
+                client_secret: nonempty(&self.microsoft_client_secret).unwrap_or_default(),
+                issuer: OAuthIssuer::Microsoft,
+            });
+        }
+        if let (Some(id), Some(secret)) = (nonempty(&self.client_id), nonempty(&self.client_secret))
+            && is_entra_app_id(&id)
+        {
+            return Ok(OAuthClientConfig {
+                client_id: id,
+                client_secret: secret,
+                issuer: OAuthIssuer::Microsoft,
+            });
+        }
+        let client_id = self
+            .microsoft_client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(PASSBAND_MICROSOFT_CLIENT_ID)
+            .to_string();
+        if client_id.is_empty() {
+            return Err(CoreError::Credential(format!(
+                "provider = \"outlook\" needs an Entra app: this build has no built-in one, so \
+                 register a \"Mobile and desktop applications\" app (see docs/GETTING-STARTED.md, \
+                 Outlook) and set microsoft_client_id in {}.",
+                Self::default_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.config/squelch/config.toml".to_string())
+            )));
+        }
+        Ok(OAuthClientConfig {
+            client_id,
+            client_secret: String::new(),
+            issuer: OAuthIssuer::Microsoft,
+        })
+    }
+
+    /// The configured account email, erroring helpfully if unset.
+    pub fn require_account_email(&self) -> Result<String, CoreError> {
+        self.account_email
+            .clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                CoreError::Credential(
+                    "no account_email configured (set account_email in config or \
+                     SQUELCH_ACCOUNT_EMAIL)"
+                        .to_string(),
+                )
+            })
+    }
+}
+
+/// Mirror config-representable `.env` pairs into the TOML config at `path`, so a
+/// repo-root `.env` reaches binaries launched from any CWD.
+///
+/// ONLY keys that are real [`Config`] fields are written — env-only secrets
+/// (`SQUELCH_API_TOKEN`, `ANTHROPIC_API_KEY`, …) never land on disk here.
+/// Unrelated keys are preserved, `.env` wins on conflicts, and an unparseable
+/// file is refused rather than clobbered. `Ok(true)` if the file was rewritten.
+pub fn mirror_env_pairs_to_config(
+    pairs: &[(String, String)],
+    path: &std::path::Path,
+) -> std::io::Result<bool> {
+    let get = |name: &str| {
+        pairs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    // Canonical name wins over its legacy alias, same as apply_env_overrides.
+    let get2 = |canonical: &str, legacy: &str| get(canonical).or_else(|| get(legacy));
+
+    let mut mapped: Vec<(&str, toml::Value)> = Vec::new();
+    if let Some(v) = get("SQUELCH_CLIENT_ID") {
+        mapped.push(("client_id", toml::Value::String(v)));
+    }
+    if let Some(v) = get("SQUELCH_CLIENT_SECRET") {
+        mapped.push(("client_secret", toml::Value::String(v)));
+    }
+    if let Some(v) = get2(ENV_ACCOUNT_EMAIL, ENV_ACCOUNT_EMAIL_LEGACY) {
+        mapped.push(("account_email", toml::Value::String(v)));
+    }
+    if let Some(v) = get2(ENV_DB_PATH, ENV_DB_PATH_LEGACY) {
+        mapped.push(("db_path", toml::Value::String(v)));
+    }
+    if let Some(b) =
+        get("SQUELCH_CRED_BACKEND").and_then(|v| CredentialBackend::from_str_lenient(&v))
+    {
+        let s = match b {
+            CredentialBackend::Keyring => "keyring",
+            CredentialBackend::File => "file",
+        };
+        mapped.push(("credential_backend", toml::Value::String(s.to_string())));
+    }
+    if let Some(v) = get("SQUELCH_CREDENTIALS_PATH") {
+        mapped.push(("credentials_path", toml::Value::String(v)));
+    }
+    if mapped.is_empty() {
+        return Ok(false);
+    }
+
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let mut table: toml::Table = match &existing {
+        Some(text) => text.parse().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("refusing to rewrite unparseable {}: {e}", path.display()),
+            )
+        })?,
+        None => toml::Table::new(),
+    };
+
+    let mut changed = false;
+    for (key, val) in mapped {
+        if table.get(key) != Some(&val) {
+            table.insert(key.to_string(), val);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let rendered = toml::to_string_pretty(&table)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    // Write-then-rename so a crash can't leave a half-written config we would
+    // then refuse to touch. The tmp is CREATED 0600 — client_secret lives here
+    // and must never exist world-readable, not even for the instant before a
+    // chmod. Any failure removes the tmp file.
+    let tmp = path.with_extension("toml.tmp");
+    // A leftover tmp from a crashed prior run may carry old (possibly 0644)
+    // permissions; mode(0o600) only applies at CREATE, so clear it first.
+    let _ = std::fs::remove_file(&tmp);
+    let write_tmp = || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(rendered.as_bytes())?;
+        f.sync_all()
+    };
+    if let Err(e) = write_tmp().and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The embedding service's bearer token is secret material: no debug
+    /// print of the embed section, or of the whole config, carries it.
+    #[test]
+    fn the_embed_token_never_reaches_a_debug_print() {
+        let mut config = Config::default();
+        config.embed.url = Some("http://squelch-embed:8850".into());
+        config.embed.token = Some("s3cret-embed-token-value".into());
+        for shown in [format!("{:?}", config.embed), format!("{config:?}")] {
+            assert!(!shown.contains("s3cret"), "{shown}");
+            assert!(shown.contains("<redacted>"), "{shown}");
+            assert!(shown.contains("squelch-embed:8850"), "{shown}");
+        }
+        config.embed.token = None;
+        assert!(format!("{:?}", config.embed).contains("token: None"));
+    }
+    use std::sync::Mutex;
+
+    /// Tests that touch process-wide env must not run concurrently.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn gmail_quota_profile_defaults_standard_and_accepts_legacy() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(matches!(
+            config.sync.gmail_quota_profile,
+            GmailQuotaProfile::Standard
+        ));
+        let config: Config = toml::from_str("[sync]\ngmail_quota_profile = \"legacy\"\n").unwrap();
+        assert!(matches!(
+            config.sync.gmail_quota_profile,
+            GmailQuotaProfile::Legacy
+        ));
+        assert!("bogus".parse::<GmailQuotaProfile>().is_err());
+        assert!(matches!(
+            "legacy".parse::<GmailQuotaProfile>().unwrap(),
+            GmailQuotaProfile::Legacy
+        ));
+    }
+
+    #[test]
+    fn agent_budget_environment_overrides_are_active() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let names = [
+            "SQUELCH_TRIAGE_DAILY_RUN_CAP",
+            "SQUELCH_TRIAGE_MAX_ATTEMPTS",
+            "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
+            "SQUELCH_TRIAGE_BACKGROUND_DAILY_RUN_CAP",
+            "SQUELCH_TRIAGE_ACCESS_DAILY_RUN_CAP",
+        ];
+        let previous = names.map(std::env::var_os);
+        // SAFETY: every environment-mutating config test holds ENV_LOCK.
+        unsafe {
+            std::env::set_var(names[0], "17");
+            std::env::set_var(names[1], "4");
+            std::env::set_var(names[2], "600");
+            std::env::set_var(names[3], "5");
+            std::env::set_var(names[4], "7");
+        }
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        unsafe {
+            for (name, value) in names.into_iter().zip(previous) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+        assert_eq!(config.triage.agent.daily_run_cap, 17);
+        assert_eq!(config.triage.agent.background_daily_run_cap, 5);
+        assert_eq!(config.triage.agent.access_daily_run_cap, 7);
+        assert_eq!(config.triage.agent.max_attempts, 4);
+        assert_eq!(config.triage.agent.outage_retry_secs, 600);
+    }
+
+    /// The access check's cap cannot exceed what its byte limit holds: the
+    /// operator who raises it for the old reach gets the most the limit
+    /// fits, not a check that is refused on every attempt.
+    #[test]
+    fn access_body_cap_is_clamped_to_what_the_size_limit_holds() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.triage.context.access_body_chars = 1_000_000;
+        config.apply_env_overrides();
+        assert_eq!(
+            config.triage.context.access_body_chars,
+            (120_000 - crate::triage::agent_config::ACCESS_INPUT_SLACK_BYTES) / 6
+        );
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.triage.context.access_body_chars, 8_000);
+        // An absurd limit leaves a cap of one, not of nothing (which
+        // validation would refuse).
+        let mut config = Config::default();
+        config.triage.context.max_context_bytes = 100;
+        config.apply_env_overrides();
+        assert_eq!(config.triage.context.access_body_chars, 1);
+    }
+
+    /// The outage interval and the turn deadline are clamped, not refused:
+    /// an operator's old setting must not become a boot panic.
+    #[test]
+    fn triage_intervals_out_of_range_are_clamped_not_refused() {
+        use crate::triage::agent_config::{MAX_TIMEOUT_SECS, MIN_OUTAGE_RETRY_SECS};
+        let _guard = ENV_LOCK.lock().unwrap();
+        let names = [
+            "SQUELCH_TRIAGE_OUTAGE_RETRY_SECS",
+            "SQUELCH_TRIAGE_TIMEOUT_SECS",
+        ];
+        let previous: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
+        unsafe {
+            std::env::set_var(names[0], "20");
+            std::env::set_var(names[1], "100000");
+        }
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        unsafe {
+            for (name, value) in names.into_iter().zip(previous) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+        assert_eq!(config.triage.agent.outage_retry_secs, MIN_OUTAGE_RETRY_SECS);
+        assert_eq!(config.triage.agent.timeout_secs, MAX_TIMEOUT_SECS);
+        assert!(config.triage.validate().is_ok());
+    }
+
+    #[test]
+    fn sync_defaults_are_sane() {
+        let c = Config::default();
+        assert_eq!(c.sync.backfill_days, 30);
+        assert_eq!(c.sync.backfill_bulk_triage_days, 7);
+        assert_eq!(c.sync.archive_days, 1825);
+        assert_eq!(c.sync.archive_min_free_mb, 2048);
+        assert_eq!(c.sync.archive_max_db_mb, 4096);
+        assert_eq!(c.sync.poll_secs, 5);
+        assert_eq!(c.sync.idle_poll_secs, 0, "no idle backoff unless asked for");
+        assert_eq!(c.sync.fetch_concurrency, 2);
+        assert!(c.client_id.is_none());
+    }
+
+    #[test]
+    fn embed_defaults_are_sane() {
+        // Only the two lengths this test owns. The model pin and the backfill
+        // batch size have their own tests where they are decided.
+        let c = EmbedConfig::default();
+        assert_eq!(c.dims, 384);
+        assert_eq!(c.max_chars, 1000);
+        assert_eq!(c.max_tokens, 256);
+    }
+
+    /// `settings()` carries the token budget through to the embedder, and the
+    /// two truncation lengths are independently configurable.
+    #[test]
+    fn embed_settings_carry_max_tokens() {
+        assert_eq!(EmbedConfig::default().settings().max_tokens, 256);
+
+        let cfg: Config = toml::from_str("[embed]\nmax_tokens = 128\nmax_chars = 700\n").unwrap();
+        assert_eq!(cfg.embed.max_tokens, 128);
+        assert_eq!(cfg.embed.max_chars, 700);
+        let s = cfg.embed.settings();
+        assert_eq!(s.max_tokens, 128);
+        assert_eq!(s.model_name, cfg.embed.model);
+        assert_eq!(s.dims, 384);
+
+        // A config written before the field existed still parses to the default.
+        let cfg: Config = toml::from_str("[embed]\nmax_chars = 2000\n").unwrap();
+        assert_eq!(cfg.embed.max_chars, 2000);
+        assert_eq!(cfg.embed.max_tokens, 256);
+    }
+
+    /// A hand-written `max_tokens` never reaches the tokenizer unclamped. The
+    /// small end is the point: 0 and 1 wrap `max_length - 2` and turn truncation
+    /// OFF, and 2 leaves no content tokens at all, so neither can be honoured as
+    /// written. See [`EmbedConfig::settings`].
+    #[test]
+    fn embed_settings_clamp_max_tokens() {
+        let resolved = |max_tokens: usize| {
+            EmbedConfig {
+                max_tokens,
+                ..EmbedConfig::default()
+            }
+            .settings()
+            .max_tokens
+        };
+
+        for n in [0, 1, 2] {
+            assert_eq!(
+                resolved(n),
+                crate::embed::EMBED_MAX_TOKENS_FLOOR,
+                "{n} tokens must clamp up, not disable truncation"
+            );
+        }
+        assert_eq!(resolved(4096), crate::embed::EMBED_MAX_TOKENS_CEILING);
+
+        // In range, passed through untouched, ends included.
+        assert_eq!(resolved(crate::embed::EMBED_MAX_TOKENS_FLOOR), 8);
+        assert_eq!(resolved(256), 256);
+        assert_eq!(resolved(crate::embed::EMBED_MAX_TOKENS_CEILING), 512);
+    }
+
+    #[test]
+    fn mirror_env_pairs_creates_config_with_mapped_keys_only() {
+        let dir = std::env::temp_dir().join(format!("squelch-mirror-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::remove_file(&path).ok();
+
+        let pairs: Vec<(String, String)> = [
+            ("SQUELCH_CLIENT_ID", "abc.apps.googleusercontent.com"),
+            ("SQUELCH_CLIENT_SECRET", "sekret"),
+            ("SQUELCH_ACCOUNT_EMAIL", "you@gmail.com"),
+            ("SQUELCH_DB_PATH", "/tmp/squelch.db"),
+            // env-only values must NOT be mirrored to disk
+            ("SQUELCH_API_TOKEN", "supersecret"),
+            ("ANTHROPIC_API_KEY", "sk-ant-xxx"),
+            ("SQUELCH_MCP_ALLOWED_HOSTS", "box.tailnet.ts.net"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .into();
+
+        assert!(mirror_env_pairs_to_config(&pairs, &path).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("supersecret"));
+        assert!(!text.contains("sk-ant-xxx"));
+        assert!(!text.contains("ts.net"));
+
+        let c = Config::from_path(&path).unwrap();
+        assert_eq!(
+            c.client_id.as_deref(),
+            Some("abc.apps.googleusercontent.com")
+        );
+        assert_eq!(c.client_secret.as_deref(), Some("sekret"));
+        assert_eq!(c.account_email.as_deref(), Some("you@gmail.com"));
+        assert_eq!(c.db_path, PathBuf::from("/tmp/squelch.db"));
+
+        // Second mirror with identical pairs is a no-op.
+        assert!(!mirror_env_pairs_to_config(&pairs, &path).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mirror_env_pairs_merges_and_preserves_unrelated_keys() {
+        let dir = std::env::temp_dir().join(format!("squelch-mirror2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "account_email = \"old@gmail.com\"\nsquelch_level = 3\n\n[sync]\nbackfill_days = 90\n",
+        )
+        .unwrap();
+
+        let pairs = vec![(
+            "SQUELCH_ACCOUNT_EMAIL".to_string(),
+            "new@gmail.com".to_string(),
+        )];
+        assert!(mirror_env_pairs_to_config(&pairs, &path).unwrap());
+
+        let c = Config::from_path(&path).unwrap();
+        assert_eq!(c.account_email.as_deref(), Some("new@gmail.com"));
+        assert_eq!(c.squelch_level, 3);
+        assert_eq!(c.sync.backfill_days, 90);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mirror_env_pairs_refuses_unparseable_config() {
+        let dir = std::env::temp_dir().join(format!("squelch-mirror3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "this is [not toml").unwrap();
+
+        let pairs = vec![("SQUELCH_ACCOUNT_EMAIL".to_string(), "x@y.com".to_string())];
+        assert!(mirror_env_pairs_to_config(&pairs, &path).is_err());
+        // The broken file is left exactly as it was.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is [not toml");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_from_toml() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("squelch-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+client_id = "abc.apps.googleusercontent.com"
+client_secret = "sekret"
+account_email = "you@gmail.com"
+db_path = "/tmp/squelch.db"
+
+[sync]
+backfill_days = 90
+archive_days = 730
+"#,
+        )
+        .unwrap();
+        let c = Config::load_from(&path);
+        assert_eq!(
+            c.client_id.as_deref(),
+            Some("abc.apps.googleusercontent.com")
+        );
+        assert_eq!(c.account_email.as_deref(), Some("you@gmail.com"));
+        assert_eq!(c.db_path, PathBuf::from("/tmp/squelch.db"));
+        assert_eq!(c.sync.backfill_days, 90);
+        assert_eq!(c.sync.archive_days, 730);
+        // unspecified sync field falls back to default
+        assert_eq!(c.sync.poll_secs, 5);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_file_is_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // No env overrides in play => the canonical default path.
+        unsafe {
+            std::env::remove_var("SQUELCH_DB_PATH");
+            std::env::remove_var("SQUELCH_DB");
+        }
+        let c = Config::load_from(std::path::Path::new("/nonexistent/squelch/config.toml"));
+        assert_eq!(c.db_path, default_db_path());
+    }
+
+    #[test]
+    fn db_path_precedence_canonical_over_legacy_over_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_DB_PATH");
+            std::env::remove_var("SQUELCH_DB");
+        }
+        // Neither set => canonical default.
+        assert_eq!(resolve_db_path(), default_db_path());
+
+        // Legacy only => legacy value (with a deprecation note to stderr).
+        unsafe {
+            std::env::set_var("SQUELCH_DB", "/tmp/legacy.db");
+        }
+        assert_eq!(resolve_db_path(), PathBuf::from("/tmp/legacy.db"));
+
+        // Canonical set => canonical WINS over legacy.
+        unsafe {
+            std::env::set_var("SQUELCH_DB_PATH", "/tmp/canonical.db");
+        }
+        assert_eq!(resolve_db_path(), PathBuf::from("/tmp/canonical.db"));
+
+        unsafe {
+            std::env::remove_var("SQUELCH_DB_PATH");
+            std::env::remove_var("SQUELCH_DB");
+        }
+    }
+
+    /// `SQUELCH_TRACK_URL` follows the relay block's rules exactly: it overrides
+    /// the file, it is trimmed, and a blank value leaves tracking OFF rather than
+    /// configured with nothing (which would mint pixels pointing at `/t/<token>`).
+    #[test]
+    fn track_url_env_override_matches_the_relay_block() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_TRACK_URL");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.tracking.base_url, None, "unset => tracking is off");
+
+        unsafe {
+            std::env::set_var("SQUELCH_TRACK_URL", "   ");
+        }
+        let mut c = Config::default();
+        c.tracking.base_url = Some("https://from-file.example".to_string());
+        c.apply_env_overrides();
+        assert_eq!(
+            c.tracking.base_url.as_deref(),
+            Some("https://from-file.example"),
+            "a blank env value does not clobber the file"
+        );
+
+        unsafe {
+            std::env::set_var("SQUELCH_TRACK_URL", "  https://track.example.com  ");
+        }
+        let mut c = Config::default();
+        c.tracking.base_url = Some("https://from-file.example".to_string());
+        c.apply_env_overrides();
+        assert_eq!(
+            c.tracking.base_url.as_deref(),
+            Some("https://track.example.com")
+        );
+
+        unsafe {
+            std::env::remove_var("SQUELCH_TRACK_URL");
+        }
+    }
+
+    /// `SQUELCH_METRICS_BIND` rides the same block, and the blank case matters
+    /// as much here: an empty value must leave the scrape listener closed, not
+    /// try to bind "".
+    #[test]
+    fn metrics_bind_env_override_matches_the_relay_block() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_METRICS_BIND");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.metrics.bind, None, "unset => no metrics listener");
+
+        unsafe {
+            std::env::set_var("SQUELCH_METRICS_BIND", "   ");
+        }
+        let mut c = Config::default();
+        c.metrics.bind = Some("127.0.0.1:9848".to_string());
+        c.apply_env_overrides();
+        assert_eq!(
+            c.metrics.bind.as_deref(),
+            Some("127.0.0.1:9848"),
+            "a blank env value does not clobber the file"
+        );
+
+        unsafe {
+            std::env::set_var("SQUELCH_METRICS_BIND", "  0.0.0.0:9999  ");
+        }
+        let mut c = Config::default();
+        c.metrics.bind = Some("127.0.0.1:9848".to_string());
+        c.apply_env_overrides();
+        assert_eq!(c.metrics.bind.as_deref(), Some("0.0.0.0:9999"));
+
+        unsafe {
+            std::env::remove_var("SQUELCH_METRICS_BIND");
+        }
+    }
+
+    /// The console block is config-file-first with an env override, the same
+    /// shape as tracking and metrics, and both of its settings FAIL CLOSED on
+    /// anything unusable: a blank URL leaves the Google button off, and a knob
+    /// that is not exactly `true` leaves the cookie `Secure`.
+    #[test]
+    fn console_env_overrides_match_the_tracking_block() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_CONSOLE_SSO_URL");
+            std::env::remove_var("SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.console.sso_url, None, "unset => no sign-in button");
+        assert!(!c.console.allow_insecure_cookie, "the hatch is shut");
+
+        unsafe {
+            std::env::set_var("SQUELCH_CONSOLE_SSO_URL", "  ");
+            std::env::set_var("SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE", "yes please");
+        }
+        let mut c = Config::default();
+        c.console.sso_url = Some("https://from-file.example".to_string());
+        c.apply_env_overrides();
+        assert_eq!(
+            c.console.sso_url.as_deref(),
+            Some("https://from-file.example"),
+            "a blank env value does not clobber the file"
+        );
+        assert!(
+            !c.console.allow_insecure_cookie,
+            "an unparseable knob is not an opt-in"
+        );
+
+        unsafe {
+            std::env::set_var("SQUELCH_CONSOLE_SSO_URL", " https://signup.example ");
+            std::env::set_var("SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE", "true");
+        }
+        let mut c = Config::default();
+        c.console.sso_url = Some("https://from-file.example".to_string());
+        c.apply_env_overrides();
+        assert_eq!(c.console.sso_url.as_deref(), Some("https://signup.example"));
+        assert!(c.console.allow_insecure_cookie);
+
+        unsafe {
+            std::env::remove_var("SQUELCH_CONSOLE_SSO_URL");
+            std::env::remove_var("SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE");
+        }
+    }
+
+    #[test]
+    fn account_email_precedence_canonical_over_legacy_over_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_ACCOUNT_EMAIL");
+            std::env::remove_var("SQUELCH_ACCOUNT");
+        }
+        assert_eq!(resolve_account_email("me@localhost"), "me@localhost");
+
+        unsafe {
+            std::env::set_var("SQUELCH_ACCOUNT", "legacy@x.com");
+        }
+        assert_eq!(resolve_account_email("me@localhost"), "legacy@x.com");
+
+        unsafe {
+            std::env::set_var("SQUELCH_ACCOUNT_EMAIL", "canon@x.com");
+        }
+        assert_eq!(resolve_account_email("me@localhost"), "canon@x.com");
+
+        unsafe {
+            std::env::remove_var("SQUELCH_ACCOUNT_EMAIL");
+            std::env::remove_var("SQUELCH_ACCOUNT");
+        }
+    }
+
+    #[test]
+    fn legacy_db_env_flows_through_config() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_DB_PATH");
+            std::env::set_var("SQUELCH_DB", "/tmp/legacy-cfg.db");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.db_path, PathBuf::from("/tmp/legacy-cfg.db"));
+        unsafe {
+            std::env::remove_var("SQUELCH_DB");
+        }
+    }
+
+    #[test]
+    fn mcp_allowed_hosts_are_additive_to_loopback() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_MCP_ALLOWED_HOSTS");
+        }
+        let base = mcp_allowed_hosts();
+        assert!(base.contains(&"localhost".to_string()));
+        assert!(base.contains(&"127.0.0.1".to_string()));
+        assert!(base.contains(&"::1".to_string()));
+
+        unsafe {
+            std::env::set_var(
+                "SQUELCH_MCP_ALLOWED_HOSTS",
+                " laptop.tailnet.example , example.com:8080 ,",
+            );
+        }
+        let hosts = mcp_allowed_hosts();
+        // Loopback defaults preserved...
+        assert!(hosts.contains(&"localhost".to_string()));
+        assert!(hosts.contains(&"127.0.0.1".to_string()));
+        // ...and the extras are added, trimmed, blanks dropped.
+        assert!(hosts.contains(&"laptop.tailnet.example".to_string()));
+        assert!(hosts.contains(&"example.com:8080".to_string()));
+        assert_eq!(hosts.len(), 5);
+        unsafe {
+            std::env::remove_var("SQUELCH_MCP_ALLOWED_HOSTS");
+        }
+    }
+
+    #[test]
+    fn env_overrides_file() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            std::env::set_var("SQUELCH_CLIENT_ID", "env-id");
+            std::env::set_var("SQUELCH_BACKFILL_DAYS", "7");
+        }
+        let mut c = Config {
+            client_id: Some("file-id".to_string()),
+            ..Config::default()
+        };
+        c.apply_env_overrides();
+        assert_eq!(c.client_id.as_deref(), Some("env-id"));
+        assert_eq!(c.sync.backfill_days, 7);
+        unsafe {
+            std::env::remove_var("SQUELCH_CLIENT_ID");
+            std::env::remove_var("SQUELCH_BACKFILL_DAYS");
+        }
+    }
+
+    /// AN ABSURD ARCHIVE DEPTH IS CLAMPED AT LOAD, so no caller downstream
+    /// does date arithmetic on it. AND THE ARCHIVE HAS NO ENVIRONMENT KNOBS:
+    /// the tier takes hold with the daemon version, on every deployment alike,
+    /// and what tunes it is the config file. A stray variable with a
+    /// plausible name changes nothing.
+    #[test]
+    fn archive_days_is_clamped_at_load_and_no_environment_variable_moves_the_archive() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut c = Config::default();
+        c.sync.archive_days = u32::MAX;
+        c.apply_env_overrides();
+        assert_eq!(c.sync.archive_days, ARCHIVE_DAYS_MAX);
+        let mut c = Config::default();
+        c.sync.archive_days = ARCHIVE_DAYS_MAX;
+        c.apply_env_overrides();
+        assert_eq!(
+            c.sync.archive_days, ARCHIVE_DAYS_MAX,
+            "the limit itself stands"
+        );
+
+        let names = [
+            ["SQUELCH", "ARCHIVE", "DAYS"].join("_"),
+            ["SQUELCH", "ARCHIVE", "MIN", "FREE", "MB"].join("_"),
+            ["SQUELCH", "ARCHIVE", "MAX", "DB", "MB"].join("_"),
+            ["SQUELCH", "TRIAGE", "ARCHIVE", "ACCESS", "DAILY", "CAP"].join("_"),
+        ];
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            for name in &names {
+                std::env::set_var(name, "7");
+            }
+        }
+        let mut c = Config::default();
+        c.sync.archive_days = 730;
+        c.sync.archive_min_free_mb = 512;
+        c.sync.archive_max_db_mb = 900;
+        c.triage.agent.archive_access_daily_cap = 9;
+        c.apply_env_overrides();
+        unsafe {
+            for name in &names {
+                std::env::remove_var(name);
+            }
+        }
+        assert_eq!(c.sync.archive_days, 730);
+        assert_eq!(c.sync.archive_min_free_mb, 512);
+        assert_eq!(c.sync.archive_max_db_mb, 900);
+        assert_eq!(c.triage.agent.archive_access_daily_cap, 9);
+        let d = Config::default();
+        assert_eq!(
+            (
+                d.sync.archive_days,
+                d.sync.archive_min_free_mb,
+                d.sync.archive_max_db_mb,
+                d.triage.agent.archive_access_daily_cap
+            ),
+            (1825, 2048, 4096, 50)
+        );
+    }
+
+    /// THE ARCHIVE'S FOUR KEYS ARE READ FROM THE FILE, under the names the
+    /// docs give them. The file is the only place they can be set, so a key
+    /// that did not parse would be a setting nobody could change.
+    #[test]
+    fn the_four_archive_keys_load_from_toml() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("squelch-cfg-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[sync]
+archive_days = 730
+archive_min_free_mb = 512
+archive_max_db_mb = 900
+
+[triage.agent]
+archive_access_daily_cap = 9
+"#,
+        )
+        .unwrap();
+        let c = Config::load_from(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(c.sync.archive_days, 730);
+        assert_eq!(c.sync.archive_min_free_mb, 512);
+        assert_eq!(c.sync.archive_max_db_mb, 900);
+        assert_eq!(c.triage.agent.archive_access_daily_cap, 9);
+        // Every one of them differs from its default, so none passed by it.
+        let d = Config::default();
+        assert_ne!(c.sync.archive_days, d.sync.archive_days);
+        assert_ne!(c.sync.archive_min_free_mb, d.sync.archive_min_free_mb);
+        assert_ne!(c.sync.archive_max_db_mb, d.sync.archive_max_db_mb);
+        assert_ne!(
+            c.triage.agent.archive_access_daily_cap,
+            d.triage.agent.archive_access_daily_cap
+        );
+    }
+
+    /// The pin itself. The default model is the full fp32 `model_code`, not the
+    /// family name that used to pick between two builds per boot, and
+    /// `settings()` is what hands it to the embedder, so it has to carry it.
+    #[test]
+    fn embed_default_is_the_pinned_code_and_settings_carries_it() {
+        let c = EmbedConfig::default();
+        assert_eq!(c.model, crate::embed::DEFAULT_MODEL_CODE);
+        assert_eq!(c.model, "Xenova/bge-small-en-v1.5");
+        assert_eq!(c.settings().model_name, crate::embed::DEFAULT_MODEL_CODE);
+        assert_eq!(c.settings().dims, c.dims);
+    }
+
+    /// The fleet-wide escape hatch: moving the pin without cutting an image.
+    #[test]
+    fn env_overrides_the_embed_model() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_MODEL", "BGESmallENV15Q");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.embed.model, "BGESmallENV15Q");
+        assert_eq!(c.embed.settings().model_name, "BGESmallENV15Q");
+
+        // Exported but blank is "unset", the rule every env_override follows: it
+        // must not clear the pin and leave the embedder resolving an empty name.
+        // WHITESPACE COUNTS AS BLANK, and it is the spelling that actually turns
+        // up: a quoted value in a unit file or a `-e VAR=" "` is easy to write
+        // and impossible to see, and `resolve_model` trims it back to empty and
+        // refuses, which takes semantic recall off for the run.
+        for blank in ["", "   ", "\n\t "] {
+            unsafe {
+                std::env::set_var("SQUELCH_EMBED_MODEL", blank);
+            }
+            let mut c = Config::default();
+            c.apply_env_overrides();
+            assert_eq!(c.embed.model, crate::embed::DEFAULT_MODEL_CODE, "{blank:?}");
+        }
+
+        // A value with slack around it still means the value.
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_MODEL", "  BGESmallENV15Q\n");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.embed.model, "BGESmallENV15Q");
+        unsafe {
+            std::env::remove_var("SQUELCH_EMBED_MODEL");
+        }
+    }
+
+    /// The daemon half of the warden's `SQUELCH_WARDEN_EMBED_IDLE_UNLOAD_SECS`:
+    /// this is the variable the pod actually has to parse.
+    #[test]
+    fn env_overrides_the_embed_idle_unload() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_IDLE_UNLOAD_SECS", "0");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(
+            c.embed.idle_unload_secs, 0,
+            "0 is the off switch, not unset"
+        );
+
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_IDLE_UNLOAD_SECS", "90");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.embed.idle_unload_secs, 90);
+
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_IDLE_UNLOAD_SECS", "");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.embed.idle_unload_secs, 600, "blank is unset, not zero");
+        unsafe {
+            std::env::remove_var("SQUELCH_EMBED_IDLE_UNLOAD_SECS");
+        }
+    }
+
+    /// The daemon half of the warden's `SQUELCH_WARDEN_EMBED_URL`: the two
+    /// variables a hosted pod is rendered with. Absent is in-process embedding,
+    /// which is self-host and every daemon before this existed.
+    #[test]
+    fn env_names_the_embed_service() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let c = Config::default();
+        assert!(c.embed.url.is_none(), "no URL => local embedder");
+        assert!(c.embed.token.is_none());
+
+        // SAFETY: guarded by ENV_LOCK so no other test reads env concurrently.
+        unsafe {
+            std::env::set_var("SQUELCH_EMBED_URL", "  http://squelch-embed:8850\n");
+            std::env::set_var("SQUELCH_EMBED_TOKEN", "s3cret");
+        }
+        let mut c: Config = toml::from_str("[embed]\nurl = \"http://from-file:8850\"\n").unwrap();
+        assert_eq!(c.embed.url.as_deref(), Some("http://from-file:8850"));
+        c.apply_env_overrides();
+        assert_eq!(c.embed.url.as_deref(), Some("http://squelch-embed:8850"));
+        assert_eq!(c.embed.token.as_deref(), Some("s3cret"));
+
+        // Exported but blank is "unset": it must neither clear a configured URL
+        // nor turn a self-hosted daemon into one with no embedder.
+        for blank in ["", "   ", "\n\t "] {
+            unsafe {
+                std::env::set_var("SQUELCH_EMBED_URL", blank);
+                std::env::set_var("SQUELCH_EMBED_TOKEN", blank);
+            }
+            let mut c = Config::default();
+            c.apply_env_overrides();
+            assert!(c.embed.url.is_none(), "{blank:?}");
+            assert!(c.embed.token.is_none(), "{blank:?}");
+
+            let mut c: Config =
+                toml::from_str("[embed]\nurl = \"http://from-file:8850\"\n").unwrap();
+            c.apply_env_overrides();
+            assert_eq!(c.embed.url.as_deref(), Some("http://from-file:8850"));
+        }
+        unsafe {
+            std::env::remove_var("SQUELCH_EMBED_URL");
+            std::env::remove_var("SQUELCH_EMBED_TOKEN");
+        }
+    }
+
+    #[test]
+    fn stage2_defaults_are_sane() {
+        let c = Stage2Config::default();
+        assert_eq!(c.model, "claude-opus-5-5");
+        assert_eq!(c.effort.as_deref(), Some("low"));
+        assert_eq!(c.max_body_chars, 12_000);
+        assert_eq!(c.batch_per_cycle, 10);
+        assert_eq!(c.thread_daily_cap, 3);
+        assert_eq!(c.global_daily_cap, 120);
+        assert_eq!(c.sender_daily_cap, 5);
+        assert_eq!(c.max_age_days, 7);
+        assert_eq!(c.price_in_per_mtok, 4.0);
+        assert_eq!(c.price_out_per_mtok, 20.0);
+    }
+
+    #[test]
+    fn stage1_llm_defaults_are_sane() {
+        let c = Stage1Config::default();
+        assert_eq!(c.model, "claude-opus-5-5");
+        assert_eq!(c.effort.as_deref(), Some("low"));
+        assert_eq!(c.global_daily_cap, 500);
+        assert_eq!(c.batch_per_cycle, 10);
+        assert_eq!(c.max_body_chars, 6000);
+        assert_eq!(c.price_in_per_mtok, 4.0);
+        assert_eq!(c.price_out_per_mtok, 20.0);
+    }
+
+    /// An operator typo in a revisit knob must not be able to panic the sync
+    /// task: `Duration::days` and `now + duration` both blow up out of range.
+    #[test]
+    fn absurd_revisit_knobs_clamp_instead_of_panicking() {
+        let cfg = RevisitPassConfig {
+            min_lead_hours: i64::MIN,
+            max_horizon_days: i64::MAX,
+            dedupe_window_hours: -5,
+            ..RevisitPassConfig::default()
+        };
+        assert_eq!(cfg.min_lead(), chrono::Duration::zero());
+        assert_eq!(cfg.dedupe_window(), chrono::Duration::zero());
+        assert_eq!(cfg.max_horizon(), chrono::Duration::days(REVISIT_MAX_DAYS));
+        let off = RevisitPassConfig {
+            max_horizon_days: 0,
+            ..RevisitPassConfig::default()
+        };
+        assert_eq!(off.max_horizon(), chrono::Duration::zero());
+        // The addition the scheduler actually performs, which is what panics.
+        let now = chrono::Utc::now();
+        let _ = now + cfg.max_horizon();
+    }
+
+    /// Both stages run the SAME model on purpose: escalation buys context,
+    /// not a bigger model. It does not buy reasoning depth
+    /// either: the eval found `low` as good as `xhigh` on triage, so both
+    /// stages sit at `low`. If the models ever diverge by default, the
+    /// escalation story has quietly changed and the prompts and docs that
+    /// describe it need to change with it.
+    #[test]
+    fn both_stages_default_to_one_model_at_low_effort() {
+        let s1 = Stage1Config::default();
+        let s2 = Stage2Config::default();
+        assert_eq!(s1.model, s2.model);
+        assert_eq!(s1.price_in_per_mtok, s2.price_in_per_mtok);
+        assert_eq!(s1.price_out_per_mtok, s2.price_out_per_mtok);
+        assert_eq!(s1.effort.as_deref(), Some("low"));
+        assert_eq!(s2.effort.as_deref(), Some("low"));
+    }
+
+    /// A new account triages at `xhigh` for its first five days, then drops
+    /// to the steady-state `low`. An unknown creation time is steady state.
+    #[test]
+    fn new_accounts_triage_at_onboarding_effort_for_five_days() {
+        let c = Stage2Config::default();
+        let now = chrono::Utc::now();
+        let days = |d: i64| Some(now - chrono::Duration::days(d));
+        assert_eq!(c.effort_for_account(days(0), now), Some("xhigh"));
+        assert_eq!(
+            c.effort_for_account(Some(now - chrono::Duration::hours(119)), now),
+            Some("xhigh")
+        );
+        assert_eq!(c.effort_for_account(days(5), now), Some("low"));
+        assert_eq!(c.effort_for_account(days(400), now), Some("low"));
+        assert_eq!(c.effort_for_account(None, now), Some("low"));
+
+        let off = Stage2Config {
+            onboarding_days: 0,
+            ..Stage2Config::default()
+        };
+        assert_eq!(off.effort_for_account(days(0), now), Some("low"));
+    }
+
+    /// The onboarding effort is for the jobs somebody is waiting on; a
+    /// background job runs at the steady-state effort from the first day,
+    /// and never asks for the creation time.
+    #[test]
+    fn only_watched_jobs_take_the_onboarding_effort() {
+        let c = Stage2Config::default();
+        let now = chrono::Utc::now();
+        let new = || Some(now - chrono::Duration::days(1));
+        let old = || Some(now - chrono::Duration::days(40));
+        assert_eq!(c.effort_for_job(true, new, now), Some("xhigh"));
+        assert_eq!(c.effort_for_job(false, new, now), Some("low"));
+        assert_eq!(c.effort_for_job(true, old, now), Some("low"));
+        assert_eq!(c.effort_for_job(false, old, now), Some("low"));
+        let not_asked = || -> Option<chrono::DateTime<chrono::Utc>> {
+            panic!("the creation time was asked for when the answer could not depend on it")
+        };
+        assert_eq!(c.effort_for_job(false, not_asked, now), Some("low"));
+        // No window to fall inside: a watched job does not ask either.
+        let no_days = Stage2Config {
+            onboarding_days: 0,
+            ..Stage2Config::default()
+        };
+        assert_eq!(no_days.effort_for_job(true, not_asked, now), Some("low"));
+        let no_effort = Stage2Config {
+            onboarding_effort: None,
+            ..Stage2Config::default()
+        };
+        assert_eq!(no_effort.effort_for_job(true, not_asked, now), Some("low"));
+        // A model with no effort support (`SQUELCH_STAGE2_EFFORT=none`) is
+        // never sent the onboarding effort either, new account or not.
+        let unsupported = Stage2Config {
+            effort: None,
+            ..Stage2Config::default()
+        };
+        assert_eq!(unsupported.effort_for_job(true, not_asked, now), None);
+    }
+
+    /// `SQUELCH_STAGE2_ONBOARDING_EFFORT=none` inside the window is the
+    /// steady-state effort, not an omitted field: the provider's default is
+    /// above `low`, and clearing the window must not raise the spend it
+    /// exists to raise deliberately.
+    #[test]
+    fn a_cleared_onboarding_effort_falls_back_to_the_steady_state_inside_the_window() {
+        let c = Stage2Config {
+            onboarding_effort: None,
+            ..Stage2Config::default()
+        };
+        let now = chrono::Utc::now();
+        assert_eq!(
+            c.effort_for_account(Some(now - chrono::Duration::days(1)), now),
+            Some("low")
+        );
+    }
+
+    /// An operator repointing a stage at a model with no effort support must be
+    /// able to DROP the field: sending it to such a model is a 400 on every
+    /// call, so "unset" has to be reachable from the environment.
+    #[test]
+    fn effort_can_be_cleared_from_the_environment() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut slot = Some("xhigh".to_string());
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_TEST_EFFORT", "none") };
+        env_override_effort("SQUELCH_TEST_EFFORT", &mut slot);
+        assert_eq!(slot, None);
+
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_TEST_EFFORT", "medium") };
+        env_override_effort("SQUELCH_TEST_EFFORT", &mut slot);
+        assert_eq!(slot.as_deref(), Some("medium"));
+
+        // Blank means "unset", which must not clobber a configured value.
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_TEST_EFFORT", "") };
+        env_override_effort("SQUELCH_TEST_EFFORT", &mut slot);
+        assert_eq!(slot.as_deref(), Some("medium"));
+
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::remove_var("SQUELCH_TEST_EFFORT") };
+    }
+
+    #[test]
+    fn stage1_env_overrides_and_range_guard() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_STAGE1_MODEL", "claude-haiku-4-5-20251001");
+            std::env::set_var("SQUELCH_STAGE1_GLOBAL_DAILY_CAP", "0"); // below min -> clamp to 1
+            std::env::set_var("SQUELCH_STAGE1_PRICE_IN_PER_MTOK", "0.8");
+            std::env::set_var("SQUELCH_STAGE1_BATCH_PER_CYCLE", "25");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.stage1.model, "claude-haiku-4-5-20251001");
+        assert_eq!(c.stage1.global_daily_cap, 1, "0 clamps to STAGE2_CAP_MIN");
+        assert_eq!(c.stage1.price_in_per_mtok, 0.8);
+        assert_eq!(c.stage1.batch_per_cycle, 25);
+        unsafe {
+            std::env::remove_var("SQUELCH_STAGE1_MODEL");
+            std::env::remove_var("SQUELCH_STAGE1_GLOBAL_DAILY_CAP");
+            std::env::remove_var("SQUELCH_STAGE1_PRICE_IN_PER_MTOK");
+            std::env::remove_var("SQUELCH_STAGE1_BATCH_PER_CYCLE");
+        }
+    }
+
+    #[test]
+    fn stage1_cap_source_default_then_config() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_STAGE1_GLOBAL_DAILY_CAP");
+        }
+        let missing = std::path::Path::new("/nonexistent/squelch/config.toml");
+        let (_, src) = Config::load_from_with_cap_sources(missing);
+        assert_eq!(src.stage1_global_daily_cap, CapSource::Default);
+
+        unsafe {
+            std::env::set_var("SQUELCH_STAGE1_GLOBAL_DAILY_CAP", "500");
+        }
+        let (cfg, src) = Config::load_from_with_cap_sources(missing);
+        assert_eq!(src.stage1_global_daily_cap, CapSource::Config);
+        assert_eq!(cfg.stage1.global_daily_cap, 500);
+        unsafe {
+            std::env::remove_var("SQUELCH_STAGE1_GLOBAL_DAILY_CAP");
+        }
+    }
+
+    /// Clear every Stage-2 key/provider/endpoint env var. Caller must hold
+    /// `ENV_LOCK`.
+    fn clear_stage2_env() {
+        // SAFETY: caller holds ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_STAGE2_API_KEY");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("SQUELCH_STAGE2_PROVIDER");
+            std::env::remove_var("SQUELCH_ANTHROPIC_BASE_URL");
+            std::env::remove_var("SQUELCH_ASSISTANT_API_KEY");
+        }
+    }
+
+    #[test]
+    fn stage2_enabled_by_key_presence() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_stage2_env();
+        let mut c = Stage2Config::default();
+        assert!(!c.enabled(), "no key => disabled");
+        // Config-file key enables.
+        c.anthropic_api_key = Some("sk-config".into());
+        assert!(c.enabled());
+        assert_eq!(c.resolve_api_key().as_deref(), Some("sk-config"));
+        // Env wins over config-file key.
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-env");
+        }
+        assert_eq!(c.resolve_api_key().as_deref(), Some("sk-env"));
+        // Empty config-file key is treated as absent.
+        c.anthropic_api_key = Some(String::new());
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+        assert!(!c.enabled());
+        clear_stage2_env();
+    }
+
+    #[test]
+    fn assistant_requires_key_and_gateway_together() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_stage2_env();
+        let mut c = Stage2Config::default();
+
+        // Neither => None.
+        assert!(c.resolve_assistant().is_none());
+
+        // Key alone => None: without a gateway there is nothing to relay to.
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_ASSISTANT_API_KEY", "sk-bf-assistant");
+        }
+        assert!(c.resolve_assistant().is_none());
+
+        // Base URL alone => None: no credential to relay with.
+        unsafe {
+            std::env::remove_var("SQUELCH_ASSISTANT_API_KEY");
+        }
+        c.anthropic_base_url = Some("https://gw.example.com".into());
+        assert!(c.resolve_assistant().is_none());
+
+        // Both => Some, with the gateway messages endpoint joined exactly as
+        // resolve_llm builds it (trailing slash folds).
+        unsafe {
+            std::env::set_var("SQUELCH_ASSISTANT_API_KEY", "sk-bf-assistant");
+        }
+        let r = c.resolve_assistant().expect("key + gateway => Some");
+        assert_eq!(r.api_key, "sk-bf-assistant");
+        assert_eq!(r.url, "https://gw.example.com/v1/messages");
+        c.anthropic_base_url = Some("https://gw.example.com/".into());
+        assert_eq!(
+            c.resolve_assistant().unwrap().url,
+            "https://gw.example.com/v1/messages"
+        );
+
+        // An empty key counts as absent, like every other key source.
+        unsafe {
+            std::env::set_var("SQUELCH_ASSISTANT_API_KEY", "");
+        }
+        assert!(c.resolve_assistant().is_none());
+
+        // A base URL that fails the transport check is absent everywhere, so it
+        // cannot half-configure the relay.
+        unsafe {
+            std::env::set_var("SQUELCH_ASSISTANT_API_KEY", "sk-bf-assistant");
+        }
+        c.anthropic_base_url = Some("http://gw.example.com".into());
+        assert!(c.resolve_assistant().is_none());
+
+        clear_stage2_env();
+    }
+
+    #[test]
+    fn stage2_provider_prefix_sniff_and_precedence() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_stage2_env();
+        let c = Stage2Config::default();
+
+        // Nothing set => disabled.
+        assert!(c.resolve_key_and_provider().is_none());
+
+        // 1. Explicit SQUELCH_STAGE2_API_KEY, sk-ant- prefix => Anthropic.
+        unsafe {
+            std::env::set_var("SQUELCH_STAGE2_API_KEY", "sk-ant-abc123");
+        }
+        assert_eq!(
+            c.resolve_key_and_provider(),
+            Some(("sk-ant-abc123".to_string(), Stage2Provider::Anthropic))
+        );
+
+        // Explicit var, non-anthropic prefix => OpenAI (sniff).
+        unsafe {
+            std::env::set_var("SQUELCH_STAGE2_API_KEY", "sk-proj-openai");
+        }
+        assert_eq!(
+            c.resolve_key_and_provider(),
+            Some(("sk-proj-openai".to_string(), Stage2Provider::OpenAI))
+        );
+
+        // Explicit var WINS over ANTHROPIC_API_KEY and OPENAI_API_KEY.
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-other");
+            std::env::set_var("OPENAI_API_KEY", "sk-openai-other");
+        }
+        assert_eq!(
+            c.resolve_key_and_provider(),
+            Some(("sk-proj-openai".to_string(), Stage2Provider::OpenAI))
+        );
+
+        // 2. Without the explicit var, ANTHROPIC_API_KEY wins over OPENAI_API_KEY.
+        unsafe {
+            std::env::remove_var("SQUELCH_STAGE2_API_KEY");
+        }
+        assert_eq!(
+            c.resolve_key_and_provider(),
+            Some(("sk-ant-other".to_string(), Stage2Provider::Anthropic))
+        );
+
+        // 3. OPENAI_API_KEY only => OpenAI.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+        assert_eq!(
+            c.resolve_key_and_provider(),
+            Some(("sk-openai-other".to_string(), Stage2Provider::OpenAI))
+        );
+
+        // 4. Config-file key (no env) => Anthropic.
+        clear_stage2_env();
+        let c2 = Stage2Config {
+            anthropic_api_key: Some("sk-config".into()),
+            ..Stage2Config::default()
+        };
+        assert_eq!(
+            c2.resolve_key_and_provider(),
+            Some(("sk-config".to_string(), Stage2Provider::Anthropic))
+        );
+
+        clear_stage2_env();
+    }
+
+    #[test]
+    fn stage2_provider_force_override() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_stage2_env();
+
+        // An sk-ant- key would sniff Anthropic, but the config override forces
+        // OpenAI (e.g. a proxy that accepts an anthropic-shaped key).
+        unsafe {
+            std::env::set_var("SQUELCH_STAGE2_API_KEY", "sk-ant-shaped");
+        }
+        let c = Stage2Config {
+            stage2_provider: Some(Stage2Provider::OpenAI),
+            ..Stage2Config::default()
+        };
+        assert_eq!(
+            c.resolve_key_and_provider(),
+            Some(("sk-ant-shaped".to_string(), Stage2Provider::OpenAI))
+        );
+
+        // And the reverse: OPENAI_API_KEY forced to Anthropic.
+        clear_stage2_env();
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-openai-x");
+        }
+        let c2 = Stage2Config {
+            stage2_provider: Some(Stage2Provider::Anthropic),
+            ..Stage2Config::default()
+        };
+        assert_eq!(
+            c2.resolve_key_and_provider(),
+            Some(("sk-openai-x".to_string(), Stage2Provider::Anthropic))
+        );
+
+        clear_stage2_env();
+    }
+
+    #[test]
+    fn stage2_provider_env_override_folds_into_config() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_stage2_env();
+        unsafe {
+            std::env::set_var("SQUELCH_STAGE2_PROVIDER", "openai");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.stage2.stage2_provider, Some(Stage2Provider::OpenAI));
+        clear_stage2_env();
+    }
+
+    #[test]
+    fn anthropic_base_url_env_override_folds_into_config() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_ANTHROPIC_BASE_URL", "https://gw.example.com");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(
+            cfg.stage2.anthropic_base_url.as_deref(),
+            Some("https://gw.example.com")
+        );
+
+        // Blank is "unset", never "set to empty": the config-file layer stays.
+        unsafe {
+            std::env::set_var("SQUELCH_ANTHROPIC_BASE_URL", "");
+        }
+        let mut cfg = Config {
+            stage2: Stage2Config {
+                anthropic_base_url: Some("https://file.example.com".to_string()),
+                ..Stage2Config::default()
+            },
+            ..Config::default()
+        };
+        cfg.apply_env_overrides();
+        assert_eq!(
+            cfg.stage2.anthropic_base_url.as_deref(),
+            Some("https://file.example.com")
+        );
+        unsafe {
+            std::env::remove_var("SQUELCH_ANTHROPIC_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn anthropic_base_url_rewrites_the_anthropic_endpoint() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_stage2_env();
+        let with_base = |base: &str| Stage2Config {
+            anthropic_api_key: Some("sk-config".into()),
+            anthropic_base_url: Some(base.to_string()),
+            ..Stage2Config::default()
+        };
+
+        let r = with_base("https://gw.example.com").resolve_llm().unwrap();
+        assert_eq!(r.provider, Stage2Provider::Anthropic);
+        assert_eq!(r.url, "https://gw.example.com/v1/messages");
+
+        // A trailing slash never doubles.
+        assert_eq!(
+            with_base("https://gw.example.com/")
+                .resolve_llm()
+                .unwrap()
+                .url,
+            "https://gw.example.com/v1/messages"
+        );
+
+        // Absent (and blank, the house convention) => production endpoint.
+        let c = Stage2Config {
+            anthropic_api_key: Some("sk-config".into()),
+            ..Stage2Config::default()
+        };
+        assert_eq!(c.resolve_llm().unwrap().url, crate::triage::llm::API_URL);
+        assert_eq!(
+            with_base("").resolve_llm().unwrap().url,
+            crate::triage::llm::API_URL
+        );
+        clear_stage2_env();
+    }
+
+    #[test]
+    fn anthropic_base_url_requires_https_off_loopback() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_stage2_env();
+        let with_base = |base: &str| Stage2Config {
+            anthropic_api_key: Some("sk-config".into()),
+            anthropic_base_url: Some(base.to_string()),
+            ..Stage2Config::default()
+        };
+
+        // Cleartext off-box (or garbage): the override is treated as absent —
+        // triage stays on the production endpoint rather than sending the key
+        // over http. A query or fragment is rejected too: `/v1/messages` is
+        // appended to the base, so a typo'd `?` or `#` would mangle the join.
+        for bad in [
+            "http://gw.example.com",
+            "http://10.0.0.7:8080",
+            "not a url",
+            "https://gw.example.com?token=x",
+            "https://gw.example.com/#anchor",
+        ] {
+            let r = with_base(bad).resolve_llm().unwrap();
+            assert_eq!(r.url, crate::triage::llm::API_URL, "{bad} must be ignored");
+        }
+
+        // Loopback http is the dev/test carve-out.
+        for host in ["127.0.0.1:8080", "localhost:8080", "[::1]:8080"] {
+            let base = format!("http://{host}");
+            assert_eq!(
+                with_base(&base).resolve_llm().unwrap().url,
+                format!("{base}/v1/messages")
+            );
+        }
+        clear_stage2_env();
+    }
+
+    #[test]
+    fn base_url_pins_a_gateway_shaped_key_to_the_anthropic_wire() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_stage2_env();
+        // A Bifrost virtual key is sk-bf- shaped, so the prefix sniff alone
+        // would put it on the OpenAI wire — but an operator who set the base
+        // URL has already declared the wire is Anthropic.
+        unsafe {
+            std::env::set_var("SQUELCH_STAGE2_API_KEY", "sk-bf-virtual");
+        }
+        let c = Stage2Config {
+            anthropic_base_url: Some("https://gw.example.com".to_string()),
+            ..Stage2Config::default()
+        };
+        let r = c.resolve_llm().unwrap();
+        assert_eq!(r.provider, Stage2Provider::Anthropic);
+        assert_eq!(r.url, "https://gw.example.com/v1/messages");
+
+        // A REJECTED override must not flip the wire either: still OpenAI.
+        let c = Stage2Config {
+            anthropic_base_url: Some("http://gw.example.com".to_string()),
+            ..Stage2Config::default()
+        };
+        assert_eq!(c.resolve_llm().unwrap().provider, Stage2Provider::OpenAI);
+
+        // The explicit provider override outranks everything, and the OpenAI
+        // wire ignores the base URL entirely.
+        let c = Stage2Config {
+            stage2_provider: Some(Stage2Provider::OpenAI),
+            anthropic_base_url: Some("https://gw.example.com".to_string()),
+            ..Stage2Config::default()
+        };
+        let r = c.resolve_llm().unwrap();
+        assert_eq!(r.provider, Stage2Provider::OpenAI);
+        assert_eq!(r.url, crate::triage::llm::OPENAI_API_URL);
+        clear_stage2_env();
+    }
+
+    #[test]
+    fn stage2_provider_default_prices() {
+        assert_eq!(Stage2Provider::Anthropic.default_prices(), (1.0, 5.0));
+        assert_eq!(Stage2Provider::OpenAI.default_prices(), (0.15, 0.60));
+    }
+
+    #[test]
+    fn stage2_env_overrides() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_MODEL", "claude-opus-4-8");
+            std::env::set_var("SQUELCH_STAGE2_THREAD_DAILY_CAP", "7");
+            std::env::set_var("SQUELCH_STAGE2_GLOBAL_DAILY_CAP", "500");
+            std::env::set_var("SQUELCH_STAGE2_BATCH_PER_CYCLE", "25");
+            std::env::set_var("SQUELCH_STAGE2_MAX_BODY_CHARS", "8000");
+            std::env::set_var("SQUELCH_STAGE2_SENDER_DAILY_CAP", "9");
+            std::env::set_var("SQUELCH_STAGE2_MAX_AGE_DAYS", "14");
+            std::env::set_var("SQUELCH_STAGE2_PRICE_IN_PER_MTOK", "3.0");
+            std::env::set_var("SQUELCH_STAGE2_PRICE_OUT_PER_MTOK", "15.0");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.stage2.model, "claude-opus-4-8");
+        assert_eq!(c.stage2.thread_daily_cap, 7);
+        assert_eq!(c.stage2.global_daily_cap, 500);
+        assert_eq!(c.stage2.batch_per_cycle, 25);
+        assert_eq!(c.stage2.max_body_chars, 8000);
+        assert_eq!(c.stage2.sender_daily_cap, 9);
+        assert_eq!(c.stage2.max_age_days, 14);
+        assert_eq!(c.stage2.price_in_per_mtok, 3.0);
+        assert_eq!(c.stage2.price_out_per_mtok, 15.0);
+        unsafe {
+            std::env::remove_var("SQUELCH_MODEL");
+            std::env::remove_var("SQUELCH_STAGE2_THREAD_DAILY_CAP");
+            std::env::remove_var("SQUELCH_STAGE2_GLOBAL_DAILY_CAP");
+            std::env::remove_var("SQUELCH_STAGE2_BATCH_PER_CYCLE");
+            std::env::remove_var("SQUELCH_STAGE2_MAX_BODY_CHARS");
+            std::env::remove_var("SQUELCH_STAGE2_SENDER_DAILY_CAP");
+            std::env::remove_var("SQUELCH_STAGE2_MAX_AGE_DAYS");
+            std::env::remove_var("SQUELCH_STAGE2_PRICE_IN_PER_MTOK");
+            std::env::remove_var("SQUELCH_STAGE2_PRICE_OUT_PER_MTOK");
+        }
+    }
+
+    /// An exported-but-blank var is "unset", never "set to empty": otherwise a
+    /// stray `SQUELCH_MODEL=` in a shell would wipe the configured model. Same
+    /// rule for an unparseable value — the config-file layer survives both.
+    #[test]
+    fn blank_or_unparseable_env_never_clobbers_a_configured_value() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_MODEL", "");
+            std::env::set_var("SQUELCH_STAGE1_MODEL", "");
+            std::env::set_var("SQUELCH_CLIENT_ID", "");
+            std::env::set_var("SQUELCH_STAGE2_BATCH_PER_CYCLE", "not-a-number");
+        }
+        let mut c = Config {
+            client_id: Some("file-id".to_string()),
+            stage2: Stage2Config {
+                model: "file-model".to_string(),
+                batch_per_cycle: 42,
+                ..Stage2Config::default()
+            },
+            stage1: Stage1Config {
+                model: "file-stage1-model".to_string(),
+                ..Stage1Config::default()
+            },
+            ..Config::default()
+        };
+        c.apply_env_overrides();
+        assert_eq!(c.stage2.model, "file-model");
+        assert_eq!(c.stage1.model, "file-stage1-model");
+        assert_eq!(c.client_id.as_deref(), Some("file-id"));
+        assert_eq!(c.stage2.batch_per_cycle, 42);
+        unsafe {
+            std::env::remove_var("SQUELCH_MODEL");
+            std::env::remove_var("SQUELCH_STAGE1_MODEL");
+            std::env::remove_var("SQUELCH_CLIENT_ID");
+            std::env::remove_var("SQUELCH_STAGE2_BATCH_PER_CYCLE");
+        }
+    }
+
+    #[test]
+    fn notify_defaults_match_the_squelch_line_and_env_overrides_the_threshold() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // 40, not the TUI's squelch line (50): the notify prompts' 40-59 band
+        // is "an automated notice you may want to act on", and that pushes.
+        let c = Config::default();
+        assert_eq!(c.notify.min_importance, 40);
+        assert_eq!(c.notify.freshness_window_secs, 900);
+        // The rescue ceiling: an hour from FIRST SIGHT, not from the sender's
+        // `Date:`.
+        assert_eq!(c.notify.rescue_window_secs, 3600);
+
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_NOTIFY_MIN_IMPORTANCE", "85") }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.notify.min_importance, 85);
+        // Unrelated: the generic SQUELCH_MIN_IMPORTANCE knob is the READ default,
+        // not the notify threshold; they must not alias.
+        assert_eq!(c.default_min_importance, 0);
+        unsafe { std::env::remove_var("SQUELCH_NOTIFY_MIN_IMPORTANCE") }
+    }
+
+    /// `[smart_clear]` reads from the file and from nowhere else: like
+    /// `[translate]`, it takes hold at the daemon roll, so no env var moves it.
+    #[test]
+    fn the_smart_clear_section_reads_from_toml_only() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // A config that predates the section has the defaults.
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.smart_clear.model, "claude-sonnet-5");
+        let c: Config =
+            toml::from_str("[smart_clear]\nmodel = \"from-the-file\"\nprice_in_per_mtok = 1.5\n")
+                .unwrap();
+        assert_eq!(c.smart_clear.model, "from-the-file");
+        assert_eq!(c.smart_clear.price_in_per_mtok, 1.5);
+        assert_eq!(
+            c.smart_clear.price_out_per_mtok, 10.0,
+            "unnamed keys default"
+        );
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_SMART_CLEAR_MODEL", "from-the-env") }
+        let mut env = c.clone();
+        env.apply_env_overrides();
+        unsafe { std::env::remove_var("SQUELCH_SMART_CLEAR_MODEL") }
+        assert_eq!(env.smart_clear.model, "from-the-file");
+    }
+
+    /// THE FAST LANE'S DEFAULTS, asserted one by one because two of them are
+    /// safety properties rather than taste: `sealed_enabled` is TRUE (it was
+    /// the ordering guard for a client that routes a sealed tap to the auth
+    /// flow, docs/NOTIFY.md §11.6; that client shipped as Mac 0.0.7 and iPhone
+    /// 0.0.4, and a daemon that drifted back to false would silently drop
+    /// every login-code ping), and `effort` is ABSENT because the default
+    /// model 400s on every call that carries the field.
+    #[test]
+    fn the_notify_fast_lane_ships_sealed_on_and_effortless_by_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let c = Config::default();
+        assert!(c.notify.fast_enabled, "the model path is on");
+        assert!(
+            c.notify.sealed_enabled,
+            "sealed rings by default now that the clients route the tap"
+        );
+        assert_eq!(c.notify.model, "claude-haiku-4-5");
+        assert_eq!(
+            c.notify.effort, None,
+            "Haiku 4.5 rejects the effort field outright"
+        );
+        assert_eq!(c.notify.max_body_chars, 1500);
+        assert_eq!(c.notify.fast_timeout_secs, 8);
+        assert_eq!(c.notify.fast_concurrency, 4);
+        assert_eq!(c.notify.daily_cap, 1000);
+        assert_eq!(c.notify.price_in_per_mtok, 1.0);
+        assert_eq!(c.notify.price_out_per_mtok, 5.0);
+        // NOT Stage-1's prices. The lane runs a different model, and pricing it
+        // at the rates every extractor shares is how the ledger would bill a
+        // Haiku call at Opus rates.
+        assert_ne!(c.notify.price_in_per_mtok, c.stage1.price_in_per_mtok);
+
+        // A TOML that never mentions the fast lane gets exactly these values:
+        // `#[serde(default)]` on the struct means an existing config file needs
+        // no edit to keep working.
+        let c: Config = toml::from_str("[notify]\nmin_importance = 60\n").unwrap();
+        assert_eq!(c.notify.min_importance, 60, "the file's own value");
+        assert_eq!(c.notify.model, "claude-haiku-4-5");
+        assert!(c.notify.fast_enabled);
+        assert!(c.notify.sealed_enabled);
+        assert_eq!(c.notify.fast_timeout_secs, 8);
+    }
+
+    /// The knobs a hosted operator has to be able to move without a config
+    /// file: the model, the effort field (INCLUDING clearing it), and the
+    /// sealed switch that gates a whole notification class.
+    #[test]
+    fn notify_fast_lane_env_overrides_reach_the_model_effort_and_sealed_switch() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_NOTIFY_MODEL", "claude-sonnet-5");
+            std::env::set_var("SQUELCH_NOTIFY_EFFORT", "low");
+            std::env::set_var("SQUELCH_NOTIFY_SEALED_ENABLED", "false");
+            std::env::set_var("SQUELCH_NOTIFY_FAST_ENABLED", "false");
+            std::env::set_var("SQUELCH_NOTIFY_DAILY_CAP", "25");
+            std::env::set_var("SQUELCH_NOTIFY_PRICE_IN_PER_MTOK", "3.0");
+        }
+        let mut c: Config =
+            toml::from_str("[notify]\nmodel = \"from-the-file\"\nsealed_enabled = true\n").unwrap();
+        assert_eq!(c.notify.model, "from-the-file", "the file, before env");
+        c.apply_env_overrides();
+        assert_eq!(c.notify.model, "claude-sonnet-5", "env beats the file");
+        assert_eq!(c.notify.effort.as_deref(), Some("low"));
+        assert!(
+            !c.notify.sealed_enabled,
+            "the sealed switch turns OFF from env, the direction a lagging fleet needs"
+        );
+        assert!(!c.notify.fast_enabled, "and so does the kill switch");
+        assert_eq!(c.notify.daily_cap, 25);
+        assert_eq!(c.notify.price_in_per_mtok, 3.0);
+
+        // CLEARING the effort is the case that matters: an operator repointing
+        // the lane at a model with no effort support must be able to drop the
+        // field, since sending it is a 400 on every call.
+        unsafe { std::env::set_var("SQUELCH_NOTIFY_EFFORT", "none") }
+        let mut c = Config {
+            notify: NotifyConfig {
+                effort: Some("high".to_string()),
+                ..NotifyConfig::default()
+            },
+            ..Config::default()
+        };
+        c.apply_env_overrides();
+        assert_eq!(c.notify.effort, None);
+
+        unsafe {
+            std::env::remove_var("SQUELCH_NOTIFY_MODEL");
+            std::env::remove_var("SQUELCH_NOTIFY_EFFORT");
+            std::env::remove_var("SQUELCH_NOTIFY_SEALED_ENABLED");
+            std::env::remove_var("SQUELCH_NOTIFY_FAST_ENABLED");
+            std::env::remove_var("SQUELCH_NOTIFY_DAILY_CAP");
+            std::env::remove_var("SQUELCH_NOTIFY_PRICE_IN_PER_MTOK");
+        }
+    }
+
+    /// Both notify WINDOWS take an env override, and they are separate knobs:
+    /// one decides whether a message ever becomes notifiable, the other how
+    /// long a late verdict may still buzz for it. Aliasing them would make the
+    /// rescue window silently un-tunable on hosted, which is the deployment
+    /// that cannot edit a config file.
+    #[test]
+    fn both_notify_windows_take_an_env_override_and_do_not_alias() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_NOTIFY_FRESHNESS_WINDOW_SECS", "120");
+            std::env::set_var("SQUELCH_NOTIFY_RESCUE_WINDOW_SECS", "7200");
+        }
+        let mut c: Config =
+            toml::from_str("[notify]\nfreshness_window_secs = 60\nrescue_window_secs = 60\n")
+                .unwrap();
+        assert_eq!(c.notify.freshness_window_secs, 60, "the file, before env");
+        c.apply_env_overrides();
+        assert_eq!(c.notify.freshness_window_secs, 120, "env beats the file");
+        assert_eq!(c.notify.rescue_window_secs, 7200);
+
+        // Each var moves only its own field.
+        unsafe { std::env::remove_var("SQUELCH_NOTIFY_RESCUE_WINDOW_SECS") }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(c.notify.freshness_window_secs, 120);
+        assert_eq!(c.notify.rescue_window_secs, 3600, "untouched default");
+        unsafe { std::env::remove_var("SQUELCH_NOTIFY_FRESHNESS_WINDOW_SECS") }
+    }
+
+    /// The pusher is OFF unless an operator names a relay. `relay_url` is the
+    /// whole feature flag, and env beats config exactly like everywhere else.
+    #[test]
+    fn pusher_is_absent_by_default_and_env_names_the_relay() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let c = Config::default();
+        assert_eq!(c.pusher, PusherConfig::default());
+        assert!(c.pusher.relay_url.is_none(), "no relay => no pusher task");
+
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_RELAY_URL", "https://relay.example.com");
+            std::env::set_var("SQUELCH_RELAY_TOKEN", "s3cret");
+            std::env::set_var("SQUELCH_RELAY_TOPIC", "dev.squelch.ios");
+            std::env::set_var("SQUELCH_RELAY_APNS_ENV", "sandbox");
+        }
+        let mut c: Config = toml::from_str("[pusher]\nrelay_url = \"http://from-file\"\n").unwrap();
+        assert_eq!(c.pusher.relay_url.as_deref(), Some("http://from-file"));
+        c.apply_env_overrides();
+        assert_eq!(
+            c.pusher.relay_url.as_deref(),
+            Some("https://relay.example.com")
+        );
+        assert_eq!(c.pusher.relay_token.as_deref(), Some("s3cret"));
+        assert_eq!(c.pusher.topic.as_deref(), Some("dev.squelch.ios"));
+        assert_eq!(c.pusher.environment.as_deref(), Some("sandbox"));
+
+        // A blank env var is "unset", not "set to empty" — otherwise an exported
+        // but empty SQUELCH_RELAY_URL would silently disable a configured relay.
+        unsafe {
+            std::env::set_var("SQUELCH_RELAY_URL", "   ");
+            std::env::remove_var("SQUELCH_RELAY_TOKEN");
+            std::env::remove_var("SQUELCH_RELAY_TOPIC");
+            std::env::remove_var("SQUELCH_RELAY_APNS_ENV");
+        }
+        let mut c: Config = toml::from_str("[pusher]\nrelay_url = \"http://from-file\"\n").unwrap();
+        c.apply_env_overrides();
+        assert_eq!(c.pusher.relay_url.as_deref(), Some("http://from-file"));
+        unsafe { std::env::remove_var("SQUELCH_RELAY_URL") }
+    }
+
+    #[test]
+    fn notify_section_round_trips_through_toml() {
+        let cfg: Config =
+            toml::from_str("[notify]\nmin_importance = 30\nfreshness_window_secs = 60\n").unwrap();
+        assert_eq!(cfg.notify.min_importance, 30);
+        assert_eq!(cfg.notify.freshness_window_secs, 60);
+        // A partial section keeps the other field's default (#[serde(default)]).
+        let cfg: Config = toml::from_str("[notify]\nmin_importance = 30\n").unwrap();
+        assert_eq!(cfg.notify.freshness_window_secs, 900);
+        // A config that predates the feature has no [notify] table at all.
+        let cfg: Config = toml::from_str("squelch_level = 1\n").unwrap();
+        assert_eq!(cfg.notify.min_importance, 40);
+        assert_eq!(cfg.notify.rescue_window_secs, 3600);
+    }
+
+    #[test]
+    fn stage2_cap_sources_track_toml_env_and_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SQUELCH_STAGE2_THREAD_DAILY_CAP");
+            std::env::remove_var("SQUELCH_STAGE2_SENDER_DAILY_CAP");
+            std::env::remove_var("SQUELCH_STAGE2_GLOBAL_DAILY_CAP");
+        }
+        let dir = std::env::temp_dir().join(format!("squelch-caps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[stage2]\nthread_daily_cap = 7\n").unwrap();
+
+        // thread from TOML => Config; the untouched caps fall to Default.
+        let (cfg, sources) = Config::load_from_with_cap_sources(&path);
+        assert_eq!(cfg.stage2.thread_daily_cap, 7);
+        assert_eq!(sources.thread_daily_cap, CapSource::Config);
+        assert_eq!(sources.sender_daily_cap, CapSource::Default);
+        assert_eq!(sources.global_daily_cap, CapSource::Default);
+
+        // Env promotes global to Config (and overrides the effective value).
+        unsafe {
+            std::env::set_var("SQUELCH_STAGE2_GLOBAL_DAILY_CAP", "500");
+        }
+        let (cfg, sources) = Config::load_from_with_cap_sources(&path);
+        assert_eq!(cfg.stage2.global_daily_cap, 500);
+        assert_eq!(sources.global_daily_cap, CapSource::Config);
+        assert_eq!(sources.thread_daily_cap, CapSource::Config);
+        assert_eq!(sources.sender_daily_cap, CapSource::Default);
+        unsafe {
+            std::env::remove_var("SQUELCH_STAGE2_GLOBAL_DAILY_CAP");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oauth_client_errors_when_missing() {
+        let c = Config::default();
+        assert!(c.oauth_client().is_err());
+    }
+
+    #[test]
+    fn an_outlook_daemon_gets_a_public_microsoft_client() {
+        let mut c: Config = toml::from_str(
+            "provider = \"outlook\"\nmicrosoft_client_id = \" abc-123 \"\nclient_secret = \"google-secret\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.mail_provider(), crate::mail::MailProvider::Outlook);
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.issuer, OAuthIssuer::Microsoft);
+        assert_eq!(client.client_id, "abc-123");
+        assert!(
+            client.client_secret.is_empty(),
+            "a Google secret must never reach Microsoft"
+        );
+        // No id configured: Passband's own Entra app, still public.
+        c.microsoft_client_id = None;
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.client_id, PASSBAND_MICROSOFT_CLIENT_ID);
+        assert!(client.client_secret.is_empty());
+    }
+
+    #[test]
+    fn entra_app_ids_are_guids_and_google_ids_never_are() {
+        assert!(is_entra_app_id("ac4b9805-c059-4564-a201-58d100df8067"));
+        assert!(!is_entra_app_id("1234-abcd.apps.googleusercontent.com"));
+        assert!(!is_entra_app_id("ac4b9805-c059-4564-a201"));
+        assert!(!is_entra_app_id("zc4b9805-c059-4564-a201-58d100df8067"));
+    }
+
+    /// A hosted Outlook tenant gets the confidential app through the same
+    /// env names a Gmail tenant uses; a Google id there never reaches
+    /// Microsoft.
+    #[test]
+    fn an_outlook_tenant_takes_a_guid_client_id_as_its_confidential_app() {
+        let mut c = Config {
+            provider: Some(crate::mail::MailProvider::Outlook),
+            client_id: Some("11111111-2222-3333-4444-555555555555".into()),
+            client_secret: Some("hosted-secret".into()),
+            ..Config::default()
+        };
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.issuer, OAuthIssuer::Microsoft);
+        assert_eq!(client.client_id, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(client.client_secret, "hosted-secret");
+
+        c.client_id = Some("123-abc.apps.googleusercontent.com".into());
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.client_id, PASSBAND_MICROSOFT_CLIENT_ID);
+        assert!(
+            client.client_secret.is_empty(),
+            "a Google secret never reaches Microsoft"
+        );
+
+        // microsoft_client_id wins, with its own secret.
+        c.microsoft_client_id = Some("99999999-2222-3333-4444-555555555555".into());
+        c.microsoft_client_secret = Some("own".into());
+        let client = c.oauth_client().unwrap();
+        assert_eq!(client.client_secret, "own");
+    }
+
+    #[test]
+    fn an_unset_provider_is_learned_from_a_microsoft_credential() {
+        use crate::credentials::{CredentialKind, StoredToken, store_token_file};
+        let dir = std::env::temp_dir().join(format!(
+            "squelch-infer-provider-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("creds.json");
+        let base = Config {
+            account_email: Some("me@outlook.com".into()),
+            credential_backend: CredentialBackend::File,
+            credentials_path: Some(path.clone()),
+            ..Config::default()
+        };
+        // Nothing stored: still Gmail.
+        let mut c = base.clone();
+        c.infer_provider();
+        assert_eq!(c.provider, None);
+
+        let ms = StoredToken {
+            access_token: "a".into(),
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: Some(vec!["https://graph.microsoft.com/Mail.ReadWrite".into()]),
+        };
+        store_token_file(&path, "me@outlook.com", CredentialKind::Read, &ms).unwrap();
+        let mut c = base.clone();
+        c.infer_provider();
+        assert_eq!(c.mail_provider(), crate::mail::MailProvider::Outlook);
+
+        // A configured provider is never overridden.
+        let mut c = Config {
+            provider: Some(crate::mail::MailProvider::Gmail),
+            ..base.clone()
+        };
+        c.infer_provider();
+        assert_eq!(c.mail_provider(), crate::mail::MailProvider::Gmail);
+
+        // A Google credential leaves it Gmail.
+        let g = StoredToken {
+            scopes: Some(vec!["https://www.googleapis.com/auth/gmail.modify".into()]),
+            ..ms
+        };
+        store_token_file(&path, "me@outlook.com", CredentialKind::Read, &g).unwrap();
+        let mut c = base;
+        c.infer_provider();
+        assert_eq!(c.provider, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_provider_defaults_to_gmail_and_refuses_strangers() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.mail_provider(), crate::mail::MailProvider::Gmail);
+        assert_eq!(c.provider, None, "unset, so it can be inferred");
+        assert!(toml::from_str::<Config>("provider = \"exchange-ews\"\n").is_err());
+    }
+
+    #[test]
+    fn credential_backend_default_is_platform_appropriate() {
+        let b = CredentialBackend::default();
+        if cfg!(target_os = "macos") {
+            assert_eq!(b, CredentialBackend::Keyring);
+        } else {
+            assert_eq!(b, CredentialBackend::File);
+        }
+    }
+
+    #[test]
+    fn credential_backend_parse() {
+        assert_eq!(
+            CredentialBackend::from_str_lenient("keyring"),
+            Some(CredentialBackend::Keyring)
+        );
+        assert_eq!(
+            CredentialBackend::from_str_lenient("  FILE "),
+            Some(CredentialBackend::File)
+        );
+        assert_eq!(CredentialBackend::from_str_lenient("nonsense"), None);
+    }
+
+    #[test]
+    fn env_selects_credential_backend() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_CRED_BACKEND", "file");
+            std::env::set_var("SQUELCH_CREDENTIALS_PATH", "/tmp/squelch-test-creds.json");
+        }
+        let mut c = Config {
+            credential_backend: CredentialBackend::Keyring,
+            ..Config::default()
+        };
+        c.apply_env_overrides();
+        assert_eq!(c.credential_backend, CredentialBackend::File);
+        assert_eq!(
+            c.resolve_credentials_path(),
+            PathBuf::from("/tmp/squelch-test-creds.json")
+        );
+        unsafe {
+            std::env::remove_var("SQUELCH_CRED_BACKEND");
+            std::env::remove_var("SQUELCH_CREDENTIALS_PATH");
+        }
+    }
+
+    /// Clear every carrier credential/knob var. Caller must hold `ENV_LOCK`.
+    fn clear_carrier_env() {
+        // SAFETY: caller holds ENV_LOCK.
+        unsafe {
+            for name in [
+                "SQUELCH_UPS_CLIENT_ID",
+                "SQUELCH_UPS_CLIENT_SECRET",
+                "SQUELCH_FEDEX_CLIENT_ID",
+                "SQUELCH_FEDEX_CLIENT_SECRET",
+                "SQUELCH_USPS_CONSUMER_KEY",
+                "SQUELCH_USPS_CONSUMER_SECRET",
+                "SQUELCH_DHL_API_KEY",
+                "SQUELCH_DHL_DAILY_CAP",
+                "SQUELCH_CARRIERS_POLL_INTERVAL_HOURS",
+                "SQUELCH_CARRIERS_OFD_POLL_INTERVAL_MINS",
+                "SQUELCH_CARRIERS_MAX_AGE_DAYS",
+                "SQUELCH_CARRIERS_MAX_FAILURES",
+                "SQUELCH_CARRIERS_STALE_AFTER_DAYS",
+            ] {
+                std::env::remove_var(name);
+            }
+        }
+    }
+
+    /// The feature is OFF out of the box, and a config written before it existed
+    /// (no `[carriers]` table at all) still parses.
+    #[test]
+    fn carriers_default_is_off_and_legacy_configs_still_parse() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_carrier_env();
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert!(!c.carriers.any_enabled(), "no creds => no carrier polling");
+        assert!(c.carriers.ups.is_none());
+        assert!(c.carriers.fedex.is_none());
+        assert!(c.carriers.usps.is_none());
+        assert!(c.carriers.dhl.is_none());
+        assert_eq!(c.carriers.poll_interval_hours, 6);
+        assert_eq!(c.carriers.ofd_poll_interval_mins, 60);
+        assert_eq!(c.carriers.max_age_days, 45);
+        assert_eq!(c.carriers.max_failures, 5);
+        assert_eq!(c.carriers.stale_after_days, 10);
+
+        // A config predating the feature has no [carriers] table whatsoever.
+        let cfg: Config = toml::from_str("squelch_level = 1\n").unwrap();
+        assert_eq!(cfg.carriers, CarriersConfig::default());
+        assert!(!cfg.carriers.any_enabled());
+    }
+
+    /// The listing policy both doors carry is derived from `[carriers]`, and its
+    /// `Default` is the config default — so a hand-built `ApiState` or
+    /// `SquelchServer` filters the way an unconfigured daemon does.
+    #[test]
+    fn the_listing_policy_tracks_the_carriers_block() {
+        assert_eq!(
+            ShipmentListPolicy::default(),
+            CarriersConfig::default().list_policy()
+        );
+        assert_eq!(ShipmentListPolicy::default().stale_after_days, 10);
+        assert_eq!(ShipmentListPolicy::default().retired_at_failures, 5);
+
+        let carriers = CarriersConfig {
+            max_failures: 2,
+            stale_after_days: 0,
+            ..CarriersConfig::default()
+        };
+        let policy = ShipmentListPolicy::from(&carriers);
+        assert_eq!(policy.retired_at_failures, 2);
+        assert_eq!(
+            policy.stale_after_days, 0,
+            "0 is a real value (the filter off), never a fallback to the default"
+        );
+    }
+
+    /// `stale_after_days` is configurable both ways, like every other knob in the
+    /// block — the env form is how a container sets it.
+    #[test]
+    fn stale_after_days_comes_from_toml_or_the_environment() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_carrier_env();
+
+        let cfg: Config = toml::from_str("[carriers]\nstale_after_days = 21\n").unwrap();
+        assert_eq!(cfg.carriers.stale_after_days, 21);
+
+        let mut c = Config::default();
+        // SAFETY: we hold ENV_LOCK.
+        unsafe { std::env::set_var("SQUELCH_CARRIERS_STALE_AFTER_DAYS", "0") };
+        c.apply_env_overrides();
+        assert_eq!(c.carriers.stale_after_days, 0, "0 disables the filter");
+        clear_carrier_env();
+    }
+
+    #[test]
+    fn carriers_section_round_trips_through_toml() {
+        let cfg: Config = toml::from_str(
+            r#"
+[carriers]
+poll_interval_hours = 3
+max_failures = 9
+
+[carriers.ups]
+client_id = "ups-id"
+client_secret = "ups-sekret"
+
+[carriers.dhl]
+api_key = "dhl-key"
+daily_cap = 240
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.carriers.poll_interval_hours, 3);
+        assert_eq!(cfg.carriers.max_failures, 9);
+        // Unspecified knobs keep their defaults (#[serde(default)]).
+        assert_eq!(cfg.carriers.ofd_poll_interval_mins, 60);
+        assert_eq!(cfg.carriers.max_age_days, 45);
+        assert_eq!(
+            cfg.carriers.ups.as_ref().unwrap().credentials(),
+            Some(("ups-id", "ups-sekret"))
+        );
+        assert_eq!(
+            cfg.carriers.dhl.as_ref().unwrap().api_key(),
+            Some("dhl-key")
+        );
+        assert_eq!(cfg.carriers.dhl.as_ref().unwrap().daily_cap, 240);
+        // The carriers nobody configured stay absent.
+        assert!(cfg.carriers.fedex.is_none());
+        assert!(cfg.carriers.usps.is_none());
+        assert!(cfg.carriers.any_enabled());
+
+        // And it survives a serialize/parse lap unchanged.
+        let rendered = toml::to_string(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(reparsed.carriers, cfg.carriers);
+
+        // An omitted daily_cap lands under DHL's 250/day free tier.
+        let cfg: Config = toml::from_str("[carriers.dhl]\napi_key = \"k\"\n").unwrap();
+        assert_eq!(cfg.carriers.dhl.unwrap().daily_cap, 200);
+    }
+
+    /// The container case: nothing on disk, everything in the environment. A
+    /// full env PAIR has to materialize a carrier the TOML never mentioned.
+    #[test]
+    fn carrier_env_materializes_a_carrier_absent_from_the_toml() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_carrier_env();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_FEDEX_CLIENT_ID", "  fedex-id  ");
+            std::env::set_var("SQUELCH_FEDEX_CLIENT_SECRET", "fedex-sekret");
+            std::env::set_var("SQUELCH_USPS_CONSUMER_KEY", "usps-key");
+            std::env::set_var("SQUELCH_USPS_CONSUMER_SECRET", "usps-sekret");
+            std::env::set_var("SQUELCH_DHL_API_KEY", "dhl-key");
+            std::env::set_var("SQUELCH_DHL_DAILY_CAP", "150");
+            std::env::set_var("SQUELCH_CARRIERS_POLL_INTERVAL_HOURS", "2");
+            std::env::set_var("SQUELCH_CARRIERS_MAX_AGE_DAYS", "10");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert_eq!(
+            c.carriers.fedex.as_ref().unwrap().credentials(),
+            // Trimmed, exactly like the relay block.
+            Some(("fedex-id", "fedex-sekret"))
+        );
+        assert_eq!(
+            c.carriers.usps.as_ref().unwrap().credentials(),
+            Some(("usps-key", "usps-sekret"))
+        );
+        assert_eq!(c.carriers.dhl.as_ref().unwrap().api_key(), Some("dhl-key"));
+        assert_eq!(c.carriers.dhl.as_ref().unwrap().daily_cap, 150);
+        assert_eq!(c.carriers.poll_interval_hours, 2);
+        assert_eq!(c.carriers.max_age_days, 10);
+        assert!(c.carriers.any_enabled());
+        // Untouched carriers are still absent, not empty-but-present.
+        assert!(c.carriers.ups.is_none());
+
+        // Env beats the file, same as everywhere else.
+        unsafe {
+            std::env::set_var("SQUELCH_UPS_CLIENT_ID", "env-id");
+        }
+        let mut c: Config = toml::from_str(
+            "[carriers.ups]\nclient_id = \"file-id\"\nclient_secret = \"file-sekret\"\n",
+        )
+        .unwrap();
+        c.apply_env_overrides();
+        assert_eq!(
+            c.carriers.ups.as_ref().unwrap().credentials(),
+            Some(("env-id", "file-sekret"))
+        );
+        clear_carrier_env();
+    }
+
+    /// A blank carrier var is "unset", never "set to empty": it must not clobber
+    /// a configured secret, and it must not conjure a credential-shaped table
+    /// that would make the poller think a carrier is available.
+    #[test]
+    fn blank_carrier_env_is_unset() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_carrier_env();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_UPS_CLIENT_ID", "   ");
+            std::env::set_var("SQUELCH_UPS_CLIENT_SECRET", "");
+            std::env::set_var("SQUELCH_DHL_API_KEY", "  ");
+            std::env::set_var("SQUELCH_CARRIERS_POLL_INTERVAL_HOURS", "");
+        }
+        let mut c: Config = toml::from_str(
+            "[carriers]\npoll_interval_hours = 4\n\n\
+             [carriers.ups]\nclient_id = \"file-id\"\nclient_secret = \"file-sekret\"\n",
+        )
+        .unwrap();
+        c.apply_env_overrides();
+        assert_eq!(
+            c.carriers.ups.as_ref().unwrap().credentials(),
+            Some(("file-id", "file-sekret")),
+            "a blank env value does not clobber the file"
+        );
+        assert_eq!(c.carriers.poll_interval_hours, 4);
+        assert!(
+            c.carriers.dhl.is_none(),
+            "a blank secret never materializes a carrier"
+        );
+        clear_carrier_env();
+    }
+
+    /// Half a pair is not a credential. A `client_id` with no secret leaves that
+    /// carrier disabled, whether it came from the file or from one lone env var
+    /// — and a blank half in the file counts as absent too.
+    #[test]
+    fn half_a_credential_pair_is_not_enabled() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_carrier_env();
+
+        let cfg: Config = toml::from_str("[carriers.ups]\nclient_id = \"only-the-id\"\n").unwrap();
+        let ups = cfg.carriers.ups.as_ref().unwrap();
+        assert!(!ups.enabled(), "an id with no secret is not a credential");
+        assert_eq!(ups.credentials(), None);
+        assert!(!cfg.carriers.any_enabled());
+
+        // A blank half in the file is absent, not "configured with nothing".
+        let cfg: Config =
+            toml::from_str("[carriers.usps]\nconsumer_key = \"k\"\nconsumer_secret = \"   \"\n")
+                .unwrap();
+        assert!(!cfg.carriers.usps.as_ref().unwrap().enabled());
+        assert!(!cfg.carriers.any_enabled());
+
+        // One lone env var materializes the struct but not the feature.
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_FEDEX_CLIENT_ID", "lonely-id");
+        }
+        let mut c = Config::default();
+        c.apply_env_overrides();
+        assert!(c.carriers.fedex.is_some());
+        assert!(!c.carriers.fedex.as_ref().unwrap().enabled());
+        assert!(
+            !c.carriers.any_enabled(),
+            "half a pair leaves the feature off"
+        );
+        clear_carrier_env();
+    }
+
+    /// Carrier secrets are redacted from `Debug`, the way every other
+    /// secret-bearing config struct in the workspace does it — a `{:?}` of the
+    /// whole `Config` must not put an API key in a log.
+    #[test]
+    fn carrier_debug_redacts_the_secrets() {
+        let cfg: Config = toml::from_str(
+            r#"
+[carriers.ups]
+client_id = "ups-id"
+client_secret = "ups-sekret"
+
+[carriers.fedex]
+client_id = "fedex-id"
+client_secret = "fedex-sekret"
+
+[carriers.usps]
+consumer_key = "usps-key"
+consumer_secret = "usps-sekret"
+
+[carriers.dhl]
+api_key = "dhl-key"
+"#,
+        )
+        .unwrap();
+        let rendered = format!("{:?}", cfg.carriers);
+        for secret in ["ups-sekret", "fedex-sekret", "usps-sekret", "dhl-key"] {
+            assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+        }
+        assert_eq!(rendered.matches("<redacted>").count(), 4);
+        // The public halves stay visible — they are what makes a Debug useful.
+        assert!(rendered.contains("ups-id"));
+        assert!(rendered.contains("usps-key"));
+        // And the same holds through the whole Config's derived Debug.
+        assert!(!format!("{cfg:?}").contains("ups-sekret"));
+    }
+
+    /// A zero cadence would spin against a carrier's API; it floors at 1.
+    #[test]
+    fn zero_carrier_interval_is_floored() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_carrier_env();
+        let mut c: Config =
+            toml::from_str("[carriers]\npoll_interval_hours = 0\nofd_poll_interval_mins = 0\n")
+                .unwrap();
+        c.apply_env_overrides();
+        assert_eq!(c.carriers.poll_interval_hours, 1);
+        assert_eq!(c.carriers.ofd_poll_interval_mins, 1);
+    }
+
+    #[test]
+    fn credential_backend_from_toml() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("squelch-cfg-be-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+credential_backend = "file"
+credentials_path = "/var/lib/squelch/creds.json"
+"#,
+        )
+        .unwrap();
+        // Ensure env doesn't clobber the file value under test.
+        unsafe {
+            std::env::remove_var("SQUELCH_CRED_BACKEND");
+            std::env::remove_var("SQUELCH_CREDENTIALS_PATH");
+        }
+        let c = Config::load_from(&path);
+        assert_eq!(c.credential_backend, CredentialBackend::File);
+        assert_eq!(
+            c.resolve_credentials_path(),
+            PathBuf::from("/var/lib/squelch/creds.json")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

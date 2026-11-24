@@ -113,7 +113,7 @@ feed to the versions you re-stage.
 ## Release announcements (push)
 
 A Mac where Passband is quit never sees the update card or banner, so the
-daemons announce each release themselves (squelch-core/src/release_feed.rs).
+daemons announce each release themselves (crates/squelch-core/src/release_feed.rs).
 Every daemon with a relay reads `passband.app/appcast.xml` hourly. Six hours
 after a version appears there, it pushes it once to its account's Macs. Phones
 are never told about a Mac release. An account whose Mac already connected on

@@ -13,14 +13,14 @@ exists: no session is written, no pass runs, and the routes 404.
 
 | Piece | File |
 |---|---|
-| The rules (pure, no I/O) | `squelch-core/src/renotify.rs` |
-| Quick clear's estimator and planner (pure) | `squelch-core/src/quick_clear.rs` |
-| Quick clear's backlog read | `squelch-core/src/store/sqlite/quick_clear.rs` |
-| Sessions, candidates, busy times, banner record | `squelch-core/src/store/sqlite/renotify.rs` |
-| Tunables | `RenotifyConfig` in `squelch-core/src/config.rs` (`[renotify]`, `SQUELCH_RENOTIFY_*`); quick clear has none, its numbers are constants in `quick_clear.rs` |
-| Worker, frame, routes | `squelch-api/src/renotify.rs` |
-| Session + frame on the Mac stream | `squelch-api/src/events.rs` |
-| Spawned | `squelchd/src/bin/squelchd.rs` |
+| The rules (pure, no I/O) | `crates/squelch-core/src/renotify.rs` |
+| Quick clear's estimator and planner (pure) | `crates/squelch-core/src/quick_clear.rs` |
+| Quick clear's backlog read | `crates/squelch-core/src/store/sqlite/quick_clear.rs` |
+| Sessions, candidates, busy times, banner record | `crates/squelch-core/src/store/sqlite/renotify.rs` |
+| Tunables | `RenotifyConfig` in `crates/squelch-core/src/config.rs` (`[renotify]`, `SQUELCH_RENOTIFY_*`); quick clear has none, its numbers are constants in `quick_clear.rs` |
+| Worker, frame, routes | `crates/squelch-api/src/renotify.rs` |
+| Session + frame on the Mac stream | `crates/squelch-api/src/events.rs` |
+| Spawned | `crates/squelchd/src/bin/squelchd.rs` |
 
 ## Triggers
 

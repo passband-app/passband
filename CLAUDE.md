@@ -13,8 +13,8 @@ push touched:
 
 | Service | Runs on | Host | Built from |
 |---|---|---|---|
-| `control` | ECS Fargate | `signup.passband.app` | `Dockerfile.control` |
-| `relay` | ECS Fargate (`/data` on EFS) | `relay.squelch.sh` | `Dockerfile` |
+| `control` | ECS Fargate | `signup.passband.app` | `crates/squelch-control/Dockerfile` |
+| `relay` | ECS Fargate (`/data` on EFS) | `relay.squelch.sh` | `crates/squelch-relay/Dockerfile` |
 | `bifrost` | ECS Fargate | `bifrost.passband.app` (source-restricted) | `deploy/aws/docker/Dockerfile.bifrost` |
 | `monitor` (prometheus, grafana, blackbox) | one EC2 box, docker compose | Grafana over the tailnet (`passband-monitor`:8443); `metrics.passband.app` admits carrier only | `deploy/aws/monitor/` + `deploy/monitoring/` |
 | `site` | S3 + CloudFront | `passband.app` | `passband-site/` + `deploy/aws/site/` |

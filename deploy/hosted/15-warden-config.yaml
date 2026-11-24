@@ -66,7 +66,7 @@
 # report an existing tenant as drifted for them.
 # Existing tenants take those from `squelch-control reconcile <label>`, which
 # re-applies all five objects, one label at a time. See
-# `squelch-warden/README.md`, "What the drift report cannot see".
+# `crates/squelch-warden/README.md`, "What the drift report cannot see".
 #
 # `SQUELCH_WARDEN_EMBED_URL` is the exception that proves the rule: it adds a
 # NetworkPolicy rule too, but it also moves the Deployment (two env vars, the
@@ -110,7 +110,7 @@ data:
   # this line. SETUP.md §10b, Rollback; ROLLOUT.md, "Rolling back".
   SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.20"
   # Everything below is a default, restated so this file is the one place an
-  # operator has to look. See squelch-warden/README.md.
+  # operator has to look. See crates/squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"
   SQUELCH_WARDEN_INGRESS_CLASS: "traefik"
   SQUELCH_WARDEN_INGRESS_NAMESPACE: "kube-system"
@@ -281,7 +281,7 @@ data:
   # is sized to this request. Change one and redo the other.
   #
   # Revisit once the daemon unloads its embedder when idle; the constant in
-  # squelch-warden/src/config.rs carries the measurements.
+  # crates/squelch-warden/src/config.rs carries the measurements.
   #
   # These land on the tenant DEPLOYMENT, which is the one object a drift report
   # renders, so unlike the ingress and storage knobs above a change here does

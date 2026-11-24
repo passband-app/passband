@@ -371,7 +371,7 @@ describe the historical rule-onboarding design, not the current qualification pa
 - **Data:** fetches `tier=noise` updates (`limit 200`) plus `listRules()`,
   filters to the last 7 days client-side (the wire `AttentionUpdate` carries no
   `received_at`, so we date on `surfaced_at`), and groups by sender address.
-- **Heuristic** (calibrated against `squelch-core/src/triage` rung-5 reason
+- **Heuristic** (calibrated against `crates/squelch-core/src/triage` rung-5 reason
   strings, read-only): a sender qualifies when its reason matches the
   newsletter/bulk shape — the engine's exact literal is
   `"bulk/list mail (unsubscribe footer)"` (we substring-match `"unsubscribe

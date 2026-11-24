@@ -5,7 +5,7 @@
 # Secret, restart itself, or look at anything outside the tenant namespace. If
 # somebody gets the warden's bearer token, this list is the blast radius.
 #
-# Every rule is a verb `squelch-warden/src/cluster.rs` actually calls, per
+# Every rule is a verb `crates/squelch-warden/src/cluster.rs` actually calls, per
 # resource, and nothing else. Server-side apply needs `create` as well as
 # `patch`, because an apply that has to create the object is authorized as both.
 #

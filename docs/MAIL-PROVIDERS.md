@@ -142,13 +142,13 @@ These stay Gmail-shaped in the engine or around it, deliberately:
 1. Add the `MailProvider` variant. Every `match` on it is exhaustive, so the
    compiler lists the places that have to pick an implementation (the engine's
    `source()`, the door's `write_client()`, the startup log line).
-2. Implement `MailSource` in `squelch-core/src/mail/<provider>.rs`: listing,
+2. Implement `MailSource` in `crates/squelch-core/src/mail/<provider>.rs`: listing,
    change feed, raw fetch, header fetch, unread counts, cursor encoding, and
    `wait_for_change` if the protocol can push. Report `Placement` from the
    provider's folders, return `CoreError::NotFound` for a message that is gone
    and `ChangesError::Expired` for a cursor the server can no longer replay
    from (IMAP: a `UIDVALIDITY` change).
-3. Implement `MailWriter` in `squelch-api/src/write/<provider>.rs`. The RFC 822
+3. Implement `MailWriter` in `crates/squelch-api/src/write/<provider>.rs`. The RFC 822
    composition in `write/mime.rs` is provider-neutral and shared.
 4. Give the provider an off path for the Gmail-only features above.
 

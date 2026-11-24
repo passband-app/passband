@@ -8,7 +8,7 @@ keyword search and semantic search.
 Decisions locked with the user (2026-10-21):
 
 - Model: **`claude-sonnet-5`**. It is already on every tenant's Bifrost
-  allow-list (`DEFAULT_LLM_MODELS` in `squelch-control/src/config.rs`), so
+  allow-list (`DEFAULT_LLM_MODELS` in `crates/squelch-control/src/config.rs`), so
   shipping needs no `llm sync`/`mint`.
 - Rendering: **HTML text-node translation.** The visible text segments are
   pulled out of the already-sanitized `body_html`, translated as a numbered

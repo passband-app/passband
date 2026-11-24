@@ -5,7 +5,7 @@
 // the phone's lock screen is noise (and a code left on a lock screen).
 //
 // The daemon turns it into a silent push to every registered phone
-// (`POST /client/events/{id}/handled`, squelch-api/src/events.rs).
+// (`POST /client/events/{id}/handled`, crates/squelch-api/src/events.rs).
 //
 // Per ACCOUNT, not through `APIClient.shared`: a code can arrive in a mailbox
 // other than the one on screen, and the shared client speaks only to that one.

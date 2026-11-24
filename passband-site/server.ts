@@ -69,6 +69,8 @@ const pages: Record<string, string> = {
   // the flyer on the calendar tour's invitation card.
   "/sam.jpg": "sam.jpg",
   "/endzeit-flyer.jpg": "endzeit-flyer.jpg",
+  // The founder photo on /about.
+  "/braelyn.jpg": "braelyn.jpg",
   // Newsreader, subset to Latin from the same TTF the Swift client bundles.
   "/newsreader-var.woff2": "newsreader-var.woff2",
   // The OAuth "application home page" Google verification is filed against:

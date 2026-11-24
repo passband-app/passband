@@ -22,6 +22,7 @@ var ROUTES = {
   "/og.png": "/og.png",
   "/sam.jpg": "/sam.jpg",
   "/endzeit-flyer.jpg": "/endzeit-flyer.jpg",
+  "/braelyn.jpg": "/braelyn.jpg",
   "/newsreader-var.woff2": "/newsreader-var.woff2",
   "/about": "/about.html",
   "/privacy": "/privacy.html",

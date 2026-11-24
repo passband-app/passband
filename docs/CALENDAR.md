@@ -1108,6 +1108,10 @@ plan shows its line and code), so bumping the prompt never turns every "no
 reminder" into the fallback, or drops every claim, before each item is
 planned again. A prompt that changes what a plan MEANS leaves the older
 versions off that list, and their items fall to the fallback until planned.
+- The line never tells the owner to bring a ticket or a confirmation email
+  (prompt `calendar-remind-v3`): the reminder lands on the phone that holds
+  the mail. When `open` is that mail, the line says what tapping shows ("Tap
+  to see the ticket in your confirmation email").
 - `open` and `ticket`: `{mail, attachment?}` indexes into the numbered lists.
   An index out of range is null. `open` is what tapping the banner shows;
   `ticket` is what the Tickets button shows.
@@ -1197,7 +1201,7 @@ The frame:
  "item": {"kind": "event", "calendar_id": "primary", "id": "abc",
           "title": "The Lanterns", "start": "2026-10-30T20:00:00-07:00",
           "end": null, "all_day": false, "place": "Riverside Hall"},
- "lead_minutes": 60, "line": "Your 2 tickets are in the Ticketmaster email",
+ "lead_minutes": 60, "line": "Tap to see your 2 tickets in the Ticketmaster email",
  "code": null,
  "open": {"message_id": 41, "thread_id": "t41", "attachment_id": 9},
  "ticket": {"message_id": 41, "thread_id": "t41", "kind": "ticket",

@@ -107,6 +107,20 @@ pub struct AgentConfig {
     /// cooldown a throttle or a server error gets (15 s, 30 s, 60 s, ...
     /// up to this). Outages do not consume attempts.
     pub outage_retry_secs: u64,
+    /// Send background investigations through the Anthropic Message
+    /// Batches API, at half the price (`triage::batch`): the signup
+    /// backfill, the cutover, window re-triages and refreshes, which nobody
+    /// is waiting on. Same request, same decision; it lands minutes later.
+    /// Arrivals, a person's own request, revisits and access checks stay
+    /// synchronous. Ignored on the OpenAI wire.
+    pub batch_background: bool,
+    /// Background investigations the batch lane holds at once, the size of
+    /// its batches: the batch's cached prompt prefix is written once per
+    /// batch, so larger is cheaper.
+    pub batch_jobs: usize,
+    /// The longest a batch may take before it is cancelled and its jobs are
+    /// retried. The batch lane's leases are sized from it.
+    pub batch_wait_secs: u64,
 }
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -125,6 +139,9 @@ impl Default for AgentConfig {
             archive_access_daily_cap: 50,
             max_attempts: 6,
             outage_retry_secs: 300,
+            batch_background: true,
+            batch_jobs: 50,
+            batch_wait_secs: 3600,
         }
     }
 }
@@ -284,6 +301,8 @@ impl AgentTriageConfig {
             || self.agent.max_model_turns == 0
             || self.agent.timeout_secs == 0
             || self.agent.concurrency == 0
+            || (self.agent.batch_background
+                && (self.agent.batch_jobs == 0 || self.agent.batch_wait_secs == 0))
             || self.agent.worker_poll_secs == 0
             || self.agent.outage_retry_secs == 0
             || self.context.max_context_bytes == 0

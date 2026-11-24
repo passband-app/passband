@@ -997,6 +997,7 @@ async fn run_pair(shared: &Shared<'_>, case: &Case, weight: f64, rep: u32) -> Pa
             provider: shared.candidate.stage2_provider(),
             model: &shared.candidate.model,
             effort: shared.effort.as_deref(),
+            batch: None,
         };
         let started = Instant::now();
         let result = run_agent(connection, &shared.config, case.context.clone(), &reader).await;

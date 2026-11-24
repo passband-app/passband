@@ -124,6 +124,11 @@ access_daily_run_cap = 500
 archive_access_daily_cap = 50
 max_attempts = 6
 outage_retry_secs = 300
+# Background investigations through the Message Batches API at half price
+# (see "Batched background triage" below).
+batch_background = true
+batch_jobs = 50
+batch_wait_secs = 3600
 
 [triage.context]
 initial_thread_messages = 8
@@ -174,6 +179,43 @@ Environment overrides: `SQUELCH_TRIAGE_MODEL`, `SQUELCH_TRIAGE_REVIEW_MODEL`,
 `SQUELCH_TRIAGE_OUTAGE_RETRY_SECS`. Other agent levers are configured in TOML. Scores order only agent-selected FYE threads;
 no weight or importance threshold can add a thread to FYE. Recency uses relevant
 message activity, never the time a background job ran.
+
+### Batched background triage
+
+Background investigations go through the Anthropic Message Batches API, which
+bills the same request at half price and answers in minutes rather than
+seconds. Background here means the work nobody is waiting on: the signup
+backfill, the cutover, a window re-triage, refreshes of mail already
+classified. A new mailbox's first week is mostly this work, so it
+is most of what triage costs. Arrivals, a person's own request or correction,
+revisits and access checks stay synchronous.
+
+Nothing about the request changes (model, prompt, schema, effort), so the
+decision is the one the synchronous call would have made. Only the transport,
+the job's lease and the ledger line differ:
+
+- A batch lane runs beside the refine lane and claims up to `batch_jobs`
+  background jobs at a time. Their first turns arrive together and go out as
+  one batch; follow-up turns form the next one. A batch writes its cached
+  prompt prefix once and reads it on every other request, but it does not
+  share the synchronous calls' cache, so larger batches are cheaper.
+- The live pass leaves those jobs to the batch lane while batching is on. The
+  daily run caps charge a batched job exactly as before.
+- Usage books under the `stage2_batch` ledger category, priced at half the
+  stage-2 rates by both cost estimators.
+- A batch not ended within `batch_wait_secs` is cancelled and its jobs are
+  retried; the leases cover that wait, so a slow batch is never reclaimed.
+  A batch's own failure (`batch_timeout`, `batch_unreachable`) retries the job
+  without opening the provider cooldown that pauses live triage.
+- An endpoint that refuses to create a batch (a 4xx: no batch route, a key not
+  allowed to batch) turns batching off until the daemon restarts, and
+  background work goes back to the live pass.
+- A daemon that stops mid-batch loses that batch; its jobs are claimed again.
+
+Through a Bifrost gateway the batch rides the same virtual key, with the
+provider prefix stripped from each request's model. The gateway does not
+charge batch spend to the virtual key's budget, so the daily run caps are what
+bound it. Only the Anthropic wire batches; the OpenAI wire ignores the setting.
 
 ### Spend and revisit limits
 

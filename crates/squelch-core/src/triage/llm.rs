@@ -153,7 +153,7 @@ pub async fn classify_llm(
     provider: Stage2Provider,
     req: &LlmRequest<'_>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
-    dispatch(http, url, api_key, provider, req, false, None).await
+    dispatch(http, url, api_key, provider, req, false, None, None).await
 }
 
 /// [`classify_llm`] with the request's own timeout, for a caller whose
@@ -176,10 +176,12 @@ pub async fn classify_llm_within(
         req,
         false,
         Some(request_timeout),
+        None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // the transport, the request and how to send it
 async fn dispatch(
     http: &reqwest::Client,
     url: &str,
@@ -188,10 +190,20 @@ async fn dispatch(
     req: &LlmRequest<'_>,
     tool_submission: bool,
     request_timeout: Option<Duration>,
+    batch: Option<&std::sync::Arc<super::batch::Batcher>>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     match provider {
         Stage2Provider::Anthropic => {
-            classify_anthropic(http, url, api_key, req, tool_submission, request_timeout).await
+            classify_anthropic(
+                http,
+                url,
+                api_key,
+                req,
+                tool_submission,
+                request_timeout,
+                batch,
+            )
+            .await
         }
         Stage2Provider::OpenAI => classify_openai(http, url, api_key, req, request_timeout).await,
     }
@@ -213,6 +225,11 @@ async fn dispatch(
 /// `missing_agent_submission`, which the agent already spends a repair turn
 /// on; it still parses and validates every step before a decision can commit.
 /// Other classifiers and the OpenAI transport keep their strict JSON schemas.
+///
+/// `batch` sends the turn through the batch API (`triage::batch`): only the
+/// background lane passes one, and `request_timeout` must then cover a
+/// batch's whole wait.
+#[allow(clippy::too_many_arguments)] // the parts of one agent turn
 pub async fn classify_agent_step(
     http: &reqwest::Client,
     url: &str,
@@ -220,6 +237,7 @@ pub async fn classify_agent_step(
     provider: Stage2Provider,
     req: &LlmRequest<'_>,
     request_timeout: Duration,
+    batch: Option<&std::sync::Arc<super::batch::Batcher>>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     dispatch(
         http,
@@ -229,6 +247,7 @@ pub async fn classify_agent_step(
         req,
         true,
         Some(request_timeout),
+        batch,
     )
     .await
 }
@@ -539,6 +558,7 @@ async fn classify_anthropic(
     req: &LlmRequest<'_>,
     tool_submission: bool,
     request_timeout: Option<Duration>,
+    batch: Option<&std::sync::Arc<super::batch::Batcher>>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     let max_tokens = req.max_tokens.unwrap_or(MAX_TOKENS);
 
@@ -606,7 +626,41 @@ async fn classify_anthropic(
         };
         req.json(&body)
     };
-    let parsed: MessagesResponse = match send_with_retry(build, req.max_tries).await? {
+    // A background turn goes through the batch API when it can (see
+    // `triage::batch`): the same body, answered as this endpoint would have.
+    // Batching off, or an endpoint that is not a Messages one, is the
+    // synchronous call below.
+    let batched = match (batch, super::batch::base_of(url)) {
+        (Some(batcher), Some(base)) => {
+            let mut headers = vec![
+                ("x-api-key", api_key.to_owned()),
+                ("anthropic-version", API_VERSION.to_owned()),
+            ];
+            if is_gateway_url(url) {
+                headers.push((GATEWAY_VK_HEADER, api_key.to_owned()));
+            }
+            match batcher
+                .send(super::batch::Target { base, headers }, body.clone())
+                .await
+            {
+                Ok((status, answer)) => Some(batch_answer(status, answer)?),
+                Err(super::batch::BatchError::Unavailable) => None,
+                Err(super::batch::BatchError::Failed(kind)) => {
+                    return Err(ClassifyError {
+                        kind,
+                        retryable: true,
+                        retry_after: None,
+                    });
+                }
+            }
+        }
+        _ => None,
+    };
+    let sent = match batched {
+        Some(sent) => sent,
+        None => send_with_retry(build, req.max_tries).await?,
+    };
+    let parsed: MessagesResponse = match sent {
         SendOk::Body(b) => b,
         SendOk::PermanentFailure(kind) => return Ok(LlmOutcome::Failed(kind, None)),
     };
@@ -742,6 +796,46 @@ struct ApiErrorBody {
 struct ApiErrorInner {
     #[serde(rename = "type")]
     kind: Option<String>,
+}
+
+/// A batch result read the way [`send_with_retry`] reads a response: a body,
+/// a permanent failure named `http_{code}:{type}`, or a retryable error for
+/// the statuses it would have retried (one try: the batch lane's retry is
+/// the job's own).
+fn batch_answer<T: serde::de::DeserializeOwned>(
+    status: u16,
+    answer: serde_json::Value,
+) -> std::result::Result<SendOk<T>, ClassifyError> {
+    if status == 0 {
+        // The batch's own failure (`triage::batch::answer_for`): an expired
+        // or cancelled request, never the provider's answer to it.
+        return Err(ClassifyError {
+            kind: answer["error"]["message"]
+                .as_str()
+                .unwrap_or("batch_failed")
+                .to_owned(),
+            retryable: true,
+            retry_after: None,
+        });
+    }
+    if (200..300).contains(&status) {
+        return serde_json::from_value(answer)
+            .map(SendOk::Body)
+            .map_err(|_| ClassifyError {
+                kind: "response_decode".into(),
+                retryable: false,
+                retry_after: None,
+            });
+    }
+    if status == 429 || status == 529 || (500..600).contains(&status) {
+        return Err(ClassifyError {
+            kind: format!("http_{status}"),
+            retryable: true,
+            retry_after: None,
+        });
+    }
+    let kind = answer["error"]["type"].as_str().unwrap_or("unknown");
+    Ok(SendOk::PermanentFailure(format!("http_{status}:{kind}")))
 }
 
 /// POST the request, applying the retry policy for retryable statuses.
@@ -989,6 +1083,7 @@ mod tests {
                 Stage2Provider::Anthropic,
                 &req,
                 Duration::from_secs(30),
+                None,
             )
             .await
             .unwrap();
@@ -1078,6 +1173,7 @@ mod tests {
             Stage2Provider::Anthropic,
             &req,
             Duration::from_secs(30),
+            None,
         )
         .await
         .unwrap_err();

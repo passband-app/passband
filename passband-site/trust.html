@@ -235,11 +235,11 @@
     <main>
       <section class="hero">
         <p class="eyebrow"><b>Trust</b> &middot; updated November 5, 2026</p>
-        <h1>Where your mail goes. All of it.</h1>
+        <h1>Everywhere your mail goes.</h1>
         <p class="lede">
-          Passband reads your mail so it can decide what needs you. This page is
-          the full account of what that involves: every place a byte of it goes,
-          who runs that place, and how long it stays.
+          Passband reads your mail so it can decide what needs you. This page lists
+          every place any of it goes, who runs each one, and how long it stays
+          there.
         </p>
         <dl class="spec">
           <div><dt>Training on your mail</dt><dd>Never<small>not by us, not by our model provider</small></dd></div>
@@ -251,7 +251,7 @@
 
       <section class="section" id="data-flow">
         <p class="num">01 &middot; DATA FLOW</p>
-        <h2>One tenant. <em>Every wire out of it.</em></h2>
+        <h2>Every way out of <em>your tenant.</em></h2>
         <p class="intro">
           Your hosted account is its own instance of the Passband daemon with its
           own database. Nothing else runs in it and no other account can reach
@@ -318,7 +318,7 @@
             </div>
             <div class="ch sealed" data-hosted>
               <span class="wire"></span>
-              <div class="what"><b>Backups</b>The mailbox database, streamed continuously so a lost disk costs minutes, not your history. Encrypted on our server before upload.</div>
+              <div class="what"><b>Backups</b>The mailbox database, streamed continuously, so a lost disk costs at most a few minutes of mail. Encrypted on our server before upload.</div>
               <div class="who"><b>Cloudflare R2</b>ciphertext only; Cloudflare holds no key<br /><span class="pill">encrypted</span><span class="off">off</span></div>
             </div>
             <div class="ch meta">
@@ -526,7 +526,7 @@
             <p>Your own container and volume, user-namespaced, behind a default-deny network policy. Tenants cannot reach each other.</p>
           </div>
           <div>
-            <h3>Keys you can count</h3>
+            <h3>What is encrypted</h3>
             <p>Your Google token is sealed to a key only your tenant holds. Cluster secrets are encrypted at rest. Backups are encrypted before they leave the server.</p>
           </div>
           <div>
@@ -611,5 +611,6 @@
       </div>
       <p class="foot-legal">&copy; 2026 Passband. All rights reserved.</p>
     </footer>
+    <script type="module" src="/track.js"></script>
   </body>
 </html>

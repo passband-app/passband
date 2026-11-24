@@ -174,3 +174,32 @@ td small { display: block; color: var(--faint); font-weight: 400; font-size: 0.8
   .toc ol { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; }
 }
 @media (max-width: 480px) { .toc ol { grid-template-columns: minmax(0, 1fr); } }
+
+/* DAY. A page opts in with <html data-theme="light"> (static, since the CSP
+   blocks inline scripts): the landing page's day palette (App.tsx LIGHT_CSS),
+   restated for the static pages. */
+html[data-theme="light"] {
+  --bg: #FAF7F2; --canvas: #FFFFFF; --card: #FFFFFF;
+  --ink: #1D2430; --dim: #4F5867; --faint: #6F7886; --faintest: #959CA7;
+  --hair: rgba(29, 36, 48, 0.08); --hair-strong: rgba(29, 36, 48, 0.13);
+  --accent: #2E6BD6; --accent-ink: #2A62C4;
+  --warn: #B7791F; --positive: #2F8F5B; --danger: #D24B3A;
+  --shadow: 0 1px 2px rgba(29, 36, 48, 0.06), 0 12px 32px -12px rgba(29, 36, 48, 0.18);
+  color-scheme: light;
+}
+/* The hero's ground is the landing page's dawn, without the analyzer grid. */
+html[data-theme="light"] .hero::before { inset: -7rem calc(50% - 50vw) 0; z-index: -1;
+  background:
+    linear-gradient(180deg, rgba(250,247,242,0) 70%, #FAF7F2 100%),
+    radial-gradient(ellipse 45% 40% at 72% 68%, rgba(255, 190, 150, 0.45), rgba(255, 190, 150, 0) 70%),
+    linear-gradient(180deg, #D8E5F6 0%, #E7EDF6 30%, #F4EEEA 58%, #FAEBDF 80%, #FAF7F2 100%);
+  -webkit-mask-image: none; mask-image: none; }
+html[data-theme="light"] .top { position: relative; z-index: 1; }
+html[data-theme="light"] .cta { color: #fff; background: var(--ink);
+  box-shadow: 0 1px 2px rgba(29,36,48,0.12), 0 10px 24px -10px rgba(29,36,48,0.45); }
+html[data-theme="light"] .cta:hover { color: #fff; background: #2B3444; }
+html[data-theme="light"] .foot-mark { filter: none; opacity: 0.55; }
+html[data-theme="light"] .table-wrap { background: var(--card); box-shadow: inset 0 0 0 1px var(--hair-strong), var(--shadow); }
+html[data-theme="light"] th { background: #F6F3EE; }
+html[data-theme="light"] .hero { isolation: isolate; }
+html[data-theme="light"] body { overflow-x: clip; }

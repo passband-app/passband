@@ -213,7 +213,7 @@
     <main>
       <section class="hero">
         <p class="eyebrow"><b>Security</b></p>
-        <h1>Security Model</h1>
+        <h1>Security model</h1>
         <p class="lede">How Passband and its daemon, squelchd, handle untrusted mail, secrets and access.</p>
       </section>
 
@@ -356,7 +356,7 @@ so merely dropping the frame leaves a live callback target.</li>
 </ul></div>
 <p class="sec-num">&sect;3</p>
 <h2 id="s3">Image loading and trackers</h2>
-<p class="sec-lede">Images can load, but only through Passband&#39;s own fetcher: no cookies, no referrer. Tracking pixels are removed unless the sender is someone you write to and Gmail vouches for them.</p>
+<p class="sec-lede">Images can load, but only through Passband&#39;s own fetcher, which sends no cookies or referrer. Tracking pixels are removed unless the sender is someone you write to and Gmail vouches for them.</p>
 <div class="inv"><p class="lbl">Invariant</p><p>Remote images may load, but only through our own audited fetch path,
 never with cookies or a referrer, and never for a reference we did not mint.
 Tracking pixels are stripped from mail whose sender the user has never written to.</p></div>
@@ -1746,7 +1746,7 @@ depend on this job&#39;s cookies.</li>
 </ul></div>
 <p class="sec-num">&sect;8</p>
 <h2 id="s8">Agent door authentication</h2>
-<p class="sec-lede">On hosted, only you can use your mailbox&#39;s agent door, with a sign-in that opens nothing else. If the setup is incomplete the door stays shut rather than falling open.</p>
+<p class="sec-lede">On hosted, only you can use your mailbox&#39;s agent door, with a sign-in that opens nothing else. If the setup is incomplete, the door stays shut.</p>
 <div class="inv"><p class="lbl">Invariant</p><p>On a hosted tenant, only the owner of that tenant&#39;s mailbox can use
 its agent door, and only through a credential that cannot open the human door. A
 daemon whose agent-door settings are incomplete serves nothing on <code>/mcp</code>. A
@@ -2488,5 +2488,6 @@ for more of an attendee than the mask names in a request whose answer is stored.
       </div>
       <p class="foot-legal">&copy; 2026 Passband. All rights reserved.</p>
     </footer>
+    <script type="module" src="/track.js"></script>
   </body>
 </html>

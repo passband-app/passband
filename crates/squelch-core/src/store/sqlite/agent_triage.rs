@@ -29,6 +29,9 @@ const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arr
              LEFT JOIN agent_job_lanes lane ON lane.job_id=j.id
              WHERE j.account_id=?1 AND j.state IN ('queued','leased') AND (j.kind=?2 OR (?2 IN ('investigation','initial_investigation') AND j.kind IN ('triage','access')))
                AND (?2!='initial_investigation' OR j.trigger NOT LIKE 'revisit:%')
+               AND (?5=0 OR (?5=1)=(j.kind='triage' AND COALESCE(lane.foreground,0)=0
+                   AND j.trigger NOT LIKE 'manual:%' AND j.trigger NOT LIKE 'revisit:%'
+                   AND j.trigger NOT LIKE 'correction:%' AND j.trigger!='archive_access'))
                AND j.available_at<=?3 AND (j.state='queued' OR (j.state='leased' AND j.lease_until<=?3))
                AND (j.kind NOT IN ('triage','access') OR NOT EXISTS(
                    SELECT 1 FROM message_translations tr WHERE tr.message_id=j.message_id
@@ -44,6 +47,22 @@ const CLAIM_JOB_SQL: &str = "SELECT j.id,j.message_id,j.trigger,j.attempts,j.arr
                  ELSE 2 END,
                  COALESCE(lane.foreground,0) DESC,
                  j.trigger NOT LIKE 'revisit:event_ended:%',j.available_at,j.id LIMIT 1";
+
+/// The claim's lane, from a prefix on its kind: `batch:` takes only the
+/// work the batch lane may take (a background triage nobody is waiting on:
+/// not foreground, not a person's `manual:` request or `correction:`, not a
+/// revisit, not an archive access check), `live:` everything else, and no prefix both, as
+/// before there were two lanes. The batch lane's jobs are the ones it can
+/// answer late; everything else stays on the synchronous pass.
+fn claim_lane(kind: &str) -> (i64, &str) {
+    if let Some(kind) = kind.strip_prefix("batch:") {
+        (1, kind)
+    } else if let Some(kind) = kind.strip_prefix("live:") {
+        (2, kind)
+    } else {
+        (0, kind)
+    }
+}
 
 fn json<T: serde::Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).map_err(|e| CoreError::Other(e.into()))
@@ -2085,10 +2104,11 @@ impl AgentTriageStore for SqliteStore {
         let token: String = tx
             .prepare_cached("SELECT lower(hex(randomblob(16)))")?
             .query_row([], |r| r.get(0))?;
+        let (lane, kind) = claim_lane(kind);
         let row = tx
             .prepare_cached(CLAIM_JOB_SQL)?
             .query_row(
-                params![account, kind, now.to_rfc3339(), now.timestamp()],
+                params![account, kind, now.to_rfc3339(), now.timestamp(), lane],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
@@ -7184,6 +7204,84 @@ mod tests {
     }
 
     #[test]
+    fn batch_and_live_claims_split_background_triage_from_everything_else() {
+        let store = fixture();
+        // Background triage nobody waits on: the batch lane's.
+        store
+            .enqueue_agent_triage(1, 1, "migration", false)
+            .unwrap();
+        // A person's request stays live.
+        store
+            .enqueue_agent_triage(1, 2, "manual:new", false)
+            .unwrap();
+        let claim = |kind: &str| {
+            store
+                .claim_agent_job(1, kind, Utc::now(), 60)
+                .unwrap()
+                .map(|job| job.message_id)
+        };
+        assert_eq!(claim("batch:initial_investigation"), Some(1));
+        assert_eq!(
+            claim("batch:initial_investigation"),
+            None,
+            "the batch lane never takes a person's request"
+        );
+        assert_eq!(claim("live:initial_investigation"), Some(2));
+        assert_eq!(claim("live:initial_investigation"), None);
+    }
+
+    #[test]
+    fn a_live_claim_leaves_background_triage_and_an_unprefixed_one_takes_it() {
+        let store = fixture();
+        store
+            .enqueue_agent_triage(1, 1, "migration", false)
+            .unwrap();
+        // An arrival is never the batch lane's.
+        store.enqueue_agent_triage(1, 2, "arrival", true).unwrap();
+        assert!(
+            store
+                .claim_agent_job(1, "batch:initial_investigation", Utc::now(), 60)
+                .unwrap()
+                .is_some_and(|job| job.message_id == 1)
+        );
+        assert!(
+            store
+                .claim_agent_job(1, "batch:initial_investigation", Utc::now(), 60)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agent_triage_jobs SET state='queued',lease_until=NULL WHERE message_id=1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_agent_job(1, "live:investigation", Utc::now(), 60)
+                .unwrap()
+                .map(|job| job.message_id),
+            Some(2)
+        );
+        assert!(
+            store
+                .claim_agent_job(1, "live:investigation", Utc::now(), 60)
+                .unwrap()
+                .is_none()
+        );
+        // Batching off: the one pass takes everything, as before.
+        assert_eq!(
+            store
+                .claim_agent_job(1, "investigation", Utc::now(), 60)
+                .unwrap()
+                .map(|job| job.message_id),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn manual_request_precedes_migration_then_migration_resumes() {
         let store = fixture();
         store
@@ -7228,7 +7326,8 @@ mod tests {
                         1,
                         "investigation",
                         Utc::now().to_rfc3339(),
-                        Utc::now().timestamp()
+                        Utc::now().timestamp(),
+                        0
                     ],
                     |r| r.get::<_, String>(3),
                 )

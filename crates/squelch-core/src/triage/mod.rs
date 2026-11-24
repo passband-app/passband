@@ -9,6 +9,7 @@ pub mod agent;
 pub mod agent_config;
 pub mod amazon;
 pub mod auth_pairing;
+pub mod batch;
 pub mod calendar;
 pub mod condense;
 pub mod context;

@@ -649,6 +649,9 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// disables LLM triage gracefully: rows stay queued, one stderr notice,
     /// sync continues. The key is never logged.
     stage2_llm: Option<ResolvedLlm>,
+    /// The batch API behind background investigations (`triage::batch`),
+    /// used only while [`Self::background_batcher`] says so.
+    batcher: Arc<crate::triage::batch::Batcher>,
     /// Embedder OVERRIDE; usually `None`, with [`SyncEngine::embedder`] falling
     /// back to the store's. Resolving per tick is what lets a LATE-attached
     /// embedder be picked up without a restart.
@@ -992,6 +995,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             );
         }
         let gmail_budget = Arc::new(GmailBudget::new(config.sync.gmail_quota_profile));
+        let batcher = crate::triage::batch::Batcher::new(
+            http.clone(),
+            crate::triage::batch::Pacing {
+                max_wait: Duration::from_secs(config.triage.agent.batch_wait_secs),
+                ..Default::default()
+            },
+        );
         let translator = crate::translate::TranslateClient::from_config(&config)
             .map(|c| Arc::new(c) as Arc<dyn crate::translate::TranslateBackend>);
         Self {
@@ -1005,6 +1015,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             gmail_quota_backoff: Duration::from_secs(1),
             gmail_quota_retry_cap: GMAIL_QUOTA_RETRY_CAP,
             stage2_llm,
+            batcher,
             embedder: None,
             embedder_gate: None,
             refresh: Arc::new(tokio::sync::Notify::new()),
@@ -1686,6 +1697,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let mut notify_shutdown = shutdown.clone();
         let mut archive_shutdown = shutdown.clone();
         let mut translate_shutdown = shutdown.clone();
+        let mut batch_shutdown = shutdown.clone();
         tokio::select! {
             polled = async {
                 if backfill_first {
@@ -1702,6 +1714,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // The same: a Gmail error inside the walk is the walk's to wait
             // out, never a reason to bounce the lifecycle.
             () = self.archive_lane(&mut archive_shutdown) => Ok(()),
+            // The same. Its own lane so a batch's minutes never hold up the
+            // refine lane's triage of new mail (`triage::batch`).
+            () = self.agent_batch_lane(&mut batch_shutdown) => Ok(()),
         }
     }
 
@@ -14192,6 +14207,167 @@ Q0/00yfa39rgtJLa0DnOoA==
         engine.process_agent_job(job, &llm, &day).await;
         assert_eq!(calls.load(Ordering::Relaxed), 1, "the model was asked");
         assert_eq!(store.retriage_progress(account).unwrap().budget_parked, 0);
+        server.abort();
+    }
+
+    /// BACKGROUND TRIAGE THROUGH THE BATCH API, END TO END: with batching on
+    /// (the default) and an Anthropic endpoint, the live pass leaves a
+    /// migration job alone, the batch lane sends its turn as a batch, the
+    /// answer commits, and its usage books under `stage2_batch` at half price.
+    #[tokio::test]
+    async fn background_triage_runs_through_a_batch_and_books_half_price() {
+        use crate::store::agent_triage::AgentTriageStore;
+        use crate::triage::decision::*;
+        let (store, account) = store_at_cursor(Some(100));
+        let raw = fixture(
+            account,
+            "batched",
+            "From: news@shop.example\r\nSubject: Sale\r\n\r\nEverything is on sale.",
+            false,
+        );
+        let parsed = ingest_with_rules(&raw, &Stage1Config::default(), Utc::now(), &[], |_| false);
+        let id = store.ingest_message(&parsed).unwrap();
+        // Only background work queued: the cutover's.
+        store.execute_batch_for_test("UPDATE agent_triage_jobs SET state='completed'");
+        store
+            .enqueue_agent_triage(account, id, "migration", false)
+            .unwrap();
+        let evidence = vec![EvidenceRef {
+            message_id: id,
+            location: "body".into(),
+        }];
+        let decision = MessageDecision {
+            kinds: vec![EmailKind::Promotional],
+            summary: "A sale".into(),
+            reason: "Promotion".into(),
+            external_access: AccessAssessment {
+                restricted: false,
+                reason: "No access credentials".into(),
+                evidence: evidence.clone(),
+            },
+            attention: ThreadAttentionDecision {
+                relevant_message_ids: vec![id],
+                evidence,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let message = json!({
+            "stop_reason": "tool_use",
+            "content": [{"type": "tool_use", "name": "submit_triage_step",
+                "input": {"result": {"step": "finish", "decision": decision}}}],
+            "usage": {"input_tokens": 1000, "output_tokens": 100}
+        });
+        let created = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let sync_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (seen, sync_count) = (created.clone(), sync_calls.clone());
+        let results = created.clone();
+        let app = Router::new()
+            .route(
+                "/v1/messages",
+                axum::routing::post(move || {
+                    sync_count.fetch_add(1, Ordering::Relaxed);
+                    async { StatusCode::SERVICE_UNAVAILABLE }
+                }),
+            )
+            .route(
+                "/v1/messages/batches",
+                axum::routing::post(move |Json(body): Json<Value>| {
+                    seen.lock()
+                        .unwrap()
+                        .extend(body["requests"].as_array().unwrap().clone());
+                    async { Json(json!({"id": "b0", "processing_status": "in_progress"})) }
+                }),
+            )
+            .route(
+                "/v1/messages/batches/b0",
+                axum::routing::get(|| async {
+                    Json(json!({"id": "b0", "processing_status": "ended"}))
+                }),
+            )
+            .route(
+                "/v1/messages/batches/b0/results",
+                axum::routing::get(move || {
+                    let lines = results
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|r| {
+                            json!({"custom_id": r["custom_id"],
+                                "result": {"type": "succeeded", "message": message.clone()}})
+                            .to_string()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    async move { lines }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/v1/messages", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::Anthropic,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut engine = engine(store.clone(), account, "http://127.0.0.1:1");
+        engine.stage2_llm = Some(llm);
+        engine.batcher = crate::triage::batch::Batcher::new(
+            reqwest::Client::new(),
+            crate::triage::batch::Pacing {
+                quiet: Duration::from_millis(20),
+                poll: Duration::from_millis(20),
+                max_wait: Duration::from_secs(30),
+            },
+        );
+        assert!(engine.background_batcher().is_some());
+        assert!(
+            store.external_agent_decision(account, id).is_err(),
+            "no decision before the batch"
+        );
+
+        assert!(
+            !engine.agent_triage_pass().await,
+            "the live pass leaves background work to the batch lane"
+        );
+        assert!(engine.agent_batch_pass().await);
+        assert_eq!(
+            sync_calls.load(Ordering::Relaxed),
+            0,
+            "nothing went synchronously"
+        );
+        let sent = created.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["params"]["output_config"]["effort"], "low");
+        assert!(
+            store.external_agent_decision(account, id).is_ok(),
+            "the batched answer committed"
+        );
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let batch = store
+            .category_usage_since(account, &day, crate::metrics::STAGE2_BATCH_USAGE_CATEGORY)
+            .unwrap();
+        assert_eq!((batch.calls, batch.input_tokens), (1, 1000));
+        let sync = store.category_usage_since(account, &day, "stage2").unwrap();
+        assert_eq!(sync.calls, 0, "batched usage is not booked as synchronous");
+        // Priced at half the synchronous rate by the cost estimator.
+        let line = |category: &str| crate::metrics::LlmCategoryUsage {
+            category: category.into(),
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            calls: 1,
+        };
+        let config = Config::default();
+        let full = crate::metrics::estimate_cost_usd(&[line("stage2")], &config);
+        let half = crate::metrics::estimate_cost_usd(
+            &[line(crate::metrics::STAGE2_BATCH_USAGE_CATEGORY)],
+            &config,
+        );
+        assert!(
+            full > 0.0 && (half - full / 2.0).abs() < 1e-9,
+            "{full} vs {half}"
+        );
         server.abort();
     }
 

@@ -159,6 +159,35 @@ pub struct AgentConnection<'a> {
     pub provider: Stage2Provider,
     pub model: &'a str,
     pub effort: Option<&'a str>,
+    /// Send every turn through the batch API (`triage::batch`). Only the
+    /// background batch lane sets it; its deadlines are then
+    /// [`batched_turn_secs`] a turn instead of the configured `timeout_secs`.
+    pub batch: Option<&'a std::sync::Arc<crate::triage::batch::Batcher>>,
+}
+
+/// One batched turn's wall clock: the batch's longest wait, a poll past it
+/// for the cancel to land, and the usual slack.
+pub fn batched_turn_secs(batcher: &crate::triage::batch::Batcher) -> u64 {
+    let pacing = batcher.pacing();
+    (pacing.max_wait + pacing.poll).as_secs() + crate::triage::agent_config::DEADLINE_SLACK_SECS
+}
+
+/// A run's wall clock: [`AgentConfig::run_deadline_secs`], or for a batched
+/// run the same arithmetic on [`batched_turn_secs`]. The worker sizes the
+/// job's lease from it, so a run that uses all of it is never reclaimed from
+/// under itself.
+///
+/// [`AgentConfig::run_deadline_secs`]: crate::triage::agent_config::AgentConfig::run_deadline_secs
+pub fn run_deadline_secs(
+    agent: &crate::triage::agent_config::AgentConfig,
+    batch: Option<&crate::triage::batch::Batcher>,
+) -> u64 {
+    match batch {
+        None => agent.run_deadline_secs(),
+        Some(batcher) => batched_turn_secs(batcher)
+            .saturating_mul((agent.max_model_turns.max(1) as u64).saturating_add(1))
+            .min(crate::triage::agent_config::MAX_TIMEOUT_SECS),
+    }
 }
 /// The failure kind of a run cut by a deadline, its own turn's or the whole
 /// run's. The worker's "two in a row and the job is failed" rule matches on
@@ -202,7 +231,10 @@ pub async fn run_agent(
     // the ceiling on the whole run, every turn and every evidence read, so
     // nothing here can outlive the job's lease.
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(config.agent.run_deadline_secs()),
+        std::time::Duration::from_secs(run_deadline_secs(
+            &config.agent,
+            connection.batch.map(|batcher| &**batcher),
+        )),
         run_bounded(connection, config, context, reader, &mut progress),
     )
     .await;
@@ -285,7 +317,10 @@ async fn run_bounded(
         // it are not what overran. The request's own timeout sits behind the
         // deadline, so the shared client's (sized for a Gmail fetch) cannot
         // cut a longer turn first as a transport failure.
-        let deadline = std::time::Duration::from_secs(config.agent.timeout_secs);
+        let deadline = std::time::Duration::from_secs(match connection.batch {
+            Some(batcher) => batched_turn_secs(batcher),
+            None => config.agent.timeout_secs,
+        });
         let step = tokio::time::timeout(
             deadline,
             llm::classify_agent_step(
@@ -297,6 +332,7 @@ async fn run_bounded(
                 deadline.saturating_add(std::time::Duration::from_secs(
                     crate::triage::agent_config::DEADLINE_SLACK_SECS,
                 )),
+                connection.batch,
             ),
         )
         .await;
@@ -2702,6 +2738,7 @@ mod tests {
             provider: Stage2Provider::OpenAI,
             model: "test",
             effort: None,
+            batch: None,
         };
         let context = ContextSnapshot {
             thread_id: "thread".into(),
@@ -2771,6 +2808,7 @@ mod tests {
             provider: Stage2Provider::OpenAI,
             model: "test",
             effort: None,
+            batch: None,
         };
         let context = ContextSnapshot {
             thread_id: "thread".into(),
@@ -2818,6 +2856,7 @@ mod tests {
             provider: Stage2Provider::OpenAI,
             model: "test",
             effort: None,
+            batch: None,
         };
         let context = ContextSnapshot {
             thread_id: "thread".into(),
@@ -2891,6 +2930,7 @@ mod tests {
             provider: Stage2Provider::OpenAI,
             model: "test",
             effort: None,
+            batch: None,
         };
         let context = ContextSnapshot {
             thread_id: "thread".into(),
@@ -2952,6 +2992,7 @@ mod tests {
                 provider: Stage2Provider::OpenAI,
                 model: "test",
                 effort: None,
+                batch: None,
             };
             let context = ContextSnapshot {
                 thread_id: "thread".into(),
@@ -3046,6 +3087,7 @@ mod tests {
             provider: Stage2Provider::OpenAI,
             model: "test",
             effort: None,
+            batch: None,
         };
         let context = ContextSnapshot {
             thread_id: "thread".into(),
@@ -3090,6 +3132,7 @@ mod tests {
             provider: Stage2Provider::OpenAI,
             model: "test",
             effort: None,
+            batch: None,
         };
         let mut config = AgentTriageConfig::default();
         config.agent.max_model_turns = 1;

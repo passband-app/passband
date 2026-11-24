@@ -408,12 +408,21 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         } else {
             self.config.triage.agent.concurrency
         };
+        // While background work is batched, this pass leaves it to the batch
+        // lane ([`Self::agent_batch_pass`]) and takes everything else.
+        let live = self.background_batcher().is_some();
         let mut jobs = Vec::new();
         let mut revisits = 0;
         for _ in 0..concurrency {
             let kind =
                 if self.config.revisit.enabled && revisits < self.config.revisit.batch_per_cycle {
-                    "investigation"
+                    if live {
+                        "live:investigation"
+                    } else {
+                        "investigation"
+                    }
+                } else if live {
+                    "live:initial_investigation"
                 } else {
                     "initial_investigation"
                 };
@@ -449,6 +458,92 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         )
         .await;
         claimed
+    }
+
+    /// The batcher, while background investigations go through the batch
+    /// API: configured on (`agent.batch_background`, the default), an
+    /// Anthropic Messages endpoint to batch against, and no endpoint has
+    /// refused a batch this run. `None` sends background work through the
+    /// live pass, as before batching existed.
+    pub(super) fn background_batcher(&self) -> Option<&Arc<crate::triage::batch::Batcher>> {
+        let llm = self.stage2_llm.as_ref()?;
+        (self.config.triage.agent.batch_background
+            && llm.provider == Stage2Provider::Anthropic
+            && crate::triage::batch::base_of(&llm.url).is_some()
+            && self.batcher.available())
+        .then_some(&self.batcher)
+    }
+
+    /// One round of the batch lane: claim up to `agent.batch_jobs` background
+    /// investigations and run them together, every model turn through the
+    /// batch API, so their first turns go out as one batch. True when it
+    /// claimed anything. The same budget, cooldown and commit path as the
+    /// live pass; only the transport, the lease and the ledger line differ.
+    pub(super) async fn agent_batch_pass(&self) -> bool {
+        if Utc::now().timestamp() < self.agent_retry_after.load(Ordering::Relaxed) {
+            return false;
+        }
+        let (Some(llm), Some(batcher)) = (&self.stage2_llm, self.background_batcher()) else {
+            return false;
+        };
+        if self.config.triage.validate().is_err() {
+            return false;
+        }
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        // Each lease outlives the batched run's whole deadline (a batch's
+        // longest wait per turn), so a slow batch is never reclaimed from
+        // under the job waiting on it.
+        let lease =
+            (crate::triage::agent::run_deadline_secs(&self.config.triage.agent, Some(batcher))
+                + DEADLINE_SLACK_SECS) as i64;
+        let mut jobs = Vec::new();
+        for _ in 0..self.config.triage.agent.batch_jobs {
+            match self.store.claim_agent_job_sized(
+                self.account_id,
+                "batch:initial_investigation",
+                Utc::now(),
+                lease,
+                lease,
+            ) {
+                Ok(Some(job)) => jobs.push(job),
+                Ok(None) => break,
+                Err(error) => {
+                    eprintln!("squelch: triage batch claim failed: {error}");
+                    break;
+                }
+            }
+        }
+        let claimed = !jobs.is_empty();
+        futures::future::join_all(
+            jobs.into_iter()
+                .map(|job| self.process_agent_job_via(job, llm, &day, Some(batcher))),
+        )
+        .await;
+        claimed
+    }
+
+    /// THE BATCH LANE: background investigations at half price
+    /// (`triage::batch`), beside the refine lane so a batch's minutes never
+    /// hold up triage of new mail. Idle (and spending nothing) while batching
+    /// is off, the poll has not succeeded, or there is nothing to claim.
+    /// Dropped with the other lanes, a batch in flight is lost and its jobs
+    /// are handed back (`ClaimGuard`) to be claimed again.
+    pub(super) async fn agent_batch_lane(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) {
+        let idle = Duration::from_secs(self.config.triage.agent.worker_poll_secs.max(1) * 15);
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            let claimed = self.poll_healthy.load(Ordering::Relaxed)
+                && self.background_batcher().is_some()
+                && self.agent_batch_pass().await;
+            if !claimed {
+                tokio::select! {
+                    () = tokio::time::sleep(idle) => {}
+                    _ = shutdown.changed() => {}
+                }
+            }
+        }
     }
 
     /// The caps `job` is charged against: [`investigation_budget_limits`],
@@ -492,6 +587,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// at shutdown, or when `run_lanes` ends the lanes), the job is handed
     /// back at once, see [`ClaimGuard`].
     pub(super) async fn process_agent_job(&self, job: AgentJob, llm: &ResolvedLlm, day: &str) {
+        self.process_agent_job_via(job, llm, day, None).await;
+    }
+
+    /// [`Self::process_agent_job`], its model turns sent through `batch`
+    /// when one is given (the batch lane's jobs).
+    async fn process_agent_job_via(
+        &self,
+        job: AgentJob,
+        llm: &ResolvedLlm,
+        day: &str,
+        batch: Option<&Arc<crate::triage::batch::Batcher>>,
+    ) {
         let mut guard = ClaimGuard {
             store: &*self.store,
             metrics: &self.metrics,
@@ -502,12 +609,33 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if job.kind == "access" {
             self.process_access_job(&job, llm, day).await;
         } else {
-            self.run_agent_job(&job, llm, day).await;
+            self.run_agent_job(&job, llm, day, batch).await;
         }
         guard.armed = false;
     }
 
-    async fn run_agent_job(&self, job: &AgentJob, llm: &ResolvedLlm, day: &str) {
+    async fn run_agent_job(
+        &self,
+        job: &AgentJob,
+        llm: &ResolvedLlm,
+        day: &str,
+        batch: Option<&Arc<crate::triage::batch::Batcher>>,
+    ) {
+        // A batched run's usage is billed at half price, so it books under a
+        // ledger category of its own (`STAGE2_BATCH_USAGE_CATEGORY`).
+        let bill = |usage: crate::triage::llm::Usage| {
+            let _ = match batch {
+                Some(_) => self.store.extract_bump_usage(
+                    self.account_id,
+                    day,
+                    crate::metrics::STAGE2_BATCH_USAGE_CATEGORY,
+                    usage.into(),
+                ),
+                None => self
+                    .store
+                    .stage2_bump_usage(self.account_id, day, usage.into()),
+            };
+        };
         let mut context = match self.store.load_agent_context(job) {
             Ok(context) => context,
             Err(_) => {
@@ -666,6 +794,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             provider: llm.provider,
             model: &base_model,
             effort,
+            batch,
         };
         let mut input_understanding = input.understanding;
         // The commit-path guard behind the prompt's "never repeat a memory
@@ -695,9 +824,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             );
             scrubbed_usage = run.usage.clone();
             for usage in &scrubbed_usage {
-                let _ = self
-                    .store
-                    .stage2_bump_usage(self.account_id, day, (*usage).into());
+                bill(*usage);
             }
             *reader.sources.lock().expect("evidence sources") = initial_sources;
             // The flag is off for the re-run: its tool reads too.
@@ -733,9 +860,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     "usage": run.usage,
                 });
                 for usage in run.usage {
-                    let _ = self
-                        .store
-                        .stage2_bump_usage(self.account_id, day, usage.into());
+                    bill(usage);
                 }
                 // Is each event one the user already has? One small call,
                 // only when the store has a candidate; a failure leaves the
@@ -786,7 +911,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     generation: episode,
                     at: now,
                 };
-                self.handle_agent_failure(job, error, day, &limits, false, start)
+                if batch.is_some() {
+                    // The failure's usage was a batch's: bill it at its own
+                    // rate, and leave none for the handler to book again.
+                    let mut error = error;
+                    for usage in std::mem::take(&mut error.usage) {
+                        bill(usage);
+                    }
+                    self.handle_agent_failure(job, error, day, &limits, false, start)
+                } else {
+                    self.handle_agent_failure(job, error, day, &limits, false, start)
+                }
             }
         }
     }
@@ -1107,6 +1242,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             provider: llm.provider,
             model: &model,
             effort: notify.effort.as_deref(),
+            batch: None,
         };
         match crate::triage::access::run_access(
             connection,

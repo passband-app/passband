@@ -314,7 +314,10 @@ pub trait AgentTriageStore: Send + Sync {
         arrival_eligible: bool,
     ) -> Result<()>;
     /// `investigation` claims full triage and access assessments;
-    /// `initial_investigation` excludes autonomous revisits. Every kind gets
+    /// `initial_investigation` excludes autonomous revisits. A `batch:`
+    /// prefix narrows either to the background triage the batch lane answers
+    /// late, and `live:` to everything else (`sync::triage_worker`'s two
+    /// passes, when background batching is on). Every kind gets
     /// `lease_seconds`: [`Self::claim_agent_job_sized`] with one lease.
     fn claim_agent_job(
         &self,

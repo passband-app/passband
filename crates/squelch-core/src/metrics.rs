@@ -1520,7 +1520,25 @@ pub const PROFILE_USAGE_CATEGORY: &str = "profile";
 /// Does this ledger category run the investigation model (stage 2's)? The one
 /// list both cost estimators consult, for the reason [`runs_notify_model`] is.
 pub fn runs_investigation_model(category: &str) -> bool {
-    category == "stage2" || category == PROFILE_USAGE_CATEGORY
+    category == "stage2"
+        || category == STAGE2_BATCH_USAGE_CATEGORY
+        || category == PROFILE_USAGE_CATEGORY
+}
+
+/// The ledger category for investigations answered through the Message
+/// Batches API (`triage::batch`): the stage-2 model at half its price. Its
+/// own line so both cost estimators can price it, and so the spend split
+/// between the two transports stays visible.
+pub const STAGE2_BATCH_USAGE_CATEGORY: &str = "stage2_batch";
+
+/// What a ledger category pays of its model's list price: half for the batch
+/// API, all of it for everything else. Both cost estimators apply it.
+pub fn price_factor(category: &str) -> f64 {
+    if category == STAGE2_BATCH_USAGE_CATEGORY {
+        0.5
+    } else {
+        1.0
+    }
 }
 
 /// Does this ledger category run [`crate::config::NotifyConfig::model`]? The
@@ -1584,14 +1602,15 @@ pub fn estimate_cost_usd(usage: &[LlmCategoryUsage], config: &Config) -> f64 {
                     config.stage1.price_out_per_mtok,
                 )
             };
-            (u.input_tokens as f64 / 1_000_000.0) * price_in
-                + (u.output_tokens as f64 / 1_000_000.0) * price_out
-                + (u.cache_creation_tokens as f64 / 1_000_000.0)
-                    * price_in
-                    * crate::config::CACHE_WRITE_INPUT_MULT
-                + (u.cache_read_tokens as f64 / 1_000_000.0)
-                    * price_in
-                    * crate::config::CACHE_READ_INPUT_MULT
+            price_factor(&u.category)
+                * ((u.input_tokens as f64 / 1_000_000.0) * price_in
+                    + (u.output_tokens as f64 / 1_000_000.0) * price_out
+                    + (u.cache_creation_tokens as f64 / 1_000_000.0)
+                        * price_in
+                        * crate::config::CACHE_WRITE_INPUT_MULT
+                    + (u.cache_read_tokens as f64 / 1_000_000.0)
+                        * price_in
+                        * crate::config::CACHE_READ_INPUT_MULT)
         })
         .sum()
 }

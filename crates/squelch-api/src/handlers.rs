@@ -5159,6 +5159,10 @@ pub async fn get_usage(
                 state.stage1_price_out_per_mtok,
             )
         };
+        // The batch API's half price (`stage2_batch`), on every rate the
+        // category is costed at below.
+        let factor = squelch_core::metrics::price_factor(name);
+        let (price_in, price_out) = (price_in * factor, price_out * factor);
         let (out_rows, totals) = rollup(rows.clone(), price_in, price_out);
         categories.insert(
             name.clone(),

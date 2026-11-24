@@ -82,18 +82,19 @@
 
       <section class="section">
         <p class="num">01 &middot; HOW IT WORKS</p>
-        <h2>Two pieces. <em>One passband.</em></h2>
+        <h2>A daemon that sorts, <em>an app to read in.</em></h2>
         <p class="intro">
           <strong>squelchd</strong> is a daemon that connects to your Gmail
           mailbox over the Gmail API, syncs your messages, and scores each one.
-          <strong>Passband</strong> is the app you read it in. The name is the
-          point: in radio, the passband is the band a filter lets through. The inbox holds what made it
-          through; everything else is filed without asking you first.
+          <strong>Passband</strong> is the app you read it in. The name comes
+          from radio, where the passband is the band of frequencies a filter
+          lets through. Your inbox holds what made it through, and the rest is
+          filed without asking you first.
         </p>
         <div class="facts">
           <div>
             <h3>Triage</h3>
-            <p>Every incoming message is scored and sorted, using rules you write in plain language plus an importance model. Mail from people you correspond with is always let through.</p>
+            <p>Every incoming message is scored and sorted by rules you write in plain language and an importance model. Mail from people you write to always gets through.</p>
           </div>
           <div>
             <h3>Read</h3>
@@ -101,7 +102,7 @@
           </div>
           <div>
             <h3>Act</h3>
-            <p>Archive, label, mark read or unread, and park a thread until a time you name, so it comes back when it is relevant.</p>
+            <p>Archive, label, mark read or unread, and park a thread until a time you pick, when it comes back to the inbox.</p>
           </div>
           <div>
             <h3>Write</h3>
@@ -109,7 +110,7 @@
           </div>
           <div>
             <h3>Extract</h3>
-            <p>Deadlines, verification codes, and package tracking are pulled out of your mail as cards, so the one line that mattered is where you can see it.</p>
+            <p>Deadlines, verification codes, and package tracking are pulled out of your mail as cards, so you can see the due date or the code without opening the email.</p>
           </div>
           <div>
             <h3>Ask</h3>
@@ -120,11 +121,11 @@
 
       <section class="section">
         <p class="num">02 &middot; YOUR GOOGLE ACCOUNT</p>
-        <h2>One Gmail permission. <em>No others required.</em></h2>
+        <h2>One Gmail permission, <em>two optional extras.</em></h2>
         <p class="intro">
-          Passband connects to Gmail through the Gmail API with your consent,
-          over OAuth, using one permission. Your profile and Google Calendar are
-          asked for too, and both are optional.
+          Passband connects to Gmail through the Gmail API over OAuth, with your
+          consent, using one permission. It also asks for your profile and
+          Google Calendar, and you can decline both.
         </p>
         <div class="table-wrap scopes">
           <table>
@@ -148,17 +149,17 @@
         <p class="note">
           The one permission can read and write, so Passband keeps them apart
           in its own code: the sync path loads its own credential slot and has
-          no code that archives, labels or sends. What
-          is stored, where it lives, and who can reach it is set out in full in
-          the <a href="/privacy">Privacy Policy</a> and on the
-          <a href="/trust">trust page</a>.
+          no code that archives, labels or sends. The
+          <a href="/privacy">Privacy Policy</a> and the
+          <a href="/trust">trust page</a> say what is stored, where it lives,
+          and who can reach it.
         </p>
       </section>
 
       <section class="section">
         <p class="num">03 &middot; TWO WAYS TO RUN IT</p>
         <h2>Yours, or ours.</h2>
-        <p class="intro">Same daemon, same app. The difference is whose disk your mail is on.</p>
+        <p class="intro">The daemon and the app are the same either way. What changes is whose disk your mail is on.</p>
         <div class="tiers">
           <div class="tier">
             <span class="tag">Self-host</span>
@@ -168,7 +169,7 @@
           <div class="tier">
             <span class="tag">Hosted</span>
             <h3>We run it for you</h3>
-            <p>One isolated instance per account, which is what makes always-on triage and mobile push possible. Your mail and your Google refresh token are stored on our servers; the <a href="/privacy">Privacy Policy</a> explains exactly what that means. Invitation-only while the product is in preview.</p>
+            <p>Each account gets its own isolated instance, which is what lets triage run around the clock and push reach your phone. Your mail and your Google refresh token are stored on our servers; the <a href="/privacy">Privacy Policy</a> covers how. Invitation-only while the product is in preview.</p>
           </div>
         </div>
       </section>

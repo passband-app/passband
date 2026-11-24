@@ -38,7 +38,7 @@ function slug(s: string): string {
 const SUMMARIES: Record<string, string> = {
   "1": "Every incoming email is scrubbed once, the moment it arrives, so nothing that could run code is ever stored.",
   "2": "Even scrubbed mail opens inside a locked-down viewer. There are five separate locks, and any one of them would stop scripts, network calls and navigation on its own.",
-  "3": "Images can load, but only through Passband&#39;s own fetcher: no cookies, no referrer. Tracking pixels are removed unless the sender is someone you write to and Gmail vouches for them.",
+  "3": "Images can load, but only through Passband&#39;s own fetcher, which sends no cookies or referrer. Tracking pixels are removed unless the sender is someone you write to and Gmail vouches for them.",
   "4": "You can read all of your mail. AI agents, the built-in assistant included, cannot read login codes or reset links, and cannot read anything that has not been checked yet.",
   "4b": "Spam is kept for you to look at, and away from everything else: no model reads it, no agent sees it, and it never notifies you.",
   "4c": "Agents can leave drafts by default and can send only if you turn that on. Everything an agent writes goes through the same pipeline and checks as your own mail, with fewer options.",
@@ -46,7 +46,7 @@ const SUMMARIES: Record<string, string> = {
   "5": "Before mail leaves, Passband looks for anything shaped like a secret. If it finds one it stops and asks, and it never copies the secret anywhere.",
   "6": "The assistant sees only what the app is allowed to show it, and anything that would change your Gmail waits for your tap.",
   "7": "Passband follows an unsubscribe link only after you ask, only for authenticated mail, only out to the public internet, and presses at most one button.",
-  "8": "On hosted, only you can use your mailbox&#39;s agent door, with a sign-in that opens nothing else. If the setup is incomplete the door stays shut rather than falling open.",
+  "8": "On hosted, only you can use your mailbox&#39;s agent door, with a sign-in that opens nothing else. If the setup is incomplete, the door stays shut.",
   "9": "Your calendar is shown to you and nobody else: no agents, no logs, no triage. Two narrow, documented exceptions let a small model shorten a place name and plan reminders.",
 };
 

@@ -2851,7 +2851,7 @@ CREATE TABLE IF NOT EXISTS sender_research (
     sender_addr   TEXT NOT NULL,
     status        TEXT NOT NULL
                   CHECK (status IN ('queued','running','done','unavailable','failed')),
-    trigger       TEXT NOT NULL CHECK (trigger IN ('auto','on_demand')),
+    "trigger"     TEXT NOT NULL CHECK ("trigger" IN ('auto','on_demand')),
     result_json   TEXT,
     failure       TEXT,
     web_searches  INTEGER NOT NULL DEFAULT 0,
@@ -2859,6 +2859,6 @@ CREATE TABLE IF NOT EXISTS sender_research (
     researched_at TEXT,
     PRIMARY KEY(account_id, sender_addr)
 );
--- The refine lane's claim: the oldest queued row.
+-- The refine lane's claim: the newest queued row.
 CREATE INDEX IF NOT EXISTS idx_sender_research_queue
     ON sender_research(account_id, requested_at) WHERE status = 'queued';

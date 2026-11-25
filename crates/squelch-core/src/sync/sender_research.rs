@@ -1,6 +1,7 @@
 //! The sync engine's touch point with sender research
 //! (docs/SENDER-RESEARCH.md): one automatic round per refine round, at most
-//! one call, under the daily automatic cap. Everything else is
+//! one call, under the daily automatic cap, for a mailbox with the hidden
+//! `research` feature. Everything else is
 //! `triage::research`.
 
 use super::*;
@@ -10,12 +11,15 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// Cheap when idle (one budget read and one claim query), and gated like
     /// every other model spend in the refine lane.
     pub(super) async fn sender_research_pass(&self) {
-        if !self.config.research.enabled || !self.refine_can_spend() {
+        if !research::auto_enabled(&self.config.research, &self.features)
+            || !self.refine_can_spend()
+        {
             return;
         }
         match research::auto_round(
             &*self.store,
             &self.config.research,
+            &self.features,
             self.account_id,
             || ResearchClient::from_config(&self.config),
             Utc::now(),

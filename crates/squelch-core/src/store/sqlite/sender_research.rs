@@ -11,7 +11,7 @@ use crate::triage::research::{
     ResearchResult, ResearchStatus, SenderResearchRow, SubjectFields, Trigger,
 };
 
-const ROW_SQL: &str = "SELECT sender_addr, status, trigger, result_json, failure, web_searches,
+const ROW_SQL: &str = "SELECT sender_addr, status, \"trigger\", result_json, failure, web_searches,
             requested_at, researched_at
        FROM sender_research WHERE account_id = ?1 AND sender_addr = ?2";
 
@@ -69,11 +69,11 @@ fn begin_row(
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO sender_research
-             (account_id, sender_addr, status, trigger, result_json, failure, web_searches,
+             (account_id, sender_addr, status, \"trigger\", result_json, failure, web_searches,
               requested_at, researched_at)
          VALUES (?1, ?2, ?3, ?4, NULL, NULL, 0, ?5, NULL)
          ON CONFLICT(account_id, sender_addr) DO UPDATE SET
-             status = excluded.status, trigger = excluded.trigger, result_json = NULL,
+             status = excluded.status, \"trigger\" = excluded.\"trigger\", result_json = NULL,
              failure = NULL, web_searches = 0, requested_at = excluded.requested_at,
              researched_at = NULL",
         params![
@@ -159,11 +159,13 @@ impl SqliteStore {
               WHERE account_id = ?1 AND status = 'queued' AND requested_at < ?2",
             params![account_id, (now - max_age).to_rfc3339()],
         )?;
+        // NEWEST first: under a full cap the pitch that just arrived, the one
+        // the owner is about to read, goes before one from days ago.
         let addr: Option<String> = conn
             .query_row(
                 "SELECT sender_addr FROM sender_research
                   WHERE account_id = ?1 AND status = 'queued'
-                  ORDER BY requested_at, sender_addr LIMIT 1",
+                  ORDER BY requested_at DESC, sender_addr LIMIT 1",
                 params![account_id],
                 |r| r.get(0),
             )

@@ -134,6 +134,11 @@ fn cfg() -> ResearchConfig {
     ResearchConfig::default()
 }
 
+/// A mailbox with automatic research ticked.
+fn on() -> crate::features::Features {
+    crate::features::Features::pinned([crate::features::RESEARCH])
+}
+
 #[tokio::test]
 async fn the_request_carries_the_senders_fields_and_nothing_from_the_mail_or_the_owner() {
     let (store, acct) = store();
@@ -145,11 +150,15 @@ async fn the_request_carries_the_senders_fields_and_nothing_from_the_mail_or_the
         pitch(OutreachShape::Personal, OutreachWanted::Likely),
     );
     let now = Utc::now();
-    assert!(research::queue_for_decision(&store, &cfg(), acct, SENDER, &decision, now).unwrap());
+    assert!(
+        research::queue_for_decision(&store, &cfg(), &on(), acct, SENDER, &decision, true, now)
+            .unwrap()
+    );
     let p = provider(200, answered()).await;
     let round = research::auto_round(
         &store,
         &cfg(),
+        &on(),
         acct,
         || Some(client(&p.url, Stage2Provider::Anthropic)),
         now,
@@ -193,7 +202,7 @@ async fn the_request_carries_the_senders_fields_and_nothing_from_the_mail_or_the
     assert!(request["output_config"].get("format").is_none());
     let tools = request["tools"].as_array().unwrap();
     assert_eq!(tools[0]["name"], research::SUBMIT_TOOL);
-    assert_eq!(tools[1]["type"], "web_search_20260209");
+    assert_eq!(tools[1]["type"], "web_search_20250305");
     assert_eq!(tools[1]["max_uses"], 5);
     assert_eq!(request["tool_choice"]["type"], "auto");
 
@@ -233,7 +242,8 @@ async fn only_a_pitch_worth_research_queues_its_sender() {
         let from = format!("sender{i}@lumen.example");
         let decision = pitched(&store, acct, &format!("g{i}"), &from, pitch(shape, wanted));
         assert!(
-            !research::queue_for_decision(&store, &cfg(), acct, &from, &decision, now).unwrap()
+            !research::queue_for_decision(&store, &cfg(), &on(), acct, &from, &decision, true, now)
+                .unwrap()
         );
         assert_eq!(store.sender_research(acct, &from).unwrap(), None);
     }
@@ -249,10 +259,19 @@ async fn only_a_pitch_worth_research_queues_its_sender() {
         enabled: false,
         ..cfg()
     };
-    assert!(!research::queue_for_decision(&store, &off, acct, SENDER, &decision, now).unwrap());
-    assert!(research::queue_for_decision(&store, &cfg(), acct, SENDER, &decision, now).unwrap());
+    assert!(
+        !research::queue_for_decision(&store, &off, &on(), acct, SENDER, &decision, true, now)
+            .unwrap()
+    );
+    assert!(
+        research::queue_for_decision(&store, &cfg(), &on(), acct, SENDER, &decision, true, now)
+            .unwrap()
+    );
     // Queued once: a second pitch does not queue the sender again.
-    assert!(!research::queue_for_decision(&store, &cfg(), acct, SENDER, &decision, now).unwrap());
+    assert!(
+        !research::queue_for_decision(&store, &cfg(), &on(), acct, SENDER, &decision, true, now)
+            .unwrap()
+    );
 }
 
 /// THE CACHE: within 90 days a sender is never researched again, by either
@@ -298,15 +317,28 @@ async fn a_sender_is_researched_once_in_the_cache_window() {
             Begin::Standing(_)
         ));
         assert!(
-            !research::queue_for_decision(&store, &cfg(), acct, SENDER, &decision, later).unwrap()
+            !research::queue_for_decision(
+                &store,
+                &cfg(),
+                &on(),
+                acct,
+                SENDER,
+                &decision,
+                true,
+                later
+            )
+            .unwrap()
         );
     }
     assert_eq!(p.calls.load(Ordering::SeqCst), 1);
 
     // A miss again once the window has passed.
     let later = t0 + chrono::Duration::days(91);
-    assert!(research::queue_for_decision(&store, &cfg(), acct, SENDER, &decision, later).unwrap());
-    let round = research::auto_round(&store, &cfg(), acct, || Some(c.clone()), later)
+    assert!(
+        research::queue_for_decision(&store, &cfg(), &on(), acct, SENDER, &decision, true, later)
+            .unwrap()
+    );
+    let round = research::auto_round(&store, &cfg(), &on(), acct, || Some(c.clone()), later)
         .await
         .unwrap();
     assert!(matches!(
@@ -335,15 +367,18 @@ async fn automatic_runs_stop_at_the_daily_cap_and_on_demand_runs_do_not_count() 
             from,
             pitch(OutreachShape::Personal, OutreachWanted::Likely),
         );
-        assert!(research::queue_for_decision(&store, &capped, acct, from, &decision, now).unwrap());
+        assert!(
+            research::queue_for_decision(&store, &capped, &on(), acct, from, &decision, true, now)
+                .unwrap()
+        );
     }
     let p = provider(200, answered()).await;
     let c = client(&p.url, Stage2Provider::Anthropic);
-    let first = research::auto_round(&store, &capped, acct, || Some(c.clone()), now)
+    let first = research::auto_round(&store, &capped, &on(), acct, || Some(c.clone()), now)
         .await
         .unwrap();
     assert!(matches!(first, AutoRound::Ran { .. }));
-    let second = research::auto_round(&store, &capped, acct, || Some(c.clone()), now)
+    let second = research::auto_round(&store, &capped, &on(), acct, || Some(c.clone()), now)
         .await
         .unwrap();
     assert_eq!(second, AutoRound::Capped);
@@ -375,7 +410,7 @@ async fn automatic_runs_stop_at_the_daily_cap_and_on_demand_runs_do_not_count() 
 
     // Tomorrow the queue moves again.
     let tomorrow = now + chrono::Duration::days(1);
-    let next = research::auto_round(&store, &capped, acct, || Some(c.clone()), tomorrow)
+    let next = research::auto_round(&store, &capped, &on(), acct, || Some(c.clone()), tomorrow)
         .await
         .unwrap();
     assert!(matches!(next, AutoRound::Ran { .. }));
@@ -397,11 +432,14 @@ async fn research_without_the_tool_is_unavailable_and_breaks_nothing() {
     );
     let now = Utc::now();
     let day = now.format("%Y-%m-%d").to_string();
-    assert!(research::queue_for_decision(&store, &cfg(), acct, SENDER, &decision, now).unwrap());
+    assert!(
+        research::queue_for_decision(&store, &cfg(), &on(), acct, SENDER, &decision, true, now)
+            .unwrap()
+    );
     let p = provider(200, answered()).await;
     let openai = client(&p.url, Stage2Provider::OpenAI);
     assert!(!openai.available());
-    let round = research::auto_round(&store, &cfg(), acct, || Some(openai.clone()), now)
+    let round = research::auto_round(&store, &cfg(), &on(), acct, || Some(openai.clone()), now)
         .await
         .unwrap();
     assert_eq!(
@@ -438,8 +476,11 @@ async fn research_without_the_tool_is_unavailable_and_breaks_nothing() {
         other,
         pitch(OutreachShape::Personal, OutreachWanted::Likely),
     );
-    assert!(research::queue_for_decision(&store, &cfg(), acct, other, &decision, now).unwrap());
-    let round = research::auto_round(&store, &cfg(), acct, || None, now)
+    assert!(
+        research::queue_for_decision(&store, &cfg(), &on(), acct, other, &decision, true, now)
+            .unwrap()
+    );
+    let round = research::auto_round(&store, &cfg(), &on(), acct, || None, now)
         .await
         .unwrap();
     assert!(matches!(
@@ -474,8 +515,8 @@ async fn research_without_the_tool_is_unavailable_and_breaks_nothing() {
         Some("http_400:invalid_request_error")
     );
     assert_eq!(refused.calls.load(Ordering::SeqCst), 1);
-    // Stands for a day, so the card's button does not hammer a gateway that
-    // said no.
+    // Stands against the card for its retry window, and the refusal is
+    // remembered for the day (`a_refusal_is_remembered_for_the_day`).
     assert!(matches!(
         research::begin_on_demand(&store, &cfg(), acct, "r@lumen.example", now).unwrap(),
         Begin::Standing(_)
@@ -504,4 +545,214 @@ fn a_stale_queued_row_is_dropped_unrun() {
         None
     );
     assert_eq!(store.sender_research(acct, SENDER).unwrap(), None);
+}
+
+/// Automatic research is a hidden feature, and only a FRESH arrival queues:
+/// a backfill or a revisit decision on old mail never spends the day's cap.
+#[tokio::test]
+async fn only_a_fresh_arrival_with_the_feature_queues_and_the_pass_is_off_without_it() {
+    let (store, acct) = store();
+    let decision = pitched(
+        &store,
+        acct,
+        "g1",
+        SENDER,
+        pitch(OutreachShape::Personal, OutreachWanted::Likely),
+    );
+    let now = Utc::now();
+    let off = crate::features::Features::default();
+    assert!(
+        !research::queue_for_decision(&store, &cfg(), &off, acct, SENDER, &decision, true, now)
+            .unwrap()
+    );
+    assert!(
+        !research::queue_for_decision(&store, &cfg(), &on(), acct, SENDER, &decision, false, now)
+            .unwrap(),
+        "a backfill or revisit decision queues nothing"
+    );
+    assert_eq!(store.sender_research(acct, SENDER).unwrap(), None);
+    assert!(
+        research::queue_for_decision(&store, &cfg(), &on(), acct, SENDER, &decision, true, now)
+            .unwrap()
+    );
+    // Queued, but a mailbox without the feature never runs it.
+    let p = provider(200, answered()).await;
+    let c = client(&p.url, Stage2Provider::Anthropic);
+    let round = research::auto_round(&store, &cfg(), &off, acct, || Some(c.clone()), now)
+        .await
+        .unwrap();
+    assert_eq!(round, AutoRound::Off);
+    assert_eq!(p.calls.load(Ordering::SeqCst), 0);
+    // The owner's own click needs no feature.
+    assert!(matches!(
+        research::begin_on_demand(&store, &cfg(), acct, SENDER, now).unwrap(),
+        Begin::Run(_)
+    ));
+}
+
+/// Under a full cap, the pitch that just arrived goes first.
+#[test]
+fn the_automatic_claim_takes_the_newest_queued_sender() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let older = "old@lumen.example";
+    let newer = "new@lumen.example";
+    assert!(
+        store
+            .queue_sender_research(acct, older, now - chrono::Duration::hours(30), 90)
+            .unwrap()
+    );
+    assert!(store.queue_sender_research(acct, newer, now, 90).unwrap());
+    assert_eq!(
+        store
+            .claim_sender_research(acct, now, research::QUEUE_MAX_AGE)
+            .unwrap()
+            .as_deref(),
+        Some(newer)
+    );
+    assert_eq!(
+        store
+            .claim_sender_research(acct, now, research::QUEUE_MAX_AGE)
+            .unwrap()
+            .as_deref(),
+        Some(older)
+    );
+}
+
+/// A store error after the row is claimed still finishes it, as failed, so
+/// the card does not spin on a run nobody is making.
+#[tokio::test]
+async fn an_error_after_the_claim_finishes_the_row_as_failed() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    assert!(store.queue_sender_research(acct, SENDER, now, 90).unwrap());
+    // The subject read (after the claim) fails.
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("ALTER TABLE agent_message_decisions RENAME TO decisions_gone")
+        .unwrap();
+    let p = provider(200, answered()).await;
+    let c = client(&p.url, Stage2Provider::Anthropic);
+    assert!(
+        research::auto_round(&store, &cfg(), &on(), acct, || Some(c.clone()), now)
+            .await
+            .is_err()
+    );
+    let row = store.sender_research(acct, SENDER).unwrap().unwrap();
+    assert_eq!(row.status, ResearchStatus::Failed);
+    assert_eq!(row.failure.as_deref(), Some(research::INTERRUPTED));
+    assert_eq!(p.calls.load(Ordering::SeqCst), 0);
+}
+
+/// Once the endpoint refuses a research request, the rest of the day's
+/// senders are recorded unavailable without a request or a cap unit.
+#[tokio::test]
+async fn a_refusal_is_remembered_for_the_day() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let day = now.format("%Y-%m-%d").to_string();
+    let refused = provider(
+        400,
+        json!({"error": {"type": "invalid_request_error", "message": "unknown tool type"}}),
+    )
+    .await;
+    let gateway = client(&refused.url, Stage2Provider::Anthropic);
+    let Begin::Run(subject) =
+        research::begin_on_demand(&store, &cfg(), acct, "a@lumen.example", now).unwrap()
+    else {
+        panic!("the first request runs");
+    };
+    let call = gateway.research(&subject).await;
+    research::finish(&store, acct, "a@lumen.example", &call, now).unwrap();
+    assert_eq!(refused.calls.load(Ordering::SeqCst), 1);
+    let on_demand_used = || {
+        store
+            .stage2_budget_used(acct, research::ON_DEMAND_BUDGET_KEY, &day)
+            .unwrap()
+    };
+    assert_eq!(on_demand_used(), 1);
+
+    // Another sender on the card: answered unavailable, nothing spent.
+    let Begin::Standing(row) =
+        research::begin_on_demand(&store, &cfg(), acct, "b@lumen.example", now).unwrap()
+    else {
+        panic!("no second request today");
+    };
+    assert_eq!(row.status, ResearchStatus::Unavailable);
+    assert_eq!(row.failure.as_deref(), Some(research::REFUSED_TODAY));
+    assert_eq!(on_demand_used(), 1);
+
+    // And the automatic lane.
+    assert!(
+        store
+            .queue_sender_research(acct, "c@lumen.example", now, 90)
+            .unwrap()
+    );
+    let round = research::auto_round(&store, &cfg(), &on(), acct, || Some(gateway.clone()), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        round,
+        AutoRound::Ran {
+            addr: "c@lumen.example".into(),
+            status: ResearchStatus::Unavailable
+        }
+    );
+    assert_eq!(refused.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .stage2_budget_used(acct, research::AUTO_BUDGET_KEY, &day)
+            .unwrap(),
+        0
+    );
+
+    // Tomorrow it is asked again.
+    let tomorrow = now + chrono::Duration::days(1);
+    assert!(matches!(
+        research::begin_on_demand(&store, &cfg(), acct, "d@lumen.example", tomorrow).unwrap(),
+        Begin::Run(_)
+    ));
+}
+
+/// A transient failure stands against the owner's click for minutes, not a
+/// day.
+#[tokio::test]
+async fn the_owner_can_retry_a_failed_lookup_after_a_short_wait() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let broken = provider(500, json!({"error": {"type": "api_error"}})).await;
+    let c = client(&broken.url, Stage2Provider::Anthropic);
+    let Begin::Run(subject) = research::begin_on_demand(&store, &cfg(), acct, SENDER, now).unwrap()
+    else {
+        panic!("the first request runs");
+    };
+    let call = c.research(&subject).await;
+    assert!(!call.unavailable);
+    let row = research::finish(&store, acct, SENDER, &call, now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, ResearchStatus::Failed);
+    assert!(matches!(
+        research::begin_on_demand(
+            &store,
+            &cfg(),
+            acct,
+            SENDER,
+            now + chrono::Duration::minutes(5)
+        )
+        .unwrap(),
+        Begin::Standing(_)
+    ));
+    assert!(matches!(
+        research::begin_on_demand(
+            &store,
+            &cfg(),
+            acct,
+            SENDER,
+            now + chrono::Duration::minutes(20)
+        )
+        .unwrap(),
+        Begin::Run(_)
+    ));
 }

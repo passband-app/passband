@@ -630,9 +630,15 @@ pub struct ResearchConfig {
     pub cache_days: i64,
     /// The web search tool's `max_uses`. Default 5.
     pub max_searches: u32,
-    /// The web search tool's `type`. Default `web_search_20260209`, the
-    /// version the current models take; an older model takes
-    /// `web_search_20250305`.
+    /// The web search tool's `type`. Default `web_search_20250305`, the
+    /// basic tool: every model and every platform a gateway may route to
+    /// takes it, it is eligible for zero data retention, and each search is a
+    /// direct call whose results come back as top-level
+    /// `web_search_tool_result` blocks. `web_search_20260209` adds dynamic
+    /// filtering (searches run from a code execution container the API
+    /// provisions), which older models and some platforms reject and which is
+    /// not ZDR eligible; the parser still reads its results, which arrive in
+    /// the same blocks with a `caller` field.
     pub web_search_tool: String,
     /// Reasoning depth, sent as `output_config.effort`. Default `low`.
     pub effort: Option<String>,
@@ -646,7 +652,7 @@ impl Default for ResearchConfig {
             on_demand_daily_cap: 50,
             cache_days: 90,
             max_searches: 5,
-            web_search_tool: "web_search_20260209".to_string(),
+            web_search_tool: "web_search_20250305".to_string(),
             effort: Some("low".to_string()),
         }
     }

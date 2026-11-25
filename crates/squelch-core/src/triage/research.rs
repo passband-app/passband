@@ -13,20 +13,23 @@
 //! THE OUTPUT IS UNTRUSTED. [`ResearchResult`] is what the model made of what
 //! the web said: stored, shown to the human on the contact card, and nothing
 //! else. It never enters a triage prompt and never crosses to `/mcp` (the
-//! invariant test is `squelch-mcp/tests/research_never_crosses.rs`). Its
+//! invariant test is `crates/squelch-mcp/tests/research_never_crosses.rs`). Its
 //! sources are kept only when a search actually returned them.
 //!
-//! TWO TRIGGERS. Triage queues a sender when a committed decision's outreach
-//! is [`OutreachAssessment::worth_research`]; the refine lane works the queue
-//! under [`ResearchConfig::auto_daily_cap`]. The contact card runs one on
-//! demand under its own runaway cap. Either way a sender is researched at
-//! most once per [`ResearchConfig::cache_days`].
+//! TWO TRIGGERS. Triage queues a sender when a FRESH ARRIVAL's committed
+//! decision has outreach that is [`OutreachAssessment::worth_research`], and
+//! only for a mailbox with the hidden [`crate::features::RESEARCH`] feature;
+//! the refine lane works the queue newest first under
+//! [`ResearchConfig::auto_daily_cap`]. The contact card runs one on demand
+//! under its own runaway cap, feature or not. Either way a sender is
+//! researched at most once per [`ResearchConfig::cache_days`].
 
 use super::decision::{MessageDecision, OutreachAssessment};
 use super::llm::{self, LlmOutcome, LlmRequest, ToolSubmission, Usage};
 use super::text::{Untrusted, neutralize, truncate_chars};
 use crate::config::{Config, ResearchConfig, Stage2Provider};
 use crate::error::Result;
+use crate::features::{self, Features};
 use crate::store::Store;
 use crate::types::AccountId;
 use chrono::{DateTime, Duration, Utc};
@@ -45,9 +48,21 @@ pub const USAGE_CATEGORY: &str = crate::metrics::RESEARCH_USAGE_CATEGORY;
 /// hex, so neither collides with a thread.
 pub const AUTO_BUDGET_KEY: &str = "__sender_research_auto__";
 pub const ON_DEMAND_BUDGET_KEY: &str = "__sender_research_on_demand__";
+/// The `wake_budget` sentinel that remembers, for the rest of the UTC day,
+/// that the endpoint REFUSED a research request outright (a gateway that does
+/// not pass the web search tool, a key or model it does not admit). Nonzero
+/// means no further request is made today: each sender after the first is
+/// recorded unavailable without spending a request or a cap unit.
+pub const REFUSED_TODAY_KEY: &str = "__sender_research_refused__";
 
-/// How long an `unavailable` or `failed` result stands before another try.
-pub const RETRY_AFTER: Duration = Duration::hours(24);
+/// How long an `unavailable` or `failed` AUTOMATIC result stands before
+/// triage may queue the sender again.
+pub const AUTO_RETRY_AFTER: Duration = Duration::hours(24);
+/// How long one stands against the owner's own click: short, because a
+/// timeout or a provider hiccup should not cost the button for a day. The
+/// on-demand cap and the refusal memo ([`REFUSED_TODAY_KEY`]) bound what a
+/// retry can spend.
+pub const ON_DEMAND_RETRY_AFTER: Duration = Duration::minutes(15);
 /// A `running` row older than this was left by a run that never finished (a
 /// restart mid-call) and no longer blocks a new one.
 pub const STALE_RUNNING: Duration = Duration::minutes(15);
@@ -246,7 +261,7 @@ fn display(text: Option<&str>, max: usize) -> Option<String> {
 }
 
 /// An http(s) URL, or nothing: a source is something the card links to.
-fn web_url(url: &str) -> Option<String> {
+pub(crate) fn web_url(url: &str) -> Option<String> {
     let url = url.trim();
     if url.len() > MAX_URL_CHARS {
         return None;
@@ -258,17 +273,70 @@ fn web_url(url: &str) -> Option<String> {
     Some(parsed.to_string())
 }
 
+/// A URL compared as a source: the same page with or without a trailing
+/// slash is one page.
+fn url_key(url: &str) -> &str {
+    url.trim_end_matches('/')
+}
+
+/// A host compared as a site: `www.` is the same site.
+fn site(host: &str) -> &str {
+    host.strip_prefix("www.").unwrap_or(host)
+}
+
+fn url_host(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(|h| site(&h.to_ascii_lowercase()).to_string())
+}
+
+/// The registrable domain of a host, or `None` for a freemail host, where
+/// the domain says nothing about who sent the mail.
+fn org_domain(host: &str) -> Option<String> {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let as_addr = format!("x@{host}");
+    let registrable = super::receipt_match::registrable_domain(&as_addr)?;
+    (!super::receipt_match::is_freemail_domain(&registrable)
+        && !super::receipt_match::is_freemail_host(&as_addr))
+    .then_some(registrable)
+}
+
+/// What one call actually did, against which its answer is held: the URLs
+/// its searches returned, how many searches the provider says it ran, and the
+/// domain the sender's mail came from.
+#[derive(Debug, Clone, Copy)]
+pub struct Evidence<'a> {
+    pub result_urls: &'a [String],
+    pub web_searches: u64,
+    pub sender_domain: &'a str,
+}
+
 /// Hold the model's answer to the bounds, whatever it wrote. A source is kept
-/// only when one of the call's searches returned it (`result_urls`), so the
-/// card never links a URL the model made up. `Err` is a redacted kind.
+/// only when one of the call's searches returned it, so the card never links a
+/// URL the model made up; the organization's website only when a search
+/// returned a page on its host, or it is the sender's own domain. `verified`
+/// is the model's word and is CAPPED at `plausible` unless the call shows it:
+/// a search ran, a source survived, a claim was confirmed, and the sender's
+/// address is on the organization's own (non-freemail) domain. `Err` is a
+/// redacted kind.
 pub fn validate(
     mut result: ResearchResult,
-    result_urls: &[String],
+    evidence: &Evidence<'_>,
 ) -> std::result::Result<ResearchResult, String> {
     result.who = display(Some(&result.who), MAX_WHO_CHARS).ok_or("empty_who")?;
+    let returned: Vec<String> = evidence
+        .result_urls
+        .iter()
+        .filter_map(|u| web_url(u))
+        .collect();
+    let returned_hosts: Vec<String> = returned.iter().filter_map(|u| url_host(u)).collect();
+    let sender_site = site(&evidence.sender_domain.trim().to_ascii_lowercase()).to_string();
     let org = &mut result.organization;
     org.name = display(org.name.as_deref(), MAX_ORG_FIELD_CHARS);
-    org.website = org.website.as_deref().and_then(web_url);
+    org.website = org.website.as_deref().and_then(web_url).filter(|w| {
+        url_host(w).is_some_and(|host| host == sender_site || returned_hosts.contains(&host))
+    });
     org.what_it_does = display(org.what_it_does.as_deref(), MAX_ORG_FIELD_CHARS);
     org.size_hint = display(org.size_hint.as_deref(), MAX_ORG_FIELD_CHARS);
     result.checks = result
@@ -282,16 +350,39 @@ pub fn validate(
         })
         .take(MAX_CHECKS)
         .collect();
-    let returned: Vec<String> = result_urls.iter().filter_map(|u| web_url(u)).collect();
     let mut sources: Vec<String> = Vec::new();
     for source in result.sources.iter().filter_map(|s| web_url(s)) {
-        if returned.contains(&source) && !sources.contains(&source) {
-            sources.push(source);
+        // The page as the search returned it, so the card links that.
+        let Some(found) = returned.iter().find(|r| url_key(r) == url_key(&source)) else {
+            continue;
+        };
+        if !sources.iter().any(|s| url_key(s) == url_key(found)) {
+            sources.push(found.clone());
         }
     }
     sources.truncate(MAX_SOURCES);
     result.sources = sources;
+    if result.verdict == Verdict::Verified && !earned_verified(&result, evidence) {
+        result.verdict = Verdict::Plausible;
+    }
     Ok(result)
+}
+
+/// Whether the call itself backs a `verified`: see [`validate`]. Run on the
+/// already filtered result.
+fn earned_verified(result: &ResearchResult, evidence: &Evidence<'_>) -> bool {
+    let confirmed = result
+        .checks
+        .iter()
+        .any(|c| c.status == CheckStatus::Confirmed);
+    let same_org = match (
+        org_domain(evidence.sender_domain),
+        result.organization.website.as_deref().and_then(url_host),
+    ) {
+        (Some(sender), Some(website)) => org_domain(&website).is_some_and(|w| w == sender),
+        _ => false,
+    };
+    evidence.web_searches > 0 && !result.sources.is_empty() && confirmed && same_org
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +466,8 @@ pub struct SenderResearchRow {
 impl SenderResearchRow {
     /// Whether this row stands, so a new run of `trigger` must not start. THE
     /// CACHE: a result stands for `cache_days`, an unavailable or failed one
-    /// for [`RETRY_AFTER`], a run in flight until it is [`STALE_RUNNING`]. A
+    /// for [`AUTO_RETRY_AFTER`] against triage and [`ON_DEMAND_RETRY_AFTER`]
+    /// against the owner, a run in flight until it is [`STALE_RUNNING`]. A
     /// QUEUED row stands against another automatic request (it is already
     /// waiting) but not against the owner, who asked now.
     pub fn blocks(&self, trigger: Trigger, now: DateTime<Utc>, cache_days: i64) -> bool {
@@ -384,7 +476,11 @@ impl SenderResearchRow {
         match self.status {
             ResearchStatus::Done => since(self.researched_at, Duration::days(cache_days)),
             ResearchStatus::Unavailable | ResearchStatus::Failed => {
-                since(self.researched_at, RETRY_AFTER)
+                let window = match trigger {
+                    Trigger::Auto => AUTO_RETRY_AFTER,
+                    Trigger::OnDemand => ON_DEMAND_RETRY_AFTER,
+                };
+                since(self.researched_at, window)
             }
             ResearchStatus::Running => now - self.requested_at < STALE_RUNNING,
             ResearchStatus::Queued => trigger == Trigger::Auto,
@@ -421,6 +517,7 @@ pub struct ResearchCall {
 }
 
 impl ResearchCall {
+    /// Recorded unavailable without a request.
     fn unavailable(kind: &str) -> Self {
         Self {
             result: Err(kind.to_string()),
@@ -430,7 +527,22 @@ impl ResearchCall {
             web_searches: 0,
         }
     }
+
+    /// Recorded failed without a request (no subject, a store error after the
+    /// row was claimed).
+    fn failed_unsent(kind: &str) -> Self {
+        Self {
+            unavailable: false,
+            ..Self::unavailable(kind)
+        }
+    }
 }
+
+/// The failure recorded on a row a store error interrupted after it was
+/// marked running, so the card's spinner ends.
+pub const INTERRUPTED: &str = "interrupted";
+/// The failure recorded when the endpoint already refused research today.
+pub const REFUSED_TODAY: &str = "refused_today";
 
 /// The investigation model with the web search tool. Same resolution as the
 /// profile pass: the configured endpoint, the agent's model (stage 2's when
@@ -585,7 +697,16 @@ impl ResearchClient {
                 let result = match out.outcome {
                     LlmOutcome::Ok(text, _) => serde_json::from_str::<ResearchResult>(&text)
                         .map_err(|_| "json_parse".to_string())
-                        .and_then(|r| validate(r, &out.result_urls)),
+                        .and_then(|r| {
+                            validate(
+                                r,
+                                &Evidence {
+                                    result_urls: &out.result_urls,
+                                    web_searches: out.web_search_requests,
+                                    sender_domain: &subject.domain,
+                                },
+                            )
+                        }),
                     LlmOutcome::Refused(_) => Err("research_refused".into()),
                     LlmOutcome::Failed(kind, _) => {
                         unavailable = llm::is_config_failure(&kind);
@@ -631,17 +752,37 @@ pub fn load_subject<S: Store + ?Sized>(
     ))
 }
 
+/// Whether AUTOMATIC research runs for this mailbox: `[research]` is on and
+/// the hidden [`features::RESEARCH`] feature is ticked. The on-demand button
+/// needs only the first.
+pub fn auto_enabled(cfg: &ResearchConfig, features: &Features) -> bool {
+    cfg.enabled && features.enabled(features::RESEARCH)
+}
+
+/// Whether the endpoint already refused a research request today
+/// ([`REFUSED_TODAY_KEY`]).
+fn refused_today<S: Store + ?Sized>(store: &S, account: AccountId, day: &str) -> Result<bool> {
+    Ok(store.stage2_budget_used(account, REFUSED_TODAY_KEY, day)? > 0)
+}
+
 /// Triage's trigger: queue the sender of a committed decision when it
-/// [`wants_research`]. `Ok(true)` when a row was queued.
+/// [`wants_research`], automatic research is on ([`auto_enabled`]), and the
+/// decision is on a FRESH ARRIVAL (`fresh_arrival`, the job's
+/// `arrival_eligible`): a backfill or a revisit of old mail is not a pitch
+/// the owner is about to read, and must not spend the day's cap on one.
+/// `Ok(true)` when a row was queued.
+#[allow(clippy::too_many_arguments)]
 pub fn queue_for_decision<S: Store + ?Sized>(
     store: &S,
     cfg: &ResearchConfig,
+    features: &Features,
     account: AccountId,
     sender: &str,
     decision: &MessageDecision,
+    fresh_arrival: bool,
     now: DateTime<Utc>,
 ) -> Result<bool> {
-    if !cfg.enabled || !wants_research(decision) {
+    if !fresh_arrival || !auto_enabled(cfg, features) || !wants_research(decision) {
         return Ok(false);
     }
     store.queue_sender_research(account, &sender.trim().to_lowercase(), now, cfg.cache_days)
@@ -691,13 +832,39 @@ pub fn begin_on_demand<S: Store + ?Sized>(
         // Another request started it between the read and here.
         return Ok(Begin::Standing(row));
     }
-    store.stage2_increment_budget(account, ON_DEMAND_BUDGET_KEY, &day)?;
-    Ok(Begin::Run(subject))
+    // The row is `running` from here: every way out records an outcome on
+    // it, so the card never spins on a run nobody is making.
+    let charged = refused_today(store, account, &day).and_then(|refused| {
+        if refused {
+            return Ok(false);
+        }
+        store.stage2_increment_budget(account, ON_DEMAND_BUDGET_KEY, &day)?;
+        Ok(true)
+    });
+    match charged {
+        Ok(true) => Ok(Begin::Run(subject)),
+        Ok(false) => {
+            let call = ResearchCall::unavailable(REFUSED_TODAY);
+            let row = finish(store, account, &addr, &call, now)?;
+            Ok(row.map_or(Begin::Refused, Begin::Standing))
+        }
+        Err(e) => {
+            let _ = finish(
+                store,
+                account,
+                &addr,
+                &ResearchCall::failed_unsent(INTERRUPTED),
+                now,
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Record a call: its usage on the `research` ledger line (a call that
-/// reported none is still billed as a call), then its outcome on the row.
-/// Returns the row as stored.
+/// reported none is still billed as a call), the refusal memo when the
+/// endpoint refused a request it was sent ([`REFUSED_TODAY_KEY`]), then its
+/// outcome on the row. Returns the row as stored.
 pub fn finish<S: Store + ?Sized>(
     store: &S,
     account: AccountId,
@@ -718,6 +885,12 @@ pub fn finish<S: Store + ?Sized>(
         if let Err(e) = store.extract_bump_usage(account, &day, USAGE_CATEGORY, tokens) {
             eprintln!("squelch: research usage not recorded ({e})");
         }
+    }
+    if call.unavailable
+        && call.calls > 0
+        && let Err(e) = store.stage2_increment_budget(account, REFUSED_TODAY_KEY, &day)
+    {
+        eprintln!("squelch: research refusal not remembered ({e})");
     }
     let (status, result, failure) = match &call.result {
         Ok(result) => (ResearchStatus::Done, Some(result), None),
@@ -751,18 +924,20 @@ pub enum AutoRound {
     },
 }
 
-/// One automatic round: at most one queued sender, under the daily cap,
-/// charged before the call so a call that never returns still counts.
-/// `client` is asked for only once a row is claimed, so an idle round builds
-/// nothing; `None` (no model configured) records the row unavailable.
+/// One automatic round: at most one queued sender (the newest), under the
+/// daily cap, charged before the call so a call that never returns still
+/// counts. `client` is asked for only once a row is claimed, so an idle round
+/// builds nothing; `None` (no model configured) records the row unavailable.
+/// Off unless [`auto_enabled`].
 pub async fn auto_round<S: Store + ?Sized>(
     store: &S,
     cfg: &ResearchConfig,
+    features: &Features,
     account: AccountId,
     client: impl FnOnce() -> Option<ResearchClient>,
     now: DateTime<Utc>,
 ) -> Result<AutoRound> {
-    if !cfg.enabled {
+    if !auto_enabled(cfg, features) {
         return Ok(AutoRound::Off);
     }
     let day = utc_day(now);
@@ -772,29 +947,49 @@ pub async fn auto_round<S: Store + ?Sized>(
     let Some(addr) = store.claim_sender_research(account, now, QUEUE_MAX_AGE)? else {
         return Ok(AutoRound::Idle);
     };
-    let client = client();
-    let call = match load_subject(store, account, &addr)? {
-        None => ResearchCall {
-            result: Err("no_subject".into()),
-            unavailable: false,
-            usage: None,
-            calls: 0,
-            web_searches: 0,
-        },
-        Some(subject) => match client.filter(ResearchClient::available) {
-            // Not charged: no request is made without a wire that has the tool.
-            None => ResearchCall::unavailable(llm::SERVER_TOOLS_UNSUPPORTED),
-            Some(client) => {
-                store.stage2_increment_budget(account, AUTO_BUDGET_KEY, &day)?;
-                client.research(&subject).await
-            }
-        },
+    // The row is `running` from here: a store error still records an
+    // outcome on it before it is returned, so it never spins forever.
+    let call = match auto_call(store, account, &addr, client, &day).await {
+        Ok(call) => call,
+        Err(e) => {
+            let _ = finish(
+                store,
+                account,
+                &addr,
+                &ResearchCall::failed_unsent(INTERRUPTED),
+                now,
+            );
+            return Err(e);
+        }
     };
     let row = finish(store, account, &addr, &call, now)?;
     Ok(AutoRound::Ran {
         addr,
         status: row.map_or(ResearchStatus::Failed, |r| r.status),
     })
+}
+
+/// The claimed row's call, or the outcome recorded without one.
+async fn auto_call<S: Store + ?Sized>(
+    store: &S,
+    account: AccountId,
+    addr: &str,
+    client: impl FnOnce() -> Option<ResearchClient>,
+    day: &str,
+) -> Result<ResearchCall> {
+    let Some(subject) = load_subject(store, account, addr)? else {
+        return Ok(ResearchCall::failed_unsent("no_subject"));
+    };
+    // Not charged: no request is made without a wire that has the tool, or
+    // to an endpoint that refused research earlier today.
+    let Some(client) = client().filter(ResearchClient::available) else {
+        return Ok(ResearchCall::unavailable(llm::SERVER_TOOLS_UNSUPPORTED));
+    };
+    if refused_today(store, account, day)? {
+        return Ok(ResearchCall::unavailable(REFUSED_TODAY));
+    }
+    store.stage2_increment_budget(account, AUTO_BUDGET_KEY, day)?;
+    Ok(client.research(&subject).await)
 }
 
 #[cfg(test)]

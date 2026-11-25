@@ -1056,6 +1056,82 @@ async fn sleep_backoff(attempt: u32, retry_after: Option<Duration>) {
 mod tests {
     use super::*;
 
+    fn blocks(content: serde_json::Value) -> Vec<ContentBlock> {
+        serde_json::from_value(content).unwrap()
+    }
+
+    const RESEARCH_SUBMISSION: ToolSubmission<'static> = ToolSubmission {
+        name: "submit_sender_research",
+        description: "",
+        server_tools: &[],
+    };
+
+    /// The basic tool's direct search, and dynamic filtering's search run
+    /// from code execution (the pair carries a `caller`, beside the code
+    /// execution's own blocks): both put the returned URLs in
+    /// `web_search_tool_result` blocks, and an error result is an object,
+    /// not a list, and contributes nothing.
+    #[test]
+    fn search_result_urls_are_read_from_direct_and_code_execution_searches() {
+        let content = blocks(serde_json::json!([
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "a"}},
+            {"type": "web_search_tool_result", "tool_use_id": "s1", "content": [
+                {"type": "web_search_result", "url": "https://a.example/1", "title": "A"},
+                {"type": "web_search_result", "url": "https://a.example/1", "title": "A again"}
+            ]},
+            {"type": "server_tool_use", "id": "c1", "name": "code_execution", "input": {"code": "x"}},
+            {"type": "server_tool_use", "id": "s2", "name": "web_search", "input": {"query": "b"},
+             "caller": {"type": "code_execution_20260120", "tool_id": "c1"}},
+            {"type": "web_search_tool_result", "tool_use_id": "s2",
+             "caller": {"type": "code_execution_20260120", "tool_id": "c1"},
+             "content": [{"type": "web_search_result", "url": "https://b.example/2", "title": "B"}]},
+            {"type": "code_execution_tool_result", "tool_use_id": "c1",
+             "content": {"type": "code_execution_result", "stdout": "https://not-a-result.example"}},
+            {"type": "web_search_tool_result", "tool_use_id": "s3",
+             "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}}
+        ]));
+        assert_eq!(
+            web_search_result_urls(&content),
+            ["https://a.example/1", "https://b.example/2"]
+        );
+    }
+
+    /// A server-side loop that paused is not resumed: one bounded call is the
+    /// whole budget, so it is a (transient) failure, never an answer or a
+    /// configuration failure.
+    #[test]
+    fn a_paused_search_turn_is_a_failure_not_an_answer() {
+        let content = blocks(serde_json::json!([
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "a"}}
+        ]));
+        match anthropic_outcome(
+            &content,
+            Some("pause_turn"),
+            None,
+            Some(&RESEARCH_SUBMISSION),
+        ) {
+            LlmOutcome::Failed(kind, _) => {
+                assert_eq!(kind, "pause_turn");
+                assert!(!is_config_failure(&kind));
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        // The submission beside a search block is still the one answer.
+        let answered = blocks(serde_json::json!([
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "a"}},
+            {"type": "tool_use", "id": "t1", "name": "submit_sender_research", "input": {"who": "x"}}
+        ]));
+        assert!(matches!(
+            anthropic_outcome(
+                &answered,
+                Some("tool_use"),
+                None,
+                Some(&RESEARCH_SUBMISSION)
+            ),
+            LlmOutcome::Ok(..)
+        ));
+    }
+
     /// The gateway takes its virtual key ONLY in `x-bf-vk` — with just
     /// `x-api-key` set it answers 401 "virtual key is required", meaning it saw
     /// no credential at all. Anthropic direct is the opposite: `x-api-key` is

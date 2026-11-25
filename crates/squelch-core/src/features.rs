@@ -78,7 +78,22 @@ pub const KNOWN: &[Feature] = &[
                   memory lines triage is told about, and the Understanding section on the Usage \
                   page. Off, the agent prompt is the prompt everyone else gets.",
     },
+    Feature {
+        key: RESEARCH,
+        summary: "Automatic sender research: a personal cold pitch that just arrived gets a web \
+                  search on who its sender says they are, shown on the contact card. The card's \
+                  Look them up button works without it.",
+    },
 ];
+
+/// Automatic sender research (docs/SENDER-RESEARCH.md): triage queues the
+/// sender of a fresh personal pitch the owner might want, and the refine lane
+/// runs a web search on them under `[research] auto_daily_cap`. OFF QUEUES
+/// AND RUNS NOTHING AUTOMATICALLY; the contact card's on-demand lookup does
+/// not ask for it, and results already stored stay readable on the card. It
+/// ships dark because it spends a model call and web searches a day on mail
+/// nobody asked about, and the first weeks are for reading what it writes.
+pub const RESEARCH: &str = "research";
 
 /// The daemon's background and access lane caps (see
 /// [`crate::triage::agent_config::AgentConfig`]) are lifted for this mailbox,

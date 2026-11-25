@@ -37,12 +37,16 @@ fn a_result_stands_for_the_cache_window_and_no_longer() {
     }
 }
 
+/// Triage waits a day after a failure; the owner's click waits fifteen
+/// minutes, so a transient failure does not cost the button for a day.
 #[test]
-fn a_failure_is_retried_after_a_day_and_a_stuck_run_after_it_goes_stale() {
+fn a_failure_is_retried_soon_by_the_owner_later_by_triage_and_a_stuck_run_once_stale() {
     for status in [ResearchStatus::Unavailable, ResearchStatus::Failed] {
         let r = row(status, at(1), Some(at(1)));
-        assert!(r.blocks(Trigger::OnDemand, at(1) + Duration::hours(23), 90));
-        assert!(!r.blocks(Trigger::OnDemand, at(1) + Duration::hours(25), 90));
+        assert!(r.blocks(Trigger::Auto, at(1) + Duration::hours(23), 90));
+        assert!(!r.blocks(Trigger::Auto, at(1) + Duration::hours(25), 90));
+        assert!(r.blocks(Trigger::OnDemand, at(1) + Duration::minutes(10), 90));
+        assert!(!r.blocks(Trigger::OnDemand, at(1) + Duration::minutes(16), 90));
     }
     let running = row(ResearchStatus::Running, at(1), None);
     assert!(running.blocks(Trigger::Auto, at(1) + Duration::minutes(5), 90));
@@ -215,7 +219,7 @@ fn the_answer_is_held_to_its_bounds_and_its_sources_to_what_was_searched() {
         "https://lumen.example/team".to_string(),
         "ftp://lumen.example/file".to_string(),
     ];
-    let out = validate(answer(), &returned).unwrap();
+    let out = validate(answer(), &evidence(&returned)).unwrap();
     assert_eq!(out.who, "Pat Doe leads partnerships at Lumen Labs.");
     assert_eq!(out.organization.website, None, "only http(s)");
     assert_eq!(out.organization.what_it_does, None, "blank is absent");
@@ -228,14 +232,196 @@ fn the_answer_is_held_to_its_bounds_and_its_sources_to_what_was_searched() {
 
     let mut empty = answer();
     empty.who = " \u{200B} ".into();
-    assert_eq!(validate(empty, &returned).unwrap_err(), "empty_who");
+    assert_eq!(
+        validate(empty, &evidence(&returned)).unwrap_err(),
+        "empty_who"
+    );
+}
+
+/// What a call that ran two searches from `returned` for pat@lumen.example
+/// shows.
+fn evidence(returned: &[String]) -> Evidence<'_> {
+    Evidence {
+        result_urls: returned,
+        web_searches: 2,
+        sender_domain: "lumen.example",
+    }
+}
+
+/// An answer that claims `verified` with everything it needs to keep it.
+fn verified() -> ResearchResult {
+    ResearchResult {
+        who: "Pat Doe leads partnerships at Lumen Labs.".into(),
+        organization: Organization {
+            name: Some("Lumen Labs".into()),
+            website: Some("https://www.lumen.example/".into()),
+            what_it_does: None,
+            size_hint: None,
+        },
+        checks: vec![ClaimCheck {
+            claim: "Works at Lumen Labs".into(),
+            status: CheckStatus::Confirmed,
+        }],
+        verdict: Verdict::Verified,
+        sources: vec!["https://lumen.example/team".into()],
+    }
+}
+
+/// `verified` is the model's word; it stands only when the call shows a
+/// search ran, a source survived, a claim was confirmed, and the sender's
+/// address is on the organization's own domain. Anything less is plausible.
+#[test]
+fn verified_is_capped_at_plausible_unless_the_call_backs_it() {
+    let returned = vec!["https://lumen.example/team".to_string()];
+    let kept = validate(verified(), &evidence(&returned)).unwrap();
+    assert_eq!(kept.verdict, Verdict::Verified);
+
+    // No search ran.
+    let no_search = Evidence {
+        web_searches: 0,
+        ..evidence(&returned)
+    };
+    assert_eq!(
+        validate(verified(), &no_search).unwrap().verdict,
+        Verdict::Plausible
+    );
+    // No source survived the filter.
+    let invented = vec!["https://elsewhere.example/".to_string()];
+    let mut unsourced = verified();
+    unsourced.organization.website = Some("https://lumen.example".into());
+    let out = validate(unsourced, &evidence(&invented)).unwrap();
+    assert!(out.sources.is_empty());
+    assert_eq!(out.verdict, Verdict::Plausible);
+    // Nothing confirmed.
+    let mut unconfirmed = verified();
+    unconfirmed.checks[0].status = CheckStatus::NotFound;
+    assert_eq!(
+        validate(unconfirmed, &evidence(&returned)).unwrap().verdict,
+        Verdict::Plausible
+    );
+    // The sender writes from somewhere else than the organization's site.
+    let other = Evidence {
+        sender_domain: "lumen-labs.example",
+        ..evidence(&returned)
+    };
+    assert_eq!(
+        validate(verified(), &other).unwrap().verdict,
+        Verdict::Plausible
+    );
+    // A subdomain of the organization's domain is the organization.
+    let sub = Evidence {
+        sender_domain: "mail.lumen.example",
+        ..evidence(&returned)
+    };
+    assert_eq!(
+        validate(verified(), &sub).unwrap().verdict,
+        Verdict::Verified
+    );
+    // Freemail never matches, even when the "organization" is the provider.
+    let gmail_returned = vec!["https://gmail.com/about".to_string()];
+    let mut freemail = verified();
+    freemail.organization.website = Some("https://gmail.com".into());
+    freemail.sources = gmail_returned.clone();
+    let out = validate(
+        freemail,
+        &Evidence {
+            result_urls: &gmail_returned,
+            web_searches: 1,
+            sender_domain: "gmail.com",
+        },
+    )
+    .unwrap();
+    assert_eq!(out.verdict, Verdict::Plausible);
+    // A verdict below verified is never raised.
+    let mut suspicious = verified();
+    suspicious.verdict = Verdict::Suspicious;
+    assert_eq!(
+        validate(suspicious, &evidence(&returned)).unwrap().verdict,
+        Verdict::Suspicious
+    );
+}
+
+/// The website is the model's to write, so it is kept only when a search
+/// returned a page on its host or it is the sender's own domain.
+#[test]
+fn the_website_is_kept_only_when_searched_or_the_senders_own() {
+    let returned = vec!["https://registry.example/lumen".to_string()];
+    let mut r = verified();
+    r.organization.website = Some("https://phish.example/".into());
+    assert_eq!(
+        validate(r, &evidence(&returned))
+            .unwrap()
+            .organization
+            .website,
+        None
+    );
+    let mut r = verified();
+    r.organization.website = Some("https://registry.example/".into());
+    assert_eq!(
+        validate(r, &evidence(&returned))
+            .unwrap()
+            .organization
+            .website
+            .as_deref(),
+        Some("https://registry.example/")
+    );
+    // Not searched, but the sender's own domain (`www.` is the same site).
+    let r = verified();
+    assert_eq!(
+        validate(r, &evidence(&returned))
+            .unwrap()
+            .organization
+            .website
+            .as_deref(),
+        Some("https://www.lumen.example/")
+    );
+}
+
+/// A source the model wrote with (or without) a trailing slash is the page
+/// the search returned, linked as it was returned.
+#[test]
+fn a_source_matches_its_search_result_whatever_the_trailing_slash() {
+    let returned = vec![
+        "https://lumen.example/team/".to_string(),
+        "https://lumen.example/about".to_string(),
+    ];
+    let mut r = verified();
+    r.sources = vec![
+        "https://lumen.example/team".into(),
+        "https://lumen.example/about/".into(),
+        "https://lumen.example/team/".into(),
+    ];
+    let out = validate(r, &evidence(&returned)).unwrap();
+    assert_eq!(
+        out.sources,
+        ["https://lumen.example/team/", "https://lumen.example/about"]
+    );
+}
+
+/// Automatic research needs both `[research]` and the hidden feature; the
+/// default mailbox has neither ticked.
+#[test]
+fn automatic_research_is_off_without_the_feature() {
+    let cfg = ResearchConfig::default();
+    assert!(!auto_enabled(&cfg, &Features::default()));
+    assert!(auto_enabled(&cfg, &Features::pinned([features::RESEARCH])));
+    let off = ResearchConfig {
+        enabled: false,
+        ..ResearchConfig::default()
+    };
+    assert!(!auto_enabled(&off, &Features::pinned([features::RESEARCH])));
+    assert!(
+        features::KNOWN.iter().any(|f| f.key == features::RESEARCH),
+        "the admin page offers it"
+    );
 }
 
 /// What the store keeps is what the card decodes, and every value the schema
 /// offers the model decodes into it.
 #[test]
 fn a_stored_result_decodes_and_the_schema_matches_the_type() {
-    let stored = validate(answer(), &["https://lumen.example/team".to_string()]).unwrap();
+    let returned = ["https://lumen.example/team".to_string()];
+    let stored = validate(answer(), &evidence(&returned)).unwrap();
     let json = serde_json::to_string(&stored).unwrap();
     assert_eq!(
         serde_json::from_str::<ResearchResult>(&json).unwrap(),

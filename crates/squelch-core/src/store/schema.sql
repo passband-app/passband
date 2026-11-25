@@ -1897,6 +1897,12 @@ CREATE TABLE IF NOT EXISTS agent_message_decisions (
 -- expression that raised on malformed JSON would make that row's INSERT fail.
 CREATE INDEX IF NOT EXISTS idx_decisions_critical ON agent_message_decisions(account_id, message_id)
     WHERE CASE WHEN json_valid(decision_json) THEN json_extract(decision_json,'$.auth.critical') END = 1;
+-- The few decisions that assessed cold outreach, for the owner's outreach
+-- history (`store::sqlite::agent_triage::outreach_history`), which runs on
+-- every first-contact triage. Same shape and the same reason as
+-- `idx_decisions_critical`; the query names EXACTLY this expression.
+CREATE INDEX IF NOT EXISTS idx_decisions_outreach ON agent_message_decisions(account_id, message_id)
+    WHERE CASE WHEN json_valid(decision_json) THEN json_type(decision_json,'$.outreach') END = 'object';
 CREATE TABLE IF NOT EXISTS agent_message_destinations (
     account_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
@@ -2258,6 +2264,12 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);
+-- First contact (`store::sqlite::agent_triage::sender_on_calendar`) asks, for
+-- every inbound message from a non-contact, whether the sender organized an
+-- event the owner committed to: seek it by address instead of walking the
+-- calendar.
+CREATE INDEX IF NOT EXISTS idx_calendar_events_organizer
+    ON calendar_events(account_id, organizer_email COLLATE NOCASE);
 -- An event's attendees as Google lists them, at most 100, in Google's order
 -- (`position`). OTHER PEOPLE'S ADDRESSES: HUMAN-DOOR ONLY like the event
 -- itself, never logged, never in the audit log (which carries a count).
@@ -2277,6 +2289,9 @@ CREATE TABLE IF NOT EXISTS calendar_event_guests (
     is_self      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, calendar_id, event_id, position)
 );
+-- The same question for guests (`sender_on_calendar`): seek by address.
+CREATE INDEX IF NOT EXISTS idx_calendar_event_guests_email
+    ON calendar_event_guests(account_id, email COLLATE NOCASE);
 CREATE TRIGGER IF NOT EXISTS calendar_event_guests_follow_event
 AFTER DELETE ON calendar_events BEGIN
     DELETE FROM calendar_event_guests

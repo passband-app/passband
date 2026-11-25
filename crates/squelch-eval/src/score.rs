@@ -477,6 +477,12 @@ pub const COVERAGE: &[(&str, Coverage)] = &[
             "a price for the quick-clear queue, not a placement judgement; it is checked against the owner's own dwell (`GET /client/renotify/stats` calibration), and gold before agent-triage-v26 has none to agree with",
         ),
     ),
+    (
+        "outreach.*",
+        Coverage::Unscored(
+            "cold outreach is new in agent-triage-v28 and no gold has it yet; its placement effect is scored through `attention.show_in_fye`",
+        ),
+    ),
 ];
 
 /// The first [`COVERAGE`] entry for a schema leaf path.

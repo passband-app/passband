@@ -109,6 +109,16 @@ pub struct ContextRevision {
     pub attention_revision: i64,
 }
 
+/// The first-contact evidence a triage run attaches to its context
+/// (`AgentContext::outreach_history`, `sender_organisation` and
+/// `copied_contacts`). See `Store::outreach_evidence`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OutreachEvidence {
+    pub history: Option<serde_json::Value>,
+    pub organisation: Option<serde_json::Value>,
+    pub copied_contacts: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentContext {
     pub message: AgentMessage,
@@ -122,6 +132,31 @@ pub struct AgentContext {
     #[serde(default)]
     pub general_rules: Vec<serde_json::Value>,
     pub sender_is_contact: bool,
+    /// First contact: the sender is not someone the owner has written to
+    /// (`sender_is_contact`), not an authenticated colleague at the owner's
+    /// own organization, not on an event the owner committed to, the owner
+    /// has not written in this thread, and no one the owner has written to
+    /// has written in it. Computed from stored mail and the calendar, never
+    /// from the email's text. Sent and spam mail are never first contact.
+    /// Defaults so stored contexts still decode.
+    #[serde(default)]
+    pub first_contact: bool,
+    /// How this owner has treated earlier cold outreach, by kind
+    /// (`outreach_history`), attached only on first contact. ABSENT, not
+    /// empty, when there is nothing to count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outreach_history: Option<serde_json::Value>,
+    /// What the owner's mail says about the sender's organization
+    /// (`sender_organisation`), attached only on first contact, and only
+    /// for authenticated mail from a domain that names an organization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_organisation: Option<serde_json::Value>,
+    /// How many people the owner has written to are copied (To or Cc) on the
+    /// thread's inbound mail, attached only on first contact, ABSENT when
+    /// none. Evidence of an introduction, never proof: anyone can Cc an
+    /// address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_contacts: Option<i64>,
     /// The relationship ledger's block for the sender (docs/UNDERSTANDING.md
     /// §2.1), ABSENT rather than empty when there is no row or the first-run
     /// backfill has not filled the table. NEVER FILLED BY A CONTEXT LOAD: the

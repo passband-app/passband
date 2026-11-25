@@ -562,14 +562,14 @@ for an address with no row. `attention` is left out while `coverage_days`
 (days since the later of the open ledger floor and the 90-day window, the
 `SenderMeasurer`'s own coverage, so the same floor the fatigue score uses) is
 under 14. The block is in no revision fingerprint, so a recount never makes
-a run stale. Under the flag, the prompt reports `agent-triage-v27` (rows of
+a run stale. Under the flag, the prompt reports `agent-triage-v29` (rows of
 `agent::UNDERSTANDING_SEGMENTS`) reads it as evidence and restates the
 65-point personal-mail floor over "a person the owner replies to": replied
 above zero, initiated above zero, sent count above zero, or
 `sender_is_contact`. The ledger can add a person to the floor and never
 removes anyone `sender_is_contact` granted it. With the flag off the prompt is
 the file's own text, the "a known contact" floor included, and reports
-`agent-triage-v26` (`agent::prompt_version`). Eval
+`agent-triage-v28` (`agent::prompt_version`). Eval
 replays (`squelch-eval`) drop the block, because the ledger has no history
 to replay as of a past moment.
 

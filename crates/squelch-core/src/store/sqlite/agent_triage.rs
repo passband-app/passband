@@ -243,11 +243,17 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
     let rules = rules(conn, account)?;
     let general_rules = general_rules(conn, account)?;
     let corrections = corrections(conn, account, id)?;
-    let sender_is_contact = conn.query_row(
+    let sender_is_contact: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM contacts WHERE account_id=?1 AND addr=?2 COLLATE NOCASE)",
         params![account, message.from_addr],
         |row| row.get(0),
     )?;
+    let first_contact = !message.is_sent
+        && !message.is_spam
+        && !sender_is_contact
+        && !is_colleague(conn, account, id, &message.from_addr)?
+        && !sender_on_calendar(conn, account, &message.from_addr)?
+        && is_first_contact_thread(conn, account, &message.thread_id)?;
     let matched_rules: Vec<serde_json::Value> = rules
         .iter()
         .filter(|rule| {
@@ -274,6 +280,9 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         .collect();
     let revision = ContextRevision {
         content: fingerprint(&content)?,
+        // `first_contact` is deliberately NOT here: it turns false when the
+        // owner replies, which already changes the thread's content, and a
+        // new contact elsewhere must not turn every run in flight stale.
         preferences: fingerprint(&(
             &matched_rules,
             &general_rules,
@@ -292,6 +301,13 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         matched_rules,
         general_rules,
         sender_is_contact,
+        first_contact,
+        // NOT READ HERE, for the reason `relationship` is not: they cost
+        // domain scans, and only a triage run reads them. The worker attaches
+        // them on first contact (`triage_worker::attach_outreach_evidence`).
+        outreach_history: None,
+        sender_organisation: None,
+        copied_contacts: None,
         // NOT READ HERE. Every triage job, evidence read, notification and
         // decision view loads a context, and the ledger is the `understanding`
         // flag's: the worker attaches it only when the flag is on
@@ -304,6 +320,284 @@ fn context(conn: &Connection, account: AccountId, id: i64) -> Result<AgentContex
         memory: vec![],
         run_metadata: serde_json::json!({}),
     })
+}
+
+/// The thread half of first contact (see `AgentContext::first_contact`): the
+/// owner has not written in this thread, and no one the owner has written to
+/// has written in it. A contact merely COPIED on an inbound message is not
+/// here: anyone can Cc a public address the owner once wrote to, so that is
+/// evidence for the model ([`copied_contacts`]), never this gate. The owner's
+/// own address may be a contact of its own (a Bcc to self), so it is never
+/// the one that makes a thread warm.
+fn is_first_contact_thread(conn: &Connection, account: AccountId, thread: &str) -> Result<bool> {
+    let warm: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id=?1 AND thread_id=?2 AND is_sent=1)
+             OR EXISTS(
+               SELECT 1 FROM messages m
+                 JOIN contacts c ON c.account_id=m.account_id AND c.addr=m.from_addr COLLATE NOCASE
+                WHERE m.account_id=?1 AND m.thread_id=?2
+                  AND m.from_addr <> (SELECT email FROM accounts WHERE id=?1) COLLATE NOCASE)",
+        params![account, thread],
+        |row| row.get(0),
+    )?;
+    Ok(!warm)
+}
+
+/// Whether a message passed authentication. An unauthenticated From names
+/// any address it likes, so nothing that reads the sender's domain as a fact
+/// about who they are may trust it without this.
+fn authenticated(conn: &Connection, account: AccountId, message: i64) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT COALESCE(auth_pass,0)=1 FROM messages WHERE account_id=?1 AND id=?2",
+            params![account, message],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// The sender is at the owner's own organization: authenticated mail from the
+/// same registrable domain as the account, when that domain names an
+/// organization (never freemail). A new colleague's first email is not a
+/// pitch, whatever it asks for.
+fn is_colleague(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+    from_addr: &str,
+) -> Result<bool> {
+    let Some(theirs) = crate::triage::ghost::organisation_domain(from_addr) else {
+        return Ok(false);
+    };
+    let owner: Option<String> = conn
+        .query_row("SELECT email FROM accounts WHERE id=?1", [account], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let ours = owner
+        .as_deref()
+        .and_then(crate::triage::ghost::organisation_domain);
+    Ok(ours.as_deref() == Some(theirs.as_str()) && authenticated(conn, account, message)?)
+}
+
+/// An event the owner has committed to: one they organized, or accepted or
+/// marked tentative, on their own calendar (not one Passband read out of
+/// mail), and not cancelled. A stranger can put anyone on an invitation, so
+/// an event the owner never answered says nothing about having met.
+const COMMITTED_EVENT_SQL: &str =
+    "(e.organizer_self=1 OR e.self_response IN ('accepted','tentative'))
+      AND e.from_gmail=0 AND e.status<>'cancelled'";
+
+/// The sender is on the owner's calendar, as a guest or the organizer of an
+/// event the owner committed to ([`COMMITTED_EVENT_SQL`]): they have met, or
+/// are about to. The exact address only; a colleague at the same organization
+/// is evidence ([`sender_organisation`]), not this. Both lookups seek the
+/// NOCASE email indexes (schema.sql).
+fn sender_on_calendar(conn: &Connection, account: AccountId, addr: &str) -> Result<bool> {
+    Ok(
+        conn.query_row(&sender_on_calendar_sql(), params![account, addr], |row| {
+            row.get(0)
+        })?,
+    )
+}
+/// [`sender_on_calendar`]'s query: `?1` account, `?2` the address.
+fn sender_on_calendar_sql() -> String {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM calendar_event_guests g
+                 JOIN calendar_events e ON e.account_id=g.account_id
+                  AND e.calendar_id=g.calendar_id AND e.event_id=g.event_id
+                WHERE g.account_id=?1 AND g.is_self=0 AND g.email=?2 COLLATE NOCASE
+                  AND {COMMITTED_EVENT_SQL})
+             OR EXISTS(SELECT 1 FROM calendar_events e
+                WHERE e.account_id=?1 AND e.organizer_self=0
+                  AND e.organizer_email=?2 COLLATE NOCASE AND {COMMITTED_EVENT_SQL})"
+    )
+}
+
+/// How many people the owner has written to are COPIED (To or Cc) on the
+/// thread's inbound mail, the owner's own address aside. An introduction
+/// copies the person who made it; so can a stranger who copies a public
+/// address the owner once wrote to. Evidence for the model, never a gate.
+/// `None` when there are none.
+fn copied_contacts(conn: &Connection, account: AccountId, thread: &str) -> Result<Option<i64>> {
+    let owner: Option<String> = conn
+        .query_row("SELECT email FROM accounts WHERE id=?1", [account], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let owner = owner.unwrap_or_default().to_lowercase();
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(to_addrs,''), COALESCE(cc_addrs,'') FROM messages
+          WHERE account_id=?1 AND thread_id=?2 AND is_sent=0 LIMIT 200",
+    )?;
+    let mut copied = std::collections::BTreeSet::new();
+    let rows = stmt.query_map(params![account, thread], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (to, cc) = row?;
+        for addr in crate::sync::ingest::parse_stored_recipients(&to)
+            .into_iter()
+            .chain(crate::sync::ingest::parse_stored_recipients(&cc))
+        {
+            if addr != owner {
+                copied.insert(addr);
+            }
+        }
+    }
+    let mut known = 0i64;
+    let mut contact = conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM contacts WHERE account_id=?1 AND addr=?2 COLLATE NOCASE)",
+    )?;
+    for addr in &copied {
+        if contact.query_row(params![account, addr], |row| row.get::<_, bool>(0))? {
+            known += 1;
+        }
+    }
+    Ok((known > 0).then_some(known))
+}
+
+/// The first-contact evidence a triage run reads: [`outreach_history`],
+/// [`sender_organisation`] and [`copied_contacts`]. Loaded by the worker
+/// only, and only on first contact (`triage_worker::attach_outreach_evidence`),
+/// because the organization counts are domain scans no other reader of a
+/// context should pay for.
+pub(super) fn outreach_evidence_conn(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<crate::store::agent_triage::OutreachEvidence> {
+    let (from_addr, thread): (String, String) = conn.query_row(
+        "SELECT from_addr, thread_id FROM messages WHERE account_id=?1 AND id=?2",
+        params![account, message],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(crate::store::agent_triage::OutreachEvidence {
+        history: outreach_history(conn, account, message)?,
+        organisation: sender_organisation(conn, account, message, &from_addr)?,
+        copied_contacts: copied_contacts(conn, account, &thread)?,
+    })
+}
+
+/// What the owner's mail says about the sender's ORGANIZATION, on first
+/// contact: how many people there the owner has written to, how many other
+/// addresses there have written to the owner, and how many are on the owner's
+/// calendar. Evidence for telling a stranger following up from elsewhere (a
+/// colleague of someone the owner works with, a company the owner is a
+/// customer of) from a cold pitch, never a gate: a vendor's sales rep is
+/// also "at a company the owner uses".
+///
+/// `None` when the domain says nothing about who sent it (freemail, shared
+/// hosts: `ghost::organisation_domain`), and when the message did not pass
+/// authentication, because an unauthenticated From names any domain it likes
+/// and must not buy itself a warm reading.
+fn sender_organisation(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+    from_addr: &str,
+) -> Result<Option<serde_json::Value>> {
+    let Some(domain) = crate::triage::ghost::organisation_domain(from_addr) else {
+        return Ok(None);
+    };
+    if !authenticated(conn, account, message)? {
+        return Ok(None);
+    }
+    // At the domain or any subdomain of it, never a lookalike that merely
+    // ends in the same letters (`notacme.com`).
+    let at = format!("%@{domain}");
+    let under = format!("%.{domain}");
+    let count = |sql: &str| -> Result<i64> {
+        Ok(
+            conn.query_row(sql, params![account, at, under, from_addr], |row| {
+                row.get(0)
+            })?,
+        )
+    };
+    let wrote_to = count(
+        "SELECT COUNT(*) FROM contacts WHERE account_id=?1
+            AND (addr LIKE ?2 OR addr LIKE ?3) AND addr<>?4 COLLATE NOCASE",
+    )?;
+    let other_senders = count(
+        "SELECT COUNT(*) FROM senders WHERE account_id=?1
+            AND (addr LIKE ?2 OR addr LIKE ?3) AND addr<>?4 COLLATE NOCASE",
+    )?;
+    let on_calendar = count(&format!(
+        "SELECT COUNT(DISTINCT lower(g.email)) FROM calendar_event_guests g
+           JOIN calendar_events e ON e.account_id=g.account_id
+            AND e.calendar_id=g.calendar_id AND e.event_id=g.event_id
+          WHERE g.account_id=?1 AND g.is_self=0 AND (g.email LIKE ?2 OR g.email LIKE ?3)
+            AND g.email<>?4 COLLATE NOCASE AND {COMMITTED_EVENT_SQL}"
+    ))?;
+    Ok(Some(serde_json::json!({
+        "domain": domain,
+        "people_owner_wrote_to": wrote_to,
+        "other_senders": other_senders,
+        "people_on_calendar": on_calendar,
+    })))
+}
+
+/// [`outreach_history`]'s query: `?1` account, `?2` the message being
+/// triaged (never counted), `?3` the window's start.
+const OUTREACH_HISTORY_SQL: &str = "SELECT json_extract(d.decision_json,'$.outreach.kind'),
+     COUNT(*),
+     SUM(COALESCE(json_extract(d.decision_json,'$.attention.show_in_fye'),0)),
+     SUM(t.opened_at IS NOT NULL),
+     SUM(EXISTS(SELECT 1 FROM messages s
+      WHERE s.account_id=m.account_id AND s.thread_id=m.thread_id
+        AND s.is_sent=1 AND s.received_at>m.received_at))
+     FROM agent_message_decisions d
+     CROSS JOIN messages m ON m.account_id=d.account_id AND m.id=d.message_id
+     LEFT JOIN triage t ON t.account_id=d.account_id AND t.message_id=d.message_id
+     WHERE d.account_id=?1 AND d.message_id<>?2 AND m.received_at>=?3
+      AND CASE WHEN json_valid(d.decision_json) THEN json_type(d.decision_json,'$.outreach') END = 'object'
+     GROUP BY 1 ORDER BY 1";
+
+/// How long back the outreach history counts.
+const OUTREACH_HISTORY_DAYS: i64 = 365;
+
+/// How this owner treated earlier cold outreach, by kind, over the last
+/// [`OUTREACH_HISTORY_DAYS`]: how many pitches arrived, how many triage SHOWED
+/// them (FYE), how many they opened in Passband, and how many they answered.
+/// `shown` is there so the model can tell "ignored what it saw" from "never
+/// saw it": an unwanted pitch goes to Noise, so its zero opens are triage's
+/// own doing and say nothing. Counts only, from stored decisions and stored
+/// mail; no email text. `None` when nothing has been counted yet.
+///
+/// Reads `idx_decisions_outreach` (schema.sql) by naming its expression
+/// exactly, and is DRIVEN FROM IT (`CROSS JOIN`, the pin `auth_hold` uses):
+/// left to choose, the planner walks every message in the window instead,
+/// parsing each one's decision. `outreach_history_reads_the_outreach_index`
+/// pins the plan.
+fn outreach_history(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<Option<serde_json::Value>> {
+    let since = (Utc::now() - chrono::Duration::days(OUTREACH_HISTORY_DAYS)).to_rfc3339();
+    let mut stmt = conn.prepare(OUTREACH_HISTORY_SQL)?;
+    let mut history = serde_json::Map::new();
+    let rows = stmt.query_map(params![account, message, since], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (kind, received, shown, opened, replied) = row?;
+        let Some(kind) = kind else { continue };
+        history.insert(
+            kind,
+            serde_json::json!({
+                "received": received, "shown": shown, "opened": opened, "replied": replied,
+            }),
+        );
+    }
+    Ok((!history.is_empty()).then_some(serde_json::Value::Object(history)))
 }
 
 fn corrections(
@@ -7885,6 +8179,330 @@ mod tests {
         assert_eq!(context.matched_rules.len(), 1);
         assert_eq!(context.matched_rules[0]["id"], 1);
     }
+    /// First contact, each way a thread is warm pinned on its own: the
+    /// sender is someone the owner wrote to, the owner wrote in the thread,
+    /// or someone the owner wrote to wrote in it. A contact merely COPIED on
+    /// inbound mail is not one (anyone can Cc an address): it is counted as
+    /// evidence instead (`copied_contacts`). Recipients are seeded the way
+    /// ingest stores inbound mail, in `to_addrs`/`cc_addrs`.
+    #[test]
+    fn first_contact_is_cold_only_with_no_history_on_the_thread() {
+        let first = |setup: &str| {
+            let store = fixture();
+            store.lock().unwrap().execute_batch(setup).unwrap();
+            let conn = store.lock().unwrap();
+            super::context(&conn, 1, 1).unwrap().first_contact
+        };
+        assert!(first(""), "a stranger on a fresh thread");
+        assert!(!first(
+            "INSERT INTO contacts(account_id,addr,first_seen) VALUES(1,'sender@test','2026-01-01');"
+        ));
+        assert!(
+            first(
+                "INSERT INTO contacts(account_id,addr,first_seen) VALUES(1,'friend@test','2026-01-01');
+                 UPDATE messages SET to_addrs='a@test', cc_addrs='\"Friend, A\" <Friend@test>' WHERE id=1;"
+            ),
+            "a contact copied is evidence, not a gate"
+        );
+        assert!(
+            !first(
+                "INSERT INTO contacts(account_id,addr,first_seen) VALUES(1,'friend@test','2026-01-01');
+                 INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                 VALUES(9,1,'9','one','Friend@test','intro','2026-01-01T00:00:00Z','','');"
+            ),
+            "an introduction: a contact wrote in the thread"
+        );
+        assert!(
+            first(
+                "INSERT INTO contacts(account_id,addr,first_seen) VALUES(1,'A@test','2026-01-01');
+                 INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                 VALUES(9,1,'9','one','a@test','fwd','2026-01-01T00:00:00Z','','');"
+            ),
+            "the owner's own address, a contact by a Bcc to self, warms nothing"
+        );
+        assert!(
+            !first(
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,is_sent)
+                 VALUES(9,1,'9','one','a@test','re','2026-01-01T00:00:00Z','','',1);"
+            ),
+            "the owner wrote in the thread"
+        );
+        assert!(!first("UPDATE messages SET is_spam=1 WHERE id=1;"));
+        // A colleague: authenticated, at the owner's own organization.
+        let colleague = "UPDATE accounts SET email='me@acme.example' WHERE id=1;
+             UPDATE messages SET from_addr='new@acme.example' WHERE id=1;";
+        assert!(
+            !first(&format!(
+                "{colleague} UPDATE messages SET auth_pass=1 WHERE id=1;"
+            )),
+            "a new colleague's first email is not a pitch"
+        );
+        assert!(
+            first(colleague),
+            "an unauthenticated From can name any domain"
+        );
+        assert!(
+            first(
+                "UPDATE accounts SET email='me@gmail.com' WHERE id=1;
+                 UPDATE messages SET from_addr='new@gmail.com', auth_pass=1 WHERE id=1;"
+            ),
+            "freemail is nobody's organization"
+        );
+    }
+
+    /// Copied contacts count people the owner wrote to on the thread's
+    /// inbound To and Cc, never the owner, never another account's contact.
+    #[test]
+    fn copied_contacts_count_people_the_owner_wrote_to() {
+        let store = fixture();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO contacts(account_id,addr,first_seen) VALUES
+                   (1,'friend@test','2026-01-01'),(1,'a@test','2026-01-01'),(2,'other@test','2026-01-01');
+                 UPDATE messages SET to_addrs='A <a@test>, Other <other@test>',
+                   cc_addrs='\"Friend, A\" <FRIEND@test>, stranger@test' WHERE id=1;",
+            )
+            .unwrap();
+        let conn = store.lock().unwrap();
+        assert_eq!(super::copied_contacts(&conn, 1, "one").unwrap(), Some(1));
+        assert_eq!(super::copied_contacts(&conn, 1, "two").unwrap(), None);
+    }
+
+    /// Someone on an event the owner committed to (organized, accepted or
+    /// tentative, on their own calendar, not cancelled) has met them, or is
+    /// about to: not cold. An invitation the owner never answered is not
+    /// that: a stranger can invite anyone. The owner's own entry and a
+    /// colleague at the same domain are not that either.
+    #[test]
+    fn a_sender_on_the_calendar_is_not_first_contact() {
+        let first = |setup: &str| {
+            let store = fixture();
+            store.lock().unwrap().execute_batch(setup).unwrap();
+            let conn = store.lock().unwrap();
+            super::context(&conn, 1, 1).unwrap().first_contact
+        };
+        let event = |organizer: &str, organizer_self: i64, response: &str, extra: &str| {
+            format!(
+                "INSERT INTO calendar_events(account_id,calendar_id,event_id,status,starts_at,start_sort,all_day,
+                   organizer_email,organizer_self,self_response,from_gmail)
+                 VALUES(1,'c','e','confirmed','2026-01-01','2026-01-01',0,'{organizer}',{organizer_self},'{response}',0);
+                 {extra}"
+            )
+        };
+        let guest = |email: &str, is_self: i64| {
+            format!(
+                "INSERT INTO calendar_event_guests(account_id,calendar_id,event_id,position,email,response,is_self)
+                 VALUES(1,'c','e',1,'{email}','accepted',{is_self});"
+            )
+        };
+        assert!(
+            !first(&event("a@test", 1, "", &guest("Sender@test", 0))),
+            "a guest on the owner's own event"
+        );
+        assert!(
+            !first(&event("sender@test", 0, "accepted", "")),
+            "the organizer of an event the owner accepted"
+        );
+        assert!(
+            first(&event("sender@test", 0, "needsAction", "")),
+            "an invitation the owner never answered"
+        );
+        assert!(
+            first(&event("x@test", 0, "needsAction", &guest("sender@test", 0))),
+            "a guest on an invitation the owner never answered"
+        );
+        assert!(
+            first(&event(
+                "sender@test",
+                0,
+                "accepted",
+                "UPDATE calendar_events SET from_gmail=1;"
+            )),
+            "an event read out of mail is the sender's word"
+        );
+        assert!(
+            first(&event(
+                "sender@test",
+                0,
+                "accepted",
+                "UPDATE calendar_events SET status='cancelled';"
+            )),
+            "a cancelled event"
+        );
+        assert!(
+            first(&event("a@test", 1, "", &guest("colleague@test", 0))),
+            "a colleague is evidence, not a gate"
+        );
+        assert!(
+            first(&event("a@test", 1, "", &guest("sender@test", 1))),
+            "the owner's own entry"
+        );
+    }
+
+    /// The organization evidence: counts at the sender's domain and its
+    /// subdomains, never the sender, never a lookalike, calendar people only
+    /// on events the owner committed to, and nothing at all for
+    /// unauthenticated mail or freemail.
+    #[test]
+    fn sender_organisation_counts_the_domain_for_authenticated_mail_only() {
+        let store = fixture();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "UPDATE messages SET from_addr='rep@acme.example', auth_pass=1 WHERE id=1;
+                 INSERT INTO contacts(account_id,addr,first_seen) VALUES
+                   (1,'alice@acme.example','2026-01-01'),(1,'bob@eu.acme.example','2026-01-01'),
+                   (1,'eve@notacme.example','2026-01-01'),(2,'carol@acme.example','2026-01-01');
+                 INSERT INTO senders(account_id,addr,first_seen,last_received_at) VALUES
+                   (1,'rep@acme.example','2026-01-01','2026-01-01'),(1,'billing@acme.example','2026-01-01','2026-01-01');
+                 INSERT INTO calendar_events(account_id,calendar_id,event_id,status,starts_at,start_sort,all_day,organizer_self)
+                   VALUES(1,'c','e','confirmed','2026-01-01','2026-01-01',0,1),
+                         (1,'c','x','confirmed','2026-01-01','2026-01-01',0,0);
+                 INSERT INTO calendar_event_guests(account_id,calendar_id,event_id,position,email,response)
+                   VALUES(1,'c','e',0,'alice@acme.example','accepted'),(1,'c','e',1,'ALICE@acme.example','accepted'),
+                         (1,'c','x',0,'dan@acme.example','accepted');",
+            )
+            .unwrap();
+        let organisation = |setup: &str| {
+            store.lock().unwrap().execute_batch(setup).unwrap();
+            let conn = store.lock().unwrap();
+            super::outreach_evidence_conn(&conn, 1, 1)
+                .unwrap()
+                .organisation
+        };
+        assert_eq!(
+            organisation(""),
+            Some(serde_json::json!({
+                "domain": "acme.example",
+                "people_owner_wrote_to": 2,
+                "other_senders": 1,
+                "people_on_calendar": 1,
+            })),
+            "dan is only on an invitation the owner never answered"
+        );
+        assert_eq!(
+            organisation("UPDATE messages SET auth_pass=0 WHERE id=1;"),
+            None,
+            "a From anyone could write"
+        );
+        assert_eq!(
+            organisation(
+                "UPDATE messages SET auth_pass=1, from_addr='someone@gmail.com' WHERE id=1;"
+            ),
+            None,
+            "freemail names no organization"
+        );
+    }
+
+    /// The outreach history counts earlier pitches by kind, never the one
+    /// being triaged, and counts a pitch the owner answered: its assessment
+    /// is carried (`carried`) once the thread stops being cold.
+    #[test]
+    fn outreach_history_counts_earlier_pitches_by_kind() {
+        let store = fixture();
+        let pitch = |kind: &str, fye: bool, carried: bool| {
+            let mut decision = serde_json::to_value(MessageDecision::default()).unwrap();
+            decision["outreach"] = serde_json::json!({
+                "kind": kind, "shape": "templated", "follow_up": false, "wanted": "unsure",
+                "reason": "", "claimed_role": null, "claimed_organization": null,
+                "carried": carried,
+            });
+            decision["attention"]["show_in_fye"] = fye.into();
+            decision.to_string()
+        };
+        {
+            let conn = store.lock().unwrap();
+            for (id, json) in [
+                (1, pitch("sales", true, false)),
+                (2, pitch("sales", true, true)),
+                (3, pitch("press", false, false)),
+            ] {
+                conn.execute(
+                    "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
+                     VALUES(1,?1,1,?2,'2026-01-01')",
+                    params![id, json],
+                )
+                .unwrap();
+            }
+            // Message 3 is the other account's: never counted here.
+            conn.execute_batch(&format!(
+                "UPDATE triage SET opened_at='2026-01-01' WHERE message_id=2;
+                 INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body,is_sent)
+                 VALUES(9,1,'9','two','a@test','re','{}','','',1);
+                 INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                 VALUES(10,1,'10','ten','new@test','hi','{}','','');",
+                (Utc::now() + Duration::minutes(1)).to_rfc3339(),
+                Utc::now().to_rfc3339(),
+            ))
+            .unwrap();
+        }
+        let conn = store.lock().unwrap();
+        assert!(super::context(&conn, 1, 10).unwrap().first_contact);
+        assert_eq!(
+            super::outreach_evidence_conn(&conn, 1, 10).unwrap().history,
+            Some(serde_json::json!({
+                "sales": {"received": 2, "shown": 2, "opened": 1, "replied": 1}
+            })),
+            "the answered pitch (2, carried) still counts, as replied"
+        );
+        assert_eq!(
+            super::outreach_evidence_conn(&conn, 1, 1)
+                .unwrap()
+                .history
+                .unwrap()["sales"]["received"],
+            1,
+            "never the message being triaged"
+        );
+        assert_eq!(
+            super::context(&conn, 1, 10).unwrap().outreach_history,
+            None,
+            "a context load never pays for the evidence"
+        );
+    }
+
+    /// The history runs on every first-contact triage: it reads the partial
+    /// index, never every decision in the mailbox. Pins the query to
+    /// `idx_decisions_outreach` in schema.sql.
+    /// First contact asks the calendar about every non-contact sender, on
+    /// every context load: both halves seek the NOCASE email indexes
+    /// (schema.sql), never walk the calendar.
+    #[test]
+    fn sender_on_calendar_seeks_by_address() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        let plan: Vec<String> = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                super::sender_on_calendar_sql()
+            ))
+            .unwrap()
+            .query_map(params![1, "x@test"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let plan = plan.join("\n");
+        assert!(plan.contains("idx_calendar_event_guests_email"), "{plan}");
+        assert!(plan.contains("idx_calendar_events_organizer"), "{plan}");
+    }
+
+    #[test]
+    fn outreach_history_reads_the_outreach_index() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {OUTREACH_HISTORY_SQL}"))
+            .unwrap()
+            .query_map(params![1, 1, "2026-01-01"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let plan = plan.join("\n");
+        assert!(plan.contains("idx_decisions_outreach"), "{plan}");
+    }
+
     #[test]
     fn context_carries_every_general_rule_whatever_the_sender() {
         let store = fixture();
@@ -8880,6 +9498,12 @@ fn human_inventory(
             // Own mail sits in no zone: a decision left from when it was read
             // as inbound would label it with a page that will not list it.
             placement: placement(decision.as_ref().filter(|_| !row.own), in_fye, is_auth),
+            outreach: decision
+                .as_ref()
+                .filter(|_| !row.own)
+                .and_then(|d| d.outreach.as_ref())
+                .filter(|o| !o.carried)
+                .map(|o| o.kind),
             surfaced_at: row.surfaced,
             resolved_at: row.resolved,
             remind_at: row.reminder,

@@ -42,6 +42,7 @@ struct AuthPolicyTests {
         aMissingRouteFallsBackQuietly()
         aDisagreeingListResendsOnceThenShowsTheServer()
         feedRowsAreAuthByTheirOwnDecision()
+        feedRowsSayWhenAPitchIsCold()
         eventsBecomeRevealableMeta()
         sendersWithNoServiceNeverMakeABurst()
         theRevealAsksAndOffersUndo()
@@ -476,6 +477,37 @@ struct AuthPolicyTests {
             of: #","auth":{"kinds":["account_change"],"evidence":[],"critical":true}"#, with: "")
         let p = try? JSONDecoder().decode(AgentFeedItem.self, from: Data(plain.utf8))
         expect(p != nil && p.map { AuthPolicy.authMeta(for: $0.row, sealed: nil) } == .some(nil), "no auth block, not auth")
+    }
+
+    /// agent-triage-v28: a cold pitch in For your eyes says so; an older
+    /// daemon's row, or a malformed block, is simply not a pitch.
+    static func feedRowsSayWhenAPitchIsCold() {
+        let json = """
+            {"message_id":7,"thread_id":"t7","from_addr":"rep@vendor.example","subject":"Quick question","received_at":"2026-11-19T10:00:00Z",
+             "decision":{"kinds":["correspondence"],"destinations":[],"summary":"Cold sales pitch for an analytics tool.","reason":"r",
+               "outreach":{"kind":"sales","shape":"personal","follow_up":false,"wanted":"likely","reason":"r","claimed_role":null,"claimed_organization":null}},
+             "attention":{"show_in_fye":true,"state":"informational","summary":"","factors":{"urgency":0,"action_need":0,"personal_relevance":0,"importance":0.5}},"score":1}
+            """
+        let row = (try? JSONDecoder().decode(AgentFeedItem.self, from: Data(json.utf8)))?.row
+        expect(row?.outreachLabel == "cold sales", "the pitch's kind names the chip")
+        let bad = json.replacingOccurrences(of: #""kind":"sales""#, with: #""kind":7"#)
+        let tolerant = (try? JSONDecoder().decode(AgentFeedItem.self, from: Data(bad.utf8)))?.row
+        expect(tolerant != nil && tolerant?.outreachLabel == nil, "a malformed block does not fail the row")
+        let novel = json.replacingOccurrences(of: #""kind":"sales""#, with: #""kind":"brand_new""#)
+        expect((try? JSONDecoder().decode(AgentFeedItem.self, from: Data(novel.utf8)))?.row.outreachLabel == "cold", "an unknown kind is still cold")
+        let answered = json.replacingOccurrences(of: #""follow_up":false"#, with: #""follow_up":false,"carried":true"#)
+        let carried = (try? JSONDecoder().decode(AgentFeedItem.self, from: Data(answered.utf8)))?.row
+        expect(carried != nil && carried?.outreachLabel == nil, "a pitch the owner answered wears no cold label")
+        // An older daemon never sent the key: renamed, it is one this
+        // client has never heard of.
+        let old = json.replacingOccurrences(of: #""outreach":"#, with: #""unheard_of":"#)
+        let plain = (try? JSONDecoder().decode(AgentFeedItem.self, from: Data(old.utf8)))?.row
+        expect(plain != nil && plain?.outreachLabel == nil, "an older daemon's row is not a pitch")
+        for label in ["sales", "recruiting", "investor", "partnership", "press", "services", "favor_ask", "other"]
+            .compactMap({ kind -> String? in var r = plain; r?.outreach = kind; return r?.outreachLabel })
+        {
+            expect(!label.contains("\u{2014}") && !label.contains("\u{2013}"), "no dashes in \(label)")
+        }
     }
 
     static func eventsBecomeRevealableMeta() {

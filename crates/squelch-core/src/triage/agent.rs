@@ -14,11 +14,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The version of the prompt with the `understanding` flag ON: the file plus
 /// [`UNDERSTANDING_SEGMENTS`]. A const because a const is what a stored string
 /// is compared against; what a run reports is [`prompt_version`].
-pub const PROMPT_VERSION: &str = "agent-triage-v27";
+pub const PROMPT_VERSION: &str = "agent-triage-v29";
 /// The version of the prompt with the flag OFF: the prompt file alone, with
 /// none of the flag's segments (a test pins that). Its own string: the file
-/// gained the effort paragraph in v26, so it is no longer v24's text.
-pub const PROMPT_VERSION_BASE: &str = "agent-triage-v26";
+/// gained the effort paragraph in v26 and the cold outreach paragraph in v28
+/// (v29 under the flag).
+pub const PROMPT_VERSION_BASE: &str = "agent-triage-v28";
 
 /// The version a run reports, by the variant it ran: decisions and their
 /// diagnostics carry it, and an eval groups gold runs by it, so two different
@@ -339,6 +340,12 @@ async fn run_bounded(
                     Ok(()) => {
                         let mut decision = *decision;
                         normalize_decision(&mut decision);
+                        OutreachAssessment::apply_gate(
+                            &mut decision,
+                            context.first_contact,
+                            context.surface_rule,
+                            context.previous_outreach.as_ref(),
+                        );
                         return Ok(AgentRun {
                             decision,
                             source_message_ids: sources.into_iter().collect(),
@@ -1388,6 +1395,33 @@ fn decision_schema_body() -> Value {
                 ),
             ])),
         ),
+        (
+            "outreach",
+            nullable(object(vec![
+                (
+                    "kind",
+                    enumeration(&[
+                        "sales",
+                        "recruiting",
+                        "investor",
+                        "partnership",
+                        "press",
+                        "services",
+                        "favor_ask",
+                        "other",
+                    ]),
+                ),
+                (
+                    "shape",
+                    enumeration(&["mail_merge", "templated", "personal"]),
+                ),
+                ("follow_up", boolean()),
+                ("wanted", enumeration(&["likely", "unsure", "unlikely"])),
+                ("reason", text()),
+                ("claimed_role", nullable(text())),
+                ("claimed_organization", nullable(text())),
+            ])),
+        ),
     ])
 }
 /// The step schema the model answers with. `with_review` adds the
@@ -1469,7 +1503,8 @@ mod tests {
     /// calendar event fields (about 860 bytes) and `reading_kind` landed
     /// together at 9,027: a new field should fit under it, a second copy of
     /// the shared definitions should not. Raised from 9,500 when `effort`
-    /// (about 250 bytes, agent-triage-v26) took it to 9,629.
+    /// (about 250 bytes, agent-triage-v26) took it to 9,629, and from 9,800
+    /// when `outreach` (about 650 bytes, agent-triage-v28) took it to 10,280.
     #[test]
     fn step_schema_stays_compact_and_its_refs_resolve() {
         // The larger shape is the one the size bound is about.
@@ -1477,7 +1512,7 @@ mod tests {
         let encoded = serde_json::to_string(&schema).unwrap();
         eprintln!("step schema: {} bytes", encoded.len());
         assert!(
-            encoded.len() < 9_800,
+            encoded.len() < 10_600,
             "step schema grew to {} bytes",
             encoded.len()
         );
@@ -1924,7 +1959,7 @@ mod tests {
                 PROMPT_VERSION_BASE,
                 PROMPT_VERSION
             ),
-            (2_000, "agent-triage-v26", "agent-triage-v27")
+            (2_000, "agent-triage-v28", "agent-triage-v29")
         );
     }
     /// OFF IS THE PROMPT AS IT WAS. With the `understanding` flag off, both
@@ -2479,6 +2514,196 @@ mod tests {
             RecordProposal::Event { identity: None, .. }
         ));
     }
+    /// agent-triage-v28: outreach is offered and nullable, reads as absent on
+    /// a stored decision, and the prompt takes cold mail off the one-to-one
+    /// notification floor.
+    #[test]
+    fn outreach_is_offered_and_cold_mail_leaves_the_floor() {
+        let schema = decision_schema();
+        let outreach = &schema["properties"]["outreach"];
+        assert_eq!(outreach["anyOf"][1], json!({"type": "null"}));
+        let fields = &outreach["anyOf"][0]["properties"];
+        assert_eq!(
+            fields["wanted"]["enum"],
+            json!(["likely", "unsure", "unlikely"])
+        );
+        assert_eq!(
+            fields["shape"]["enum"],
+            json!(["mail_merge", "templated", "personal"])
+        );
+        for field in ["claimed_role", "claimed_organization"] {
+            assert_eq!(fields[field]["anyOf"][1], json!({"type": "null"}));
+        }
+        // Every kind the schema offers decodes to an `OutreachKind`.
+        for kind in fields["kind"]["enum"].as_array().unwrap() {
+            serde_json::from_value::<OutreachKind>(kind.clone()).unwrap();
+        }
+        let mut stored = serde_json::to_value(valid()).unwrap();
+        stored.as_object_mut().unwrap().remove("outreach");
+        let old: MessageDecision = serde_json::from_value(stored).unwrap();
+        assert_eq!(old.outreach, None);
+        assert!(SYSTEM.contains("Cold outreach on first contact never takes these floors"));
+        assert!(SYSTEM.contains("always null when first_contact is false"));
+        assert!(SYSTEM.contains("Never state an outreach_history figure"));
+        // A first email that continues something from elsewhere is not cold,
+        // but only on the owner's own records, never the sender's say-so.
+        assert!(SYSTEM.contains("so the claim alone proves nothing"));
+        assert!(SYSTEM.contains("Inbound demand is never outreach"));
+        assert!(SYSTEM.contains("the line is drawn at fit, not at politeness or polish"));
+        // Corroboration the sender cannot plant, tied to the sender.
+        assert!(SYSTEM.contains("a confirmation they sent included, corroborates nothing"));
+        assert!(SYSTEM.contains("must tie this sender to the thread, not only the topic"));
+        assert!(SYSTEM.contains("belongs in neither For your eyes nor Reading"));
+    }
+
+    fn pitch(wanted: OutreachWanted) -> MessageDecision {
+        let mut decision = valid();
+        decision.attention.show_in_fye = true;
+        decision.notification.importance = 70;
+        decision.outreach = Some(OutreachAssessment {
+            kind: OutreachKind::Sales,
+            wanted,
+            ..Default::default()
+        });
+        decision
+    }
+
+    /// The application's half of outreach. Off first contact nothing is
+    /// placed as a pitch, and only an assessment already stored is carried
+    /// (marked) so the history keeps it. On first contact an unsure pitch
+    /// never pushes and an unwanted one is Noise: not FYE, not Reading, no
+    /// push. Only a sender rule that asks to SEE the mail lifts the caps.
+    #[test]
+    fn the_outreach_gate_holds_first_contact_and_places_unwanted_pitches() {
+        let mut warm = pitch(OutreachWanted::Unlikely);
+        OutreachAssessment::apply_gate(&mut warm, false, false, None);
+        assert_eq!(warm.outreach, None, "not cold, whatever the model said");
+        assert!(warm.attention.show_in_fye, "and nothing else is touched");
+        assert_eq!(warm.notification.importance, 70);
+
+        let earlier = OutreachAssessment {
+            kind: OutreachKind::Recruiting,
+            ..Default::default()
+        };
+        let mut answered = pitch(OutreachWanted::Unlikely);
+        answered.outreach = None;
+        OutreachAssessment::apply_gate(&mut answered, false, false, Some(&earlier));
+        let carried = answered
+            .outreach
+            .expect("the answered pitch is still a pitch");
+        assert!(carried.carried);
+        assert_eq!(carried.kind, OutreachKind::Recruiting);
+        assert!(!carried.worth_research());
+        assert!(answered.attention.show_in_fye, "carried places nothing");
+        assert_eq!(answered.notification.importance, 70);
+
+        let mut unwanted = pitch(OutreachWanted::Unlikely);
+        unwanted.destinations = vec![MessageDestination::Reading];
+        unwanted.reading_kind = Some(ReadingKind::Promotion);
+        OutreachAssessment::apply_gate(&mut unwanted, true, false, None);
+        assert!(!unwanted.attention.show_in_fye);
+        assert!(unwanted.destinations.is_empty(), "Noise, not Reading");
+        assert_eq!(unwanted.reading_kind, None);
+        assert_eq!(
+            unwanted.notification.importance,
+            OutreachAssessment::UNWANTED_MAX_IMPORTANCE
+        );
+        assert!(unwanted.outreach.is_some_and(|o| !o.carried));
+
+        let mut unsure = pitch(OutreachWanted::Unsure);
+        OutreachAssessment::apply_gate(&mut unsure, true, false, None);
+        assert_eq!(
+            unsure.notification.importance,
+            OutreachAssessment::UNSURE_MAX_IMPORTANCE,
+            "an unsure pitch never pushes"
+        );
+        assert!(
+            unsure.attention.show_in_fye,
+            "where it goes is the model's call"
+        );
+
+        let mut likely = pitch(OutreachWanted::Likely);
+        OutreachAssessment::apply_gate(&mut likely, true, false, None);
+        assert!(likely.attention.show_in_fye);
+        assert_eq!(likely.notification.importance, 70);
+
+        for wanted in [OutreachWanted::Unlikely, OutreachWanted::Unsure] {
+            let mut ruled = pitch(wanted);
+            OutreachAssessment::apply_gate(&mut ruled, true, true, None);
+            assert!(
+                ruled.attention.show_in_fye,
+                "a rule asking to see it outranks the guess"
+            );
+            assert_eq!(ruled.notification.importance, 70);
+        }
+    }
+
+    /// The gate runs inside a real run, on the snapshot's facts: a model
+    /// that calls an unwanted cold pitch important still cannot push it.
+    #[tokio::test]
+    async fn a_run_applies_the_outreach_gate() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let decision = serde_json::to_value(pitch(OutreachWanted::Unlikely)).unwrap();
+        let responses = Arc::new(Mutex::new(std::collections::VecDeque::from([json!({
+            "result": {"step": "finish", "decision": decision}
+        })])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/", post(mock_provider))
+            .with_state(responses);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = reqwest::Client::new();
+        let connection = AgentConnection {
+            http: &http,
+            url: &url,
+            api_key: "test",
+            provider: Stage2Provider::OpenAI,
+            model: "test",
+            effort: None,
+        };
+        let context = ContextSnapshot {
+            thread_id: "thread".into(),
+            initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+            source_message_ids: vec![7],
+            first_contact: true,
+            ..Default::default()
+        };
+        let run = run_agent(
+            connection,
+            &AgentTriageConfig::default(),
+            context,
+            &NoEvidence,
+        )
+        .await
+        .expect("the run finishes");
+        assert!(!run.decision.attention.show_in_fye);
+        assert_eq!(
+            run.decision.notification.importance,
+            OutreachAssessment::UNWANTED_MAX_IMPORTANCE
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn only_personal_pitches_the_owner_might_want_are_worth_research() {
+        let assess = |shape, wanted| OutreachAssessment {
+            shape,
+            wanted,
+            ..Default::default()
+        };
+        use OutreachShape::*;
+        use OutreachWanted::*;
+        assert!(assess(Personal, Likely).worth_research());
+        assert!(assess(Personal, Unsure).worth_research());
+        assert!(!assess(Personal, Unlikely).worth_research());
+        assert!(!assess(Templated, Likely).worth_research());
+        assert!(!assess(MailMerge, Unsure).worth_research());
+    }
+
     /// agent-triage-v26: effort is offered, nullable, a closed task set, and
     /// clamped rather than failed.
     #[test]

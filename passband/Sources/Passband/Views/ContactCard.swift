@@ -390,7 +390,9 @@ private struct ContactCard: View {
                     if let result = r.result, !researching {
                         Chip(
                             text: verdictLabel(result.verdict), tone: verdictTone(result.verdict),
-                            symbol: verdictSymbol(result.verdict))
+                            symbol: verdictSymbol(result.verdict)
+                        )
+                        .help(verdictHelp(result.verdict))
                     }
                     Spacer(minLength: 0)
                 }
@@ -424,7 +426,8 @@ private struct ContactCard: View {
             }
             if !result.checks.isEmpty {
                 VStack(alignment: .leading, spacing: Space.s4) {
-                    ForEach(result.checks) { check in
+                    // By position: two checks may word the same claim.
+                    ForEach(Array(result.checks.enumerated()), id: \.offset) { _, check in
                         HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                             Image(systemName: checkSymbol(check.status))
                                 .font(Typo.ui(10, weight: .semibold))
@@ -473,7 +476,7 @@ private struct ContactCard: View {
             case "unavailable":
                 quiet("Looking people up isn't available on this setup.")
             case "failed":
-                quiet("Couldn't look them up. Try again tomorrow.")
+                quiet("Couldn't look them up. Try again in a few minutes.")
             case "capped":
                 quiet("That's all the lookups for today. Try again tomorrow.")
             default:
@@ -516,10 +519,24 @@ private struct ContactCard: View {
 
         private func verdictLabel(_ v: SenderResearch.Verdict) -> String {
             switch v {
-            case .verified: "checks out"
+            case .verified: "org domain matches"
             case .plausible: "plausible"
             case .unverified: "unverified"
             case .suspicious: "suspicious"
+            }
+        }
+
+        /// What each verdict does and does not say. `verified` is held by the
+        /// daemon to: a search ran, a source backs a claim, and their address
+        /// is on the organization's own domain. It says nothing more about
+        /// who wrote the mail.
+        private func verdictHelp(_ v: SenderResearch.Verdict) -> String {
+            switch v {
+            case .verified:
+                "Their address is on the organization's own domain and a source backs a claim. It doesn't prove who wrote this."
+            case .plausible: "What they say fits what the search found, but nothing confirms it."
+            case .unverified: "The search found nothing to back what they say."
+            case .suspicious: "Something the search found disagrees with what they say."
             }
         }
 
@@ -567,20 +584,27 @@ private struct ContactCard: View {
         private func loadResearch() async {
             research = nil
             do {
-                var r = try await APIClient.shared.senderResearch(who.address)
+                let r = try await APIClient.shared.senderResearch(who.address)
                 research = r
-                // A lookup triage started is running now: check back while
-                // the card is open, for as long as a lookup can take.
-                var polls = 0
-                while r.status == "running", polls < 30 {
-                    try await Task.sleep(for: .seconds(4))
-                    r = try await APIClient.shared.senderResearch(who.address)
-                    research = r
-                    polls += 1
-                }
+                try await follow(r)
             } catch {
                 // An older daemon (404), a failed read, or the card closed:
                 // no section.
+            }
+        }
+
+        /// A lookup already running (one triage started, or a click that
+        /// found one in flight): check back while the card is open, for as
+        /// long as a lookup can take. The daemon reports a run that never
+        /// finished as nothing once it is stale, which ends the loop too.
+        private func follow(_ first: SenderResearch) async throws {
+            var r = first
+            var polls = 0
+            while r.status == "running", polls < 30 {
+                try await Task.sleep(for: .seconds(4))
+                r = try await APIClient.shared.senderResearch(who.address)
+                research = r
+                polls += 1
             }
         }
 
@@ -589,9 +613,13 @@ private struct ContactCard: View {
             researching = true
             Task {
                 defer { researching = false }
-                if let r = try? await APIClient.shared.runSenderResearch(who.address) {
-                    research = r
+                guard let r = try? await APIClient.shared.runSenderResearch(who.address) else {
+                    return
                 }
+                research = r
+                // An automatic run was already in flight: the click paid
+                // nothing and waits for that one.
+                try? await follow(r)
             }
         }
     #endif

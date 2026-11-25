@@ -3310,10 +3310,9 @@ struct SenderResearch: Codable, Sendable, Equatable {
         var what_it_does: String?
         var size_hint: String?
     }
-    struct Check: Codable, Sendable, Equatable, Identifiable {
+    struct Check: Codable, Sendable, Equatable {
         var claim: String
         var status: CheckStatus
-        var id: String { claim }
     }
     struct Result: Codable, Sendable, Equatable {
         var who: String

@@ -343,7 +343,8 @@ async fn run_bounded(
                         OutreachAssessment::apply_gate(
                             &mut decision,
                             context.first_contact,
-                            !context.rule_ids.is_empty(),
+                            context.surface_rule,
+                            context.previous_outreach.as_ref(),
                         );
                         return Ok(AgentRun {
                             decision,
@@ -2549,6 +2550,10 @@ mod tests {
         assert!(SYSTEM.contains("so the claim alone proves nothing"));
         assert!(SYSTEM.contains("Inbound demand is never outreach"));
         assert!(SYSTEM.contains("the line is drawn at fit, not at politeness or polish"));
+        // Corroboration the sender cannot plant, tied to the sender.
+        assert!(SYSTEM.contains("a confirmation they sent included, corroborates nothing"));
+        assert!(SYSTEM.contains("must tie this sender to the thread, not only the topic"));
+        assert!(SYSTEM.contains("belongs in neither For your eyes nor Reading"));
     }
 
     fn pitch(wanted: OutreachWanted) -> MessageDecision {
@@ -2563,40 +2568,124 @@ mod tests {
         decision
     }
 
-    /// The application's half of outreach: no assessment survives off first
-    /// contact, and an unwanted pitch is never FYE or a push, unless the
-    /// owner's own sender rule matched.
+    /// The application's half of outreach. Off first contact nothing is
+    /// placed as a pitch, and only an assessment already stored is carried
+    /// (marked) so the history keeps it. On first contact an unsure pitch
+    /// never pushes and an unwanted one is Noise: not FYE, not Reading, no
+    /// push. Only a sender rule that asks to SEE the mail lifts the caps.
     #[test]
     fn the_outreach_gate_holds_first_contact_and_places_unwanted_pitches() {
         let mut warm = pitch(OutreachWanted::Unlikely);
-        OutreachAssessment::apply_gate(&mut warm, false, false);
+        OutreachAssessment::apply_gate(&mut warm, false, false, None);
         assert_eq!(warm.outreach, None, "not cold, whatever the model said");
         assert!(warm.attention.show_in_fye, "and nothing else is touched");
         assert_eq!(warm.notification.importance, 70);
 
+        let earlier = OutreachAssessment {
+            kind: OutreachKind::Recruiting,
+            ..Default::default()
+        };
+        let mut answered = pitch(OutreachWanted::Unlikely);
+        answered.outreach = None;
+        OutreachAssessment::apply_gate(&mut answered, false, false, Some(&earlier));
+        let carried = answered
+            .outreach
+            .expect("the answered pitch is still a pitch");
+        assert!(carried.carried);
+        assert_eq!(carried.kind, OutreachKind::Recruiting);
+        assert!(!carried.worth_research());
+        assert!(answered.attention.show_in_fye, "carried places nothing");
+        assert_eq!(answered.notification.importance, 70);
+
         let mut unwanted = pitch(OutreachWanted::Unlikely);
-        OutreachAssessment::apply_gate(&mut unwanted, true, false);
+        unwanted.destinations = vec![MessageDestination::Reading];
+        unwanted.reading_kind = Some(ReadingKind::Promotion);
+        OutreachAssessment::apply_gate(&mut unwanted, true, false, None);
         assert!(!unwanted.attention.show_in_fye);
+        assert!(unwanted.destinations.is_empty(), "Noise, not Reading");
+        assert_eq!(unwanted.reading_kind, None);
         assert_eq!(
             unwanted.notification.importance,
             OutreachAssessment::UNWANTED_MAX_IMPORTANCE
         );
-        assert!(unwanted.outreach.is_some());
+        assert!(unwanted.outreach.is_some_and(|o| !o.carried));
 
-        let mut ruled = pitch(OutreachWanted::Unlikely);
-        OutreachAssessment::apply_gate(&mut ruled, true, true);
-        assert!(
-            ruled.attention.show_in_fye,
-            "the owner's rule outranks the guess"
+        let mut unsure = pitch(OutreachWanted::Unsure);
+        OutreachAssessment::apply_gate(&mut unsure, true, false, None);
+        assert_eq!(
+            unsure.notification.importance,
+            OutreachAssessment::UNSURE_MAX_IMPORTANCE,
+            "an unsure pitch never pushes"
         );
-        assert_eq!(ruled.notification.importance, 70);
+        assert!(
+            unsure.attention.show_in_fye,
+            "where it goes is the model's call"
+        );
 
-        for wanted in [OutreachWanted::Likely, OutreachWanted::Unsure] {
-            let mut kept = pitch(wanted);
-            OutreachAssessment::apply_gate(&mut kept, true, false);
-            assert!(kept.attention.show_in_fye);
-            assert_eq!(kept.notification.importance, 70);
+        let mut likely = pitch(OutreachWanted::Likely);
+        OutreachAssessment::apply_gate(&mut likely, true, false, None);
+        assert!(likely.attention.show_in_fye);
+        assert_eq!(likely.notification.importance, 70);
+
+        for wanted in [OutreachWanted::Unlikely, OutreachWanted::Unsure] {
+            let mut ruled = pitch(wanted);
+            OutreachAssessment::apply_gate(&mut ruled, true, true, None);
+            assert!(
+                ruled.attention.show_in_fye,
+                "a rule asking to see it outranks the guess"
+            );
+            assert_eq!(ruled.notification.importance, 70);
         }
+    }
+
+    /// The gate runs inside a real run, on the snapshot's facts: a model
+    /// that calls an unwanted cold pitch important still cannot push it.
+    #[tokio::test]
+    async fn a_run_applies_the_outreach_gate() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let decision = serde_json::to_value(pitch(OutreachWanted::Unlikely)).unwrap();
+        let responses = Arc::new(Mutex::new(std::collections::VecDeque::from([json!({
+            "result": {"step": "finish", "decision": decision}
+        })])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/", post(mock_provider))
+            .with_state(responses);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = reqwest::Client::new();
+        let connection = AgentConnection {
+            http: &http,
+            url: &url,
+            api_key: "test",
+            provider: Stage2Provider::OpenAI,
+            model: "test",
+            effort: None,
+        };
+        let context = ContextSnapshot {
+            thread_id: "thread".into(),
+            initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+            source_message_ids: vec![7],
+            first_contact: true,
+            ..Default::default()
+        };
+        let run = run_agent(
+            connection,
+            &AgentTriageConfig::default(),
+            context,
+            &NoEvidence,
+        )
+        .await
+        .expect("the run finishes");
+        assert!(!run.decision.attention.show_in_fye);
+        assert_eq!(
+            run.decision.notification.importance,
+            OutreachAssessment::UNWANTED_MAX_IMPORTANCE
+        );
+        server.abort();
     }
 
     #[test]

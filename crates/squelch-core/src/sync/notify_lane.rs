@@ -38,6 +38,9 @@ pub struct Candidate {
     /// stays under the push threshold here, and the full decision, which
     /// knows whether the owner wants it, may push it later.
     is_first_contact: bool,
+    /// A matched sender rule asks to SEE this sender's mail (`surface`): the
+    /// one thing that lets a first-contact message push from here.
+    surface_rule: bool,
     is_bulk: bool,
     sender_preferences: Option<String>,
     /// The owner's general rules (not about one sender), as JSON.
@@ -64,6 +67,10 @@ impl Candidate {
             body: crate::text::truncate_chars(&message.body, cfg.max_body_chars.saturating_add(1)),
             is_known_contact: context.sender_is_contact,
             is_first_contact: context.first_contact,
+            surface_rule: context.matched_rules.iter().any(|rule| {
+                rule.get("disposition").and_then(|d| d.as_str())
+                    == Some(crate::types::Disposition::Surface.as_str())
+            }),
             is_bulk: message.is_bulk,
             sender_preferences: if context.matched_rules.is_empty() {
                 None
@@ -76,6 +83,20 @@ impl Candidate {
                 Some(serde_json::to_string(&context.general_rules).expect("rules are JSON"))
             },
         })
+    }
+}
+
+/// THE FAST LANE NEVER PUSHES A STRANGER. On first contact (not auth mail,
+/// and no sender rule asking to see it) the fast score is held under the push
+/// threshold, whatever the small model said: it cannot tell a pitch the owner
+/// wants from one they do not, and a push it sent could not be taken back.
+/// The full decision, which can, pushes it through `request_assessed` if it
+/// clears the threshold there (and the outreach gate lets it).
+fn first_contact_ceiling(importance: u8, first_contact: bool, min_importance: u8) -> u8 {
+    if first_contact {
+        importance.min(min_importance.saturating_sub(1))
+    } else {
+        importance
     }
 }
 
@@ -123,6 +144,7 @@ pub fn candidate(
         // Not computed on this path. Unknown is "not first contact", which
         // leaves the lane exactly as it was: the careful answer for a push.
         is_first_contact: false,
+        surface_rule: false,
         is_bulk: triaged.message.list_unsubscribe.is_some(),
         sender_preferences,
         general_rules: None,
@@ -293,6 +315,7 @@ impl<S: Store + 'static> NotifyLane<S> {
             body,
             is_known_contact,
             is_first_contact,
+            surface_rule,
             is_bulk,
             sender_preferences,
             general_rules,
@@ -406,7 +429,11 @@ impl<S: Store + 'static> NotifyLane<S> {
         let now = Utc::now();
         match outcome {
             Ok(Ok(LlmOutcome::Ok(out, _))) => {
-                let importance = out.notify_importance as u8;
+                let importance = first_contact_ceiling(
+                    out.notify_importance as u8,
+                    is_first_contact && !surface_rule && !out.is_auth,
+                    self.cfg.min_importance,
+                );
                 let code_line = out.login_code.as_ref().and_then(|code| {
                     code.notification(out.is_auth, &m.sender, &subject, &body, eligible_at, now)
                 });
@@ -1692,6 +1719,64 @@ mod tests {
             rows.iter()
                 .any(|r| r.lane == LaneLabel::Deliberate && r.decision == NotifyDecision::Sent)
         );
+    }
+
+    /// The fast lane never pushes a stranger: a first-contact pitch the small
+    /// model scores 90 is held under the threshold, and the full decision is
+    /// what pushes it, if it clears there. A sender rule asking to see the
+    /// mail, and sign-in mail, push from here as before.
+    #[tokio::test]
+    async fn first_contact_waits_for_the_full_decision() {
+        let (store, account) = store();
+        let now = Utc::now();
+        let (url, _) = mock(200, verdict(90), false).await;
+        let lane = lane(&store, account, Some(&url), cfg());
+        let (id, candidate) = ingest(&store, account, "cold", &note_eml(now), now, &cfg());
+        let context = durable_context(&store, account, id);
+        assert!(context.first_contact, "a stranger on a fresh thread");
+        let mut cold = candidate.unwrap();
+        cold.is_first_contact = true;
+        lane.clone().run(cold).await.unwrap();
+        let row = ledger(&store, account, id).unwrap();
+        assert_eq!(row.decision, NotifyDecision::DeclinedByModel);
+        assert_eq!(row.notify_importance, Some(cfg().min_importance - 1));
+        assert!(store.events_after(account, 0, 10).unwrap().is_empty());
+        lane.request_assessed(&context, false, &advice(), "full-model")
+            .unwrap();
+        assert_eq!(
+            store.events_after(account, 0, 10).unwrap().len(),
+            1,
+            "the full decision pushes it"
+        );
+
+        let (id, candidate) = ingest(&store, account, "ruled", &note_eml(now), now, &cfg());
+        let mut ruled = candidate.unwrap();
+        ruled.is_first_contact = true;
+        ruled.surface_rule = true;
+        lane.clone().run(ruled).await.unwrap();
+        assert_eq!(
+            ledger(&store, account, id).unwrap().decision,
+            NotifyDecision::Sent,
+            "a rule asking to see this sender"
+        );
+    }
+
+    #[test]
+    fn a_surface_rule_is_read_from_the_matched_rules() {
+        let (store, acct) = store();
+        let now = Utc::now();
+        let (id, _) = ingest(&store, acct, "rule", &note_eml(now), now, &cfg());
+        let mut context = durable_context(&store, acct, id);
+        context.matched_rules = vec![serde_json::json!({"id":1,"disposition":"squelch"})];
+        assert!(
+            !candidate_from_context(&context, &cfg())
+                .unwrap()
+                .surface_rule
+        );
+        context.matched_rules = vec![serde_json::json!({"id":1,"disposition":"surface"})];
+        let candidate = candidate_from_context(&context, &cfg()).unwrap();
+        assert!(candidate.surface_rule);
+        assert!(candidate.is_first_contact);
     }
 
     #[tokio::test]

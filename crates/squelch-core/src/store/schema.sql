@@ -2264,6 +2264,12 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);
+-- First contact (`store::sqlite::agent_triage::sender_on_calendar`) asks, for
+-- every inbound message from a non-contact, whether the sender organized an
+-- event the owner committed to: seek it by address instead of walking the
+-- calendar.
+CREATE INDEX IF NOT EXISTS idx_calendar_events_organizer
+    ON calendar_events(account_id, organizer_email COLLATE NOCASE);
 -- An event's attendees as Google lists them, at most 100, in Google's order
 -- (`position`). OTHER PEOPLE'S ADDRESSES: HUMAN-DOOR ONLY like the event
 -- itself, never logged, never in the audit log (which carries a count).
@@ -2283,6 +2289,9 @@ CREATE TABLE IF NOT EXISTS calendar_event_guests (
     is_self      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, calendar_id, event_id, position)
 );
+-- The same question for guests (`sender_on_calendar`): seek by address.
+CREATE INDEX IF NOT EXISTS idx_calendar_event_guests_email
+    ON calendar_event_guests(account_id, email COLLATE NOCASE);
 CREATE TRIGGER IF NOT EXISTS calendar_event_guests_follow_event
 AFTER DELETE ON calendar_events BEGIN
     DELETE FROM calendar_event_guests

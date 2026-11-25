@@ -495,6 +495,9 @@ struct AuthPolicyTests {
         expect(tolerant != nil && tolerant?.outreachLabel == nil, "a malformed block does not fail the row")
         let novel = json.replacingOccurrences(of: #""kind":"sales""#, with: #""kind":"brand_new""#)
         expect((try? JSONDecoder().decode(AgentFeedItem.self, from: Data(novel.utf8)))?.row.outreachLabel == "cold", "an unknown kind is still cold")
+        let answered = json.replacingOccurrences(of: #""follow_up":false"#, with: #""follow_up":false,"carried":true"#)
+        let carried = (try? JSONDecoder().decode(AgentFeedItem.self, from: Data(answered.utf8)))?.row
+        expect(carried != nil && carried?.outreachLabel == nil, "a pitch the owner answered wears no cold label")
         // An older daemon never sent the key: renamed, it is one this
         // client has never heard of.
         let old = json.replacingOccurrences(of: #""outreach":"#, with: #""unheard_of":"#)

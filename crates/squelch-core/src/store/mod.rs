@@ -2377,6 +2377,20 @@ pub trait Store:
     /// See [`SqliteStore::owner_zone`](sqlite::SqliteStore::owner_zone).
     fn owner_zone(&self, account_id: AccountId) -> Result<crate::owner_clock::OwnerZone>;
 
+    /// The first-contact evidence for a triage run on `message_id`: earlier
+    /// outreach by kind, the sender's organization in the owner's mail, and
+    /// contacts copied on the thread. Domain scans, so only the triage worker
+    /// calls it, and only on first contact. See
+    /// [`SqliteStore::outreach_evidence`](sqlite::SqliteStore).
+    fn outreach_evidence(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<crate::store::agent_triage::OutreachEvidence> {
+        let _ = (account_id, message_id);
+        Ok(Default::default())
+    }
+
     /// The relationship ledger's block for `addr` in the triage agent's
     /// context (docs/UNDERSTANDING.md §2.1), `None` when the key must be
     /// ABSENT: no row, or the first-run backfill has not filled the table.

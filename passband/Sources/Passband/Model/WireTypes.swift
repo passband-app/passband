@@ -3746,7 +3746,9 @@ struct AgentFeedItem: Codable, Sendable {
             subject: subject, status: .new, surfaced_at: received_at)
         row.auth_kinds = decision.auth?.kinds
         row.auth_critical = decision.auth?.critical
-        row.outreach = decision.outreach?.kind
+        // A pitch the owner went on to answer is carried for the history
+        // only: it is a conversation now, and wears no cold label.
+        row.outreach = decision.outreach?.carried == true ? nil : decision.outreach?.kind
         return row
     }
 
@@ -3783,19 +3785,23 @@ struct AgentMessageDecision: Codable, Sendable {
     var outreach: AgentOutreach? = nil
 }
 
-/// core::triage::decision::OutreachAssessment, the one field a row reads.
+/// core::triage::decision::OutreachAssessment, the fields a row reads.
 /// Forgiving like `AgentAuthAssessment`: a row that cannot decode loses the
 /// whole feed page, and this is presentation, not membership.
 struct AgentOutreach: Codable, Sendable {
     var kind: String?
+    /// Kept after the owner replied, for the history only (`carried`).
+    var carried: Bool?
 
-    init(kind: String? = nil) {
+    init(kind: String? = nil, carried: Bool? = nil) {
         self.kind = kind
+        self.carried = carried
     }
 
     init(from decoder: Decoder) throws {
         let c = try? decoder.container(keyedBy: CodingKeys.self)
         kind = (try? c?.decodeIfPresent(String.self, forKey: .kind)) ?? nil
+        carried = (try? c?.decodeIfPresent(Bool.self, forKey: .carried)) ?? nil
     }
 }
 

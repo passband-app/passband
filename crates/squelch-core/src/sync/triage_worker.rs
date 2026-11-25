@@ -311,6 +311,31 @@ pub(crate) fn attach_relationship<S: Store + ?Sized>(
     }
 }
 
+/// Attach the first-contact evidence (`Store::outreach_evidence`) to a triage
+/// run's context, on first contact only. A fault reading it costs the model
+/// the evidence, never the run: first contact itself, and the gate it drives,
+/// were already computed by the context load.
+pub(crate) fn attach_outreach_evidence<S: Store + ?Sized>(
+    store: &S,
+    account: AccountId,
+    context: &mut AgentContext,
+) {
+    context.outreach_history = None;
+    context.sender_organisation = None;
+    context.copied_contacts = None;
+    if !context.first_contact {
+        return;
+    }
+    match store.outreach_evidence(account, context.message.id) {
+        Ok(evidence) => {
+            context.outreach_history = evidence.history;
+            context.sender_organisation = evidence.organisation;
+            context.copied_contacts = evidence.copied_contacts;
+        }
+        Err(e) => eprintln!("squelch: outreach evidence unreadable ({e}); triaging without it"),
+    }
+}
+
 /// The agent's starting context. `clock` is this run's "now" in the owner's
 /// zone (#526): fixed once per run, so a zone that changes mid-run cannot
 /// change an answer already given. Public so an offline replay builds its
@@ -366,6 +391,9 @@ pub fn snapshot(
     if let Some(organisation) = &context.sender_organisation {
         initial["sender_organisation"] = organisation.clone();
     }
+    if let Some(copied) = context.copied_contacts {
+        initial["copied_contacts"] = copied.into();
+    }
     ContextSnapshot {
         account_id: job.account_id,
         message_id: job.message_id,
@@ -387,6 +415,14 @@ pub fn snapshot(
         // Set by the worker from the `understanding` flag; off is main's prompt.
         understanding: false,
         first_contact: context.first_contact,
+        surface_rule: context.matched_rules.iter().any(|rule| {
+            rule.get("disposition").and_then(|d| d.as_str())
+                == Some(crate::types::Disposition::Surface.as_str())
+        }),
+        previous_outreach: context
+            .previous_decision
+            .as_ref()
+            .and_then(|d| d.outreach.clone()),
     }
 }
 
@@ -534,6 +570,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             &mut context,
             understanding,
         );
+        attach_outreach_evidence(self.store.as_ref(), self.account_id, &mut context);
         let now = Utc::now();
         let retry_after = self.agent_retry_after.load(Ordering::Relaxed);
         let episode = self.agent_last_cooldown_end.load(Ordering::Relaxed);

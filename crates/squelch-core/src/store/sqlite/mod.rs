@@ -1903,6 +1903,14 @@ impl Store for SqliteStore {
         self.relationship_context(account_id, addr)
     }
 
+    fn outreach_evidence(
+        &self,
+        account_id: AccountId,
+        message_id: i64,
+    ) -> Result<crate::store::agent_triage::OutreachEvidence> {
+        agent_triage::outreach_evidence_conn(&*self.lock()?, account_id, message_id)
+    }
+
     fn drain_relationship_dirty(&self, account_id: AccountId, max: usize) -> Result<usize> {
         self.drain_relationship_dirty(account_id, max)
     }

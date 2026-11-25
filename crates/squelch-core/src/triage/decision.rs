@@ -202,37 +202,71 @@ pub struct OutreachAssessment {
     /// mail does not say.
     pub claimed_role: Option<String>,
     pub claimed_organization: Option<String>,
+    /// Set by the application, never the model: the assessment was made on
+    /// first contact and CARRIED onto a later decision about the same message
+    /// once the thread stopped being cold (the owner replied). Kept so the
+    /// outreach history still counts the pitches the owner answered; it
+    /// places nothing and labels nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub carried: bool,
 }
 
 impl OutreachAssessment {
     /// The highest notification importance an unwanted pitch may carry:
     /// under the push threshold (`notify.min_importance`, 40).
     pub const UNWANTED_MAX_IMPORTANCE: u8 = 30;
+    /// The highest an unsure pitch may carry: also under the push threshold,
+    /// so a pitch the model could not call never interrupts. Where it is
+    /// PLACED stays the model's call.
+    pub const UNSURE_MAX_IMPORTANCE: u8 = 35;
 
     /// The application's half of outreach, run at commit after
     /// [`normalize`](super::agent::normalize_decision):
     ///
-    /// - Mail that is not first contact carries no assessment, whatever the
-    ///   model said: someone the owner wrote to is never "cold".
-    /// - An unwanted pitch is not FYE and never pushes, UNLESS a sender rule
-    ///   matched this mail (`has_sender_rule`): the owner's own rule outranks
-    ///   Passband's guess about what they want, and the model weighed it.
-    pub fn apply_gate(decision: &mut MessageDecision, first_contact: bool, has_sender_rule: bool) {
+    /// - Mail that is not first contact is never placed as a pitch, whatever
+    ///   the model said: someone the owner wrote to is never "cold". The
+    ///   assessment made while it WAS first contact (`previous`) is carried,
+    ///   marked [`carried`](Self::carried), so the outreach history keeps
+    ///   counting the pitches the owner went on to answer.
+    /// - An unsure pitch never pushes.
+    /// - An unwanted pitch is Noise: not FYE, not Reading, and never pushes.
+    ///
+    /// Both caps yield to a sender rule that asks to SEE this mail
+    /// (`surface_rule`): the owner's own word outranks Passband's guess.
+    pub fn apply_gate(
+        decision: &mut MessageDecision,
+        first_contact: bool,
+        surface_rule: bool,
+        previous: Option<&OutreachAssessment>,
+    ) {
         if !first_contact {
-            decision.outreach = None;
+            decision.outreach = previous.map(|assessment| OutreachAssessment {
+                carried: true,
+                ..assessment.clone()
+            });
             return;
         }
-        let Some(outreach) = &decision.outreach else {
+        let Some(outreach) = &mut decision.outreach else {
             return;
         };
-        if outreach.wanted != OutreachWanted::Unlikely || has_sender_rule {
+        outreach.carried = false;
+        if surface_rule {
             return;
         }
-        decision.attention.show_in_fye = false;
-        decision.notification.importance = decision
-            .notification
-            .importance
-            .min(Self::UNWANTED_MAX_IMPORTANCE);
+        let cap = match outreach.wanted {
+            OutreachWanted::Likely => return,
+            OutreachWanted::Unsure => Self::UNSURE_MAX_IMPORTANCE,
+            OutreachWanted::Unlikely => {
+                decision.attention.show_in_fye = false;
+                decision
+                    .destinations
+                    .retain(|d| *d != MessageDestination::Reading);
+                decision.reading_kind = None;
+                decision.ends = None;
+                Self::UNWANTED_MAX_IMPORTANCE
+            }
+        };
+        decision.notification.importance = decision.notification.importance.min(cap);
     }
 
     /// Whether this pitch is one the sender research should look into: one
@@ -240,7 +274,9 @@ impl OutreachAssessment {
     /// pitches are never researched; there is nothing to verify that changes
     /// what the owner does.
     pub fn worth_research(&self) -> bool {
-        self.shape == OutreachShape::Personal && self.wanted != OutreachWanted::Unlikely
+        !self.carried
+            && self.shape == OutreachShape::Personal
+            && self.wanted != OutreachWanted::Unlikely
     }
 }
 

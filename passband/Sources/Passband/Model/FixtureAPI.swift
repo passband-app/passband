@@ -410,6 +410,9 @@ actor FixtureAPI {
                 "addr": query["addr"] ?? "", "is_self": false, "known_contact": false,
                 "groups": [Any](), "recent_threads": [Any](),
             ])
+        case ("GET", "/client/person/research"), ("POST", "/client/person/research"):
+            // The fixture daemon has no model: nothing to look anyone up with.
+            data = try json(["status": "none", "available": false])
         case ("GET", "/client/drafts"):
             // Newest first, like the daemon. `forwards=1` is not consulted:
             // there is no older app in the fixture inbox to hide forwards from.

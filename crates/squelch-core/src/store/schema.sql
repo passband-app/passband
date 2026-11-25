@@ -2838,3 +2838,27 @@ CREATE TABLE IF NOT EXISTS memory_entries (
 -- The triage read: one account's entries for a handful of scopes, every job.
 CREATE INDEX IF NOT EXISTS idx_memory_entries_scope
     ON memory_entries(account_id, scope);
+-- Sender research, "Who is this?" (docs/SENDER-RESEARCH.md): one row per
+-- (account, sender), the newest research on them. `status` is queued (triage
+-- asked, the refine lane has not run it), running, done, unavailable (this
+-- endpoint has no web search, or refused it) or failed. A `done` row stands
+-- for `[research] cache_days` and is the cache: no sender is researched twice
+-- inside it. `result_json` is `triage::research::ResearchResult`: UNTRUSTED
+-- model output about a stranger, shown on the contact card and nowhere else.
+-- HUMAN DOOR ONLY: never read by triage and never served on `/mcp`.
+CREATE TABLE IF NOT EXISTS sender_research (
+    account_id    INTEGER NOT NULL,
+    sender_addr   TEXT NOT NULL,
+    status        TEXT NOT NULL
+                  CHECK (status IN ('queued','running','done','unavailable','failed')),
+    "trigger"     TEXT NOT NULL CHECK ("trigger" IN ('auto','on_demand')),
+    result_json   TEXT,
+    failure       TEXT,
+    web_searches  INTEGER NOT NULL DEFAULT 0,
+    requested_at  TEXT NOT NULL,
+    researched_at TEXT,
+    PRIMARY KEY(account_id, sender_addr)
+);
+-- The refine lane's claim: the newest queued row.
+CREATE INDEX IF NOT EXISTS idx_sender_research_queue
+    ON sender_research(account_id, requested_at) WHERE status = 'queued';

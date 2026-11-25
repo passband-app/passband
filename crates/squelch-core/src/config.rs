@@ -608,6 +608,56 @@ impl Default for TranslateConfig {
     }
 }
 
+/// Sender research, "Who is this?" (docs/SENDER-RESEARCH.md): one model call
+/// with Anthropic's web search tool that checks who a cold sender says they
+/// are. Runs the INVESTIGATION model (stage 2's, priced at its rates under the
+/// `research` ledger category). File-only, like `[translate]`: no env var and
+/// no warden knob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResearchConfig {
+    /// Whether research runs at all, automatic or on demand. Default `true`.
+    pub enabled: bool,
+    /// AUTOMATIC runs per account per UTC day: the ones triage queues for a
+    /// personal cold pitch. Counted before each call, like every cap here.
+    /// On-demand runs never count against it. Default 20.
+    pub auto_daily_cap: u32,
+    /// On-demand runs per account per UTC day: a runaway guard on the
+    /// contact card's button, not a quota anyone should meet. Default 50.
+    pub on_demand_daily_cap: u32,
+    /// How long one sender's result stands before research may run on them
+    /// again. Default 90 days.
+    pub cache_days: i64,
+    /// The web search tool's `max_uses`. Default 5.
+    pub max_searches: u32,
+    /// The web search tool's `type`. Default `web_search_20250305`, the
+    /// basic tool: every model and every platform a gateway may route to
+    /// takes it, it is eligible for zero data retention, and each search is a
+    /// direct call whose results come back as top-level
+    /// `web_search_tool_result` blocks. `web_search_20260209` adds dynamic
+    /// filtering (searches run from a code execution container the API
+    /// provisions), which older models and some platforms reject and which is
+    /// not ZDR eligible; the parser still reads its results, which arrive in
+    /// the same blocks with a `caller` field.
+    pub web_search_tool: String,
+    /// Reasoning depth, sent as `output_config.effort`. Default `low`.
+    pub effort: Option<String>,
+}
+
+impl Default for ResearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_daily_cap: 20,
+            on_demand_daily_cap: 50,
+            cache_days: 90,
+            max_searches: 5,
+            web_search_tool: "web_search_20250305".to_string(),
+            effort: Some("low".to_string()),
+        }
+    }
+}
+
 impl Config {
     /// Whether a translator will ever work a queued row: translation is on
     /// and an LLM is configured. The same two facts
@@ -2269,6 +2319,9 @@ pub struct Config {
     pub translate: TranslateConfig,
     /// Smart re-notify's tunables; whether it runs is a hidden feature.
     pub renotify: RenotifyConfig,
+    /// Sender research ("Who is this?"). Defaults only; read from the
+    /// `[research]` table.
+    pub research: ResearchConfig,
 }
 
 impl Default for Config {
@@ -2300,6 +2353,7 @@ impl Default for Config {
             carriers: CarriersConfig::default(),
             translate: TranslateConfig::default(),
             renotify: RenotifyConfig::default(),
+            research: ResearchConfig::default(),
         }
     }
 }

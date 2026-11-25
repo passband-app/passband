@@ -1520,8 +1520,16 @@ pub const PROFILE_USAGE_CATEGORY: &str = "profile";
 /// Does this ledger category run the investigation model (stage 2's)? The one
 /// list both cost estimators consult, for the reason [`runs_notify_model`] is.
 pub fn runs_investigation_model(category: &str) -> bool {
-    category == "stage2" || category == PROFILE_USAGE_CATEGORY
+    category == "stage2"
+        || category == PROFILE_USAGE_CATEGORY
+        || category == RESEARCH_USAGE_CATEGORY
 }
+
+/// Sender research (docs/SENDER-RESEARCH.md). Runs the investigation model,
+/// so it is priced at the stage-2 rates ([`runs_investigation_model`]). Its
+/// web searches are billed per search by the provider, beside these tokens,
+/// and are counted on the research row, not in this ledger.
+pub const RESEARCH_USAGE_CATEGORY: &str = "research";
 
 /// Does this ledger category run [`crate::config::NotifyConfig::model`]? The
 /// ONE list both cost estimators consult, so a small-model category cannot be

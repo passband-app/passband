@@ -818,6 +818,26 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                         if job.arrival_eligible {
                             self.notify_wake.notify_one();
                         }
+                        // A personal cold pitch the owner might want, just
+                        // arrived: queue research on its sender
+                        // (docs/SENDER-RESEARCH.md). Never for a backfill or
+                        // a revisit (`arrival_eligible` is false), and only
+                        // with the `research` feature. Only the address
+                        // goes; the refine lane builds the rest from stored
+                        // fields. Best-effort: a decision is never failed
+                        // over it.
+                        if let Err(e) = crate::triage::research::queue_for_decision(
+                            &*self.store,
+                            &self.config.research,
+                            &self.features,
+                            self.account_id,
+                            &context.message.from_addr,
+                            &run.decision,
+                            job.arrival_eligible,
+                            Utc::now(),
+                        ) {
+                            eprintln!("squelch: sender research not queued ({e})");
+                        }
                     }
                     Ok(AgentCommitOutcome::Stale) => {
                         self.metrics.record_agent(AgentVerdict::Stale);

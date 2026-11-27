@@ -11,7 +11,7 @@
 
 # Trixie, not bookworm: ort's prebuilt static onnxruntime is compiled against
 # glibc >= 2.38 (__isoc23_strtol and friends); bookworm's 2.36 can't link it.
-FROM --platform=$BUILDPLATFORM rust:1-slim-trixie@sha256:cc9edbcadf2c27013a642b1d1bb7504e26b1142d6b5ebe58f64cf2eb2bc128ae AS chef
+FROM --platform=$BUILDPLATFORM rust:1-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS chef
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 WORKDIR /build

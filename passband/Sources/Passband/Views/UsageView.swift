@@ -35,6 +35,13 @@ struct UsageView: View {
         remembered: UsagePages.remembered(in: .standard), staged: FixtureMode.stagesUsage,
         stagedPage: FixtureMode.stageValue("page"))
 
+    /// Whether the page prices triage. A self-hosted daemon runs on its
+    /// owner's own provider keys, so the spend is theirs to watch. A hosted
+    /// mailbox (`*.passband.email`) runs on ours: the bill is not the
+    /// reader's, and a dollar figure there reads as one they will be sent.
+    /// Calls and tokens stay; only the money goes.
+    private var showsCost: Bool { !HostedServer.isHosted(url: store.settings?.serverURL ?? "") }
+
     private static let windows: [(value: Int, label: String)] = [
         (7, "7 days"), (30, "30 days"), (90, "90 days"),
     ]
@@ -133,7 +140,9 @@ struct UsageView: View {
                 tiles(series)
                 mailCard(series)
                 signalCard(series)
-                spendCard(series)
+                if showsCost {
+                    spendCard(series)
+                }
                 HStack(alignment: .top, spacing: Space.s16) {
                     categoryCard(series)
                     assistantCard.frame(width: Typo.measure(280))
@@ -190,11 +199,13 @@ struct UsageView: View {
                 delta: deltaLabel(s.signalShareDelta, upIsGood: true), versus: versus,
                 spark: s.rollingShare.map(\.share), tint: Palette.chartSignal,
                 sub: "\(UsageText.count(s.attention)) of \(UsageText.count(s.triaged)) triaged")
-            StatTile(
-                label: "Triage spend", value: Fmt.fmtCost(s.spendTotal),
-                delta: deltaLabel(s.spendDelta, upIsGood: false), versus: versus,
-                spark: s.spend.map(\.total), tint: Palette.accent,
-                sub: s.costPerEmail.map { "\(Fmt.fmtCost($0)) per email" } ?? "no priced calls")
+            if showsCost {
+                StatTile(
+                    label: "Triage spend", value: Fmt.fmtCost(s.spendTotal),
+                    delta: deltaLabel(s.spendDelta, upIsGood: false), versus: versus,
+                    spark: s.spend.map(\.total), tint: Palette.accent,
+                    sub: s.costPerEmail.map { "\(Fmt.fmtCost($0)) per email" } ?? "no priced calls")
+            }
         }
         // ONE HEIGHT FOR THE ROW: each tile fills it (`StatTile`), so a tile
         // with a shorter line never ends above its neighbours.
@@ -474,7 +485,7 @@ struct UsageView: View {
             note: "\(UsageText.count(s.calls)) calls · \(Fmt.compactCount(s.tokens)) tokens"
         ) {
             if s.categories.isEmpty {
-                EmptyNote("No triage spend in this window.")
+                EmptyNote(showsCost ? "No triage spend in this window." : "No triage calls in this window.")
             } else {
                 Grid(alignment: .trailing, horizontalSpacing: Space.s14, verticalSpacing: Space.scaled(5)) {
                     GridRow {
@@ -482,7 +493,9 @@ struct UsageView: View {
                         Text("model").gridColumnAlignment(.leading)
                         Text("calls")
                         Text("tokens")
-                        Text("cost")
+                        if showsCost {
+                            Text("cost")
+                        }
                     }
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
@@ -504,8 +517,10 @@ struct UsageView: View {
                                 .font(Typo.num(11)).foregroundStyle(Palette.inkDim)
                             Text(Fmt.compactCount(c.tokens))
                                 .font(Typo.num(11)).foregroundStyle(Palette.inkDim)
-                            Text(Fmt.fmtCost(c.cost))
-                                .font(Typo.num(11, weight: .semibold)).foregroundStyle(Palette.ink)
+                            if showsCost {
+                                Text(Fmt.fmtCost(c.cost))
+                                    .font(Typo.num(11, weight: .semibold)).foregroundStyle(Palette.ink)
+                            }
                         }
                     }
                 }

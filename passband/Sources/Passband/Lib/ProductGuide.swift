@@ -698,7 +698,7 @@ enum ProductGuide {
     /// single page). Off, the guide says what main says.
     private static let usageSubpages = """
         - Usage, at the bottom of the rail, has two subpages, switched by the control beside the page's title: Mail and Understanding. It opens on whichever was used last, and on Mail the first time.
-        - Mail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days, picked at the top right.
+        - Mail: mail in and out, signal against noise, triage calls (with their estimated cost on a self-hosted server; a hosted passband.email mailbox shows no triage cost) and assistant usage, over 7, 30 or 90 days, picked at the top right.
         - Understanding shows who the user's mail says they are. It covers everything Passband has counted, so it has no 7, 30 or 90 day picker.
         - People is a chart of the people and senders Passband has counted most: further right is more mail a month, higher is closer. Senders the user replies to sit in the top band ("People you answer"), senders they read but never answer in the middle ("Things you read"), and mostly unopened mail at the bottom ("Things you ignore"). Senders from the last two weeks sit in a strip on the left ("Just arrived"). Hovering a dot names the sender and says what the numbers are, such as "replied to 31 of 33, usually within the hour" or "opened 2 of 38". "table" swaps the chart for the same numbers as a list.
         - Your people lists the eight senders the user answers most surely. "Fading" switches to the eight whose mail is read least. Clicking a name opens that person's contact card.
@@ -707,7 +707,7 @@ enum ProductGuide {
 
     /// The single page's line, as the app topic writes it with the flag off.
     private static let usageLine =
-        "- Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days."
+        "- Usage, at the bottom of the rail: mail in and out, signal against noise, triage calls (with their estimated cost on a self-hosted server; a hosted passband.email mailbox shows no triage cost) and assistant usage, over 7, 30 or 90 days."
 
     private static func withUnderstanding(_ text: String) -> String {
         text.replacingOccurrences(of: usageLine, with: usageSubpages)
@@ -742,7 +742,7 @@ enum ProductGuide {
         - On the iPhone, "What's new" is in Settings (the person icon at the top left of the Sitrep, then Settings at the bottom), in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it.
 
         Usage and audit:
-        - Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days.
+        - Usage, at the bottom of the rail: mail in and out, signal against noise, triage calls (with their estimated cost on a self-hosted server; a hosted passband.email mailbox shows no triage cost) and assistant usage, over 7, 30 or 90 days.
         - Audit log (Settings > Audit, or A on the Emails page): every action taken on the mail by the user or by an agent, with undo for the reversible ones.
 
         Sharing:
